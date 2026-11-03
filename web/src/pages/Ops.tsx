@@ -95,7 +95,7 @@ function readouts(role: Role, st: Stats | null, status: Status): Readout[] {
         : off('映像が止まるまでの余裕', live ? '未取得' : noLink, margin),
       loss(),
       live && st.send_mbps !== null
-        ? { label: '送っているデータ量', value: fixed1(st.send_mbps), unit: 'Mbps', ref: '1 秒あたり。送り直した分を含む', tone: null, spark: send }
+        ? { label: '送っているデータ量', value: fixed1(st.send_mbps), unit: 'Mbps', ref: '1 秒あたり（直近 5 秒の平均）。送り直した分を含む', tone: null, spark: send }
         : off('送っているデータ量', live ? '未取得' : noLink, send),
     ];
   }
@@ -106,7 +106,7 @@ function readouts(role: Role, st: Stats | null, status: Status): Readout[] {
   const target = st ? fixed1(st.delay_target_ms / 1000) : NA;
   return [
     live && st.recv_mbps !== null
-      ? { label: '受け取っているデータ量', value: fixed1(st.recv_mbps), unit: 'Mbps', ref: '1 秒あたり（直近 1 秒の平均）', tone: null, spark: recv }
+      ? { label: '受け取っているデータ量', value: fixed1(st.recv_mbps), unit: 'Mbps', ref: '1 秒あたり（直近 5 秒の平均）', tone: null, spark: recv }
       : off('受け取っているデータ量', live ? '未取得' : noLink, recv),
     loss(),
     live && st.stalls_5m !== null

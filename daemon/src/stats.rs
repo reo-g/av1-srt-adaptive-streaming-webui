@@ -150,6 +150,9 @@ pub struct TickRow {
     pub nd_budget: Option<f64>,
     /// link capacity while the sender is backlogged, kbps (null otherwise)
     pub nd_c: Option<f64>,
+    /// sending-rate cap in force, kbps; a capacity sample at or near it measured the cap, not the line
+    #[serde(rename = "nd_Mnow")]
+    pub nd_mnow: Option<f64>,
 }
 
 /// Controller event (BRIDGE_EVENTS_JSONL); `decide` and `complete` are joined by `cmd`.
@@ -310,6 +313,8 @@ struct TxState {
     rtt: Option<f64>,
     /// (t_s, inBytes) of the last 6 s, for the 5 s mean of the video rate
     input: VecDeque<(f64, f64)>,
+    /// (t_s, byteSent, pktSent, pktRetrans) of the last 6 s, for the 5 s means of the send rate and loss
+    sent: VecDeque<(f64, f64, f64, f64)>,
     drops: Window,
     ack: Option<f64>,
     /// when the last ACK progress was read, and the row time (s) of that progress
@@ -332,6 +337,8 @@ struct RxState {
     loss: Option<f64>,
     retrans: Option<f64>,
     rtt: Option<f64>,
+    /// the last 6 s of rows, for the 5 s means of the rates
+    hist: VecDeque<RcvRow>,
     unrecovered: Window,
     players: BTreeMap<u64, PlayerState>,
     /// each reported stop that ended in the last 5 minutes: (start, end, seconds)
@@ -414,6 +421,7 @@ impl Sampler {
         let r = &mut self.rx;
         r.rcv = tail(RCV);
         (r.prev, r.row_at, r.recv, r.loss, r.retrans, r.rtt) = (None, None, None, None, None, None);
+        r.hist.clear();
         r.unrecovered = Window::default();
     }
 
@@ -556,18 +564,20 @@ impl Sampler {
                     t.input.pop_front();
                 }
             }
+            if let (Some(ts), Some(b), Some(n), Some(rt)) = (r.t_us, r.byte_sent, r.pkt_sent, r.pkt_retrans) {
+                let ts = ts / 1e6;
+                t.sent.push_back((ts, b, n, rt));
+                while t.sent.front().is_some_and(|x| ts - x.0 > 6.0) {
+                    t.sent.pop_front();
+                }
+            }
             latest = Some(r);
         }
         if let Some(cur) = latest {
-            if let Some(p) = &t.prev {
-                let dt = (cur.t_us.unwrap_or(0.0) - p.t_us.unwrap_or(0.0)) / 1e6;
-                if dt > 0.0 {
-                    t.send = delta(p.byte_sent, cur.byte_sent).map(|b| b * 8.0 / dt / 1e6);
-                    t.loss = match (delta(p.pkt_sent, cur.pkt_sent), delta(p.pkt_retrans, cur.pkt_retrans)) {
-                        (Some(s), Some(r)) if s > 0.0 => Some((r / s * 100.0).min(100.0)),
-                        _ => None,
-                    };
-                }
+            // 5 s means: the encoder hands over its output in bursts (a group of frames at a time),
+            // so a 100 ms or 1 s window shows the burst rate, up to the cap, instead of the rate
+            if let Some((send, loss)) = sent_rates(&t.sent) {
+                (t.send, t.loss) = (Some(send), loss);
             }
             t.rtt = cur.rtt;
             t.drops.push(now, cur.pkt_drop);
@@ -616,7 +626,7 @@ impl Sampler {
             st.send_late_5m = t.drops.delta().map(|d| d as i64);
             if let (true, Some(k)) = (fresh(t.tick_at), &t.tick) {
                 st.target_mbps = k.cur.map(|c| round(c / 1000.0, 2));
-                st.bandwidth_mbps = k.nd_c.map(|c| round(c / 1000.0, 2));
+                st.bandwidth_mbps = line_capacity(k).map(|c| round(c / 1000.0, 2));
                 st.delay_margin_s = k.nd_budget.map(|b| floor1(b.max(0.0)));
             }
             // Silence between the rows' own times; by arrival time only when no rows come at all.
@@ -662,10 +672,22 @@ impl Sampler {
             Some(f) => f.lines().iter().filter_map(|l| parse::<RcvRow>(l)).collect(),
             None => Vec::new(),
         };
-        if let Some(cur) = rows.into_iter().filter(|x| x.rc.unwrap_or(0) == 0 && x.pkt_recv.is_some()).last() {
-            if let Some(p) = &r.prev {
-                let dt = (cur.t_us.unwrap_or(0.0) - p.t_us.unwrap_or(0.0)) / 1e6;
-                if dt > 0.0 {
+        let valid: Vec<RcvRow> = rows.into_iter().filter(|x| x.rc.unwrap_or(0) == 0 && x.pkt_recv.is_some()).collect();
+        for x in &valid {
+            r.hist.push_back(x.clone());
+        }
+        if let Some(last_t) = r.hist.back().and_then(|x| x.t_us) {
+            while r.hist.front().is_some_and(|x| x.t_us.is_none_or(|t| last_t - t > 6e6)) {
+                r.hist.pop_front();
+            }
+        }
+        if let Some(cur) = valid.into_iter().last() {
+            // 5 s means (the stream arrives in bursts of frames), from the oldest row within 5 s
+            let last_t = cur.t_us.unwrap_or(0.0);
+            let first = r.hist.iter().find(|x| x.t_us.is_some_and(|t| last_t - t <= 5e6)).cloned();
+            if let Some(p) = first.as_ref().or(r.prev.as_ref()) {
+                let dt = (last_t - p.t_us.unwrap_or(0.0)) / 1e6;
+                if dt >= 1.0 - 1e-6 {
                     r.recv = delta(p.byte_recv, cur.byte_recv).map(|b| b * 8.0 / dt / 1e6);
                     let got = delta(p.pkt_recv, cur.pkt_recv);
                     let lost = delta(p.pkt_loss, cur.pkt_loss);
@@ -739,6 +761,30 @@ impl RxState {
 }
 
 /// Video rate (Mbps) from the input byte counter: the mean over the last 5 s (at least 1 s).
+/// Send rate (Mbps) and resent share of the packets (%) over the last 5 s; None before 1 s of rows.
+fn sent_rates(sent: &VecDeque<(f64, f64, f64, f64)>) -> Option<(f64, Option<f64>)> {
+    let last = sent.back()?;
+    let first = sent.iter().find(|x| last.0 - x.0 <= 5.0)?;
+    let dt = last.0 - first.0;
+    if dt < 1.0 {
+        return None;
+    }
+    let send = (last.1 - first.1).max(0.0) * 8.0 / dt / 1e6;
+    let (n, r) = (last.2 - first.2, last.3 - first.3);
+    let loss = (n > 0.0).then(|| (r.max(0.0) / n * 100.0).min(100.0));
+    Some((send, loss))
+}
+
+/// The controller's capacity sample, unless it was taken at the sending-rate cap (then the line
+/// has at least that much room and its capacity is not known; the controller uses the same 0.9).
+fn line_capacity(k: &TickRow) -> Option<f64> {
+    let c = k.nd_c?;
+    match k.nd_mnow {
+        Some(m) if m > 0.0 && c >= 0.9 * m => None,
+        _ => Some(c),
+    }
+}
+
 fn video_rate(input: &VecDeque<(f64, f64)>) -> Option<f64> {
     let last = input.back()?;
     let first = input.iter().find(|(t, _)| last.0 - t <= 5.0)?;
@@ -801,6 +847,16 @@ mod tests {
     }
 
     #[test]
+    fn capacity_at_the_cap_is_not_the_line() {
+        let k = |c: Option<f64>, m: Option<f64>| TickRow { cur: None, nd_budget: None, nd_c: c, nd_mnow: m };
+        assert_eq!(line_capacity(&k(Some(5050.0), Some(5000.0))), None, "at the cap: line not measured");
+        assert_eq!(line_capacity(&k(Some(4600.0), Some(5000.0))), None, "0.92 of the cap");
+        assert_eq!(line_capacity(&k(Some(2875.3), Some(5400.0))), Some(2875.3));
+        assert_eq!(line_capacity(&k(Some(2875.3), None)), Some(2875.3));
+        assert_eq!(line_capacity(&k(None, Some(5000.0))), None);
+    }
+
+    #[test]
     fn tx_rates_target_margin_and_bitrate_events() {
         let d = tmpdir("tx");
         let fast: Vec<&str> = FAST_ROWS.lines().collect();
@@ -811,7 +867,7 @@ mod tests {
         append(&d.join(FAST), &fast[..11]);
         append(&d.join(TICKS), &ticks[..2]);
         let o = s.sample(live(&d), t0);
-        assert_eq!(o.stats.send_mbps, None, "a rate needs the previous second");
+        assert_eq!(o.stats.send_mbps, Some(3.7), "1 s of rows is enough for the send rate");
         assert_eq!(o.stats.actual_mbps, Some(3.5), "1 s of input is enough for the video rate");
         assert_eq!(o.stats.target_mbps, Some(3.5));
         assert_eq!(o.stats.delay_margin_s, Some(6.4));
@@ -824,7 +880,7 @@ mod tests {
         append(&d.join(TICKS), &ticks[2..]);
         append(&d.join(EVENTS), &EVENT_ROWS.lines().collect::<Vec<_>>());
         let o = s.sample(live(&d), t0 + Duration::from_secs(1));
-        // 10 rows of +46240 B in 1.0 s; 10 of 340 packets resent; 20 × 43750 B of video in 2.0 s
+        // 20 rows of +46240 B in 2.0 s; 20 of 680 packets resent; 20 × 43750 B of video in 2.0 s
         assert_eq!(o.stats.send_mbps, Some(3.7));
         assert_eq!(o.stats.loss_pct, Some(2.9));
         assert_eq!(o.stats.actual_mbps, Some(3.5));

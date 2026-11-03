@@ -84,7 +84,8 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 
 pub fn round(v: f64, digits: i32) -> f64 {
     let p = 10f64.powi(digits);
-    (v * p).round() / p
+    // + 0.0 turns a negative zero (e.g. -0.04 rounded) into 0, so the UI never shows "-0.0"
+    (v * p).round() / p + 0.0
 }
 
 /// One decimal, rounded down (a margin that just fell below 3 s reads 2.9, not 3.0).

@@ -67,10 +67,10 @@ export const alertText = (role: Role, a: Alert, peerId: string | null): string =
       return `回線の損失が多く、映像が乱れるおそれがあります（${n1(p.loss_pct)}%）。`;
     case 'peer_rejected_passphrase':
       return role === 'tx'
-        ? `${peerOf(role, peerId)} が接続を拒否しています。パスフレーズが一致していません。`
-        : `${peerOf(role, peerId)} からの接続を拒否しました。パスフレーズが一致していません。`;
+        ? `${peerOf(role, peerId)}が接続を拒否しています。パスフレーズが一致していません。`
+        : `${peerOf(role, peerId)}からの接続を拒否しました。パスフレーズが一致していません。`;
     case 'peer_unreachable':
-      return `${peerOf(role, peerId)} に接続できません。ケーブルと${role === 'tx' ? '受信機' : '送信機'}の電源を確認してください。`;
+      return `${peerOf(role, peerId)}に接続できません。ケーブルと${role === 'tx' ? '受信機' : '送信機'}の電源を確認してください。`;
     case 'input_lost':
       return '入力信号を検出できません。カメラの接続を確認してください。';
   }
@@ -103,12 +103,12 @@ export const eventText = (role: Role, e: DeviceEvent, peerId: string | null): st
       return `回線の損失が多くなりました（${n1(p.loss_pct)}%）`;
     case 'peer_rejected_passphrase':
       return role === 'tx'
-        ? `${peerOf(role, peerId)} が接続を拒否しました（パスフレーズの不一致）`
-        : `${peerOf(role, peerId)} からの接続を拒否しました（パスフレーズの不一致）`;
+        ? `${peerOf(role, peerId)}が接続を拒否しました（パスフレーズの不一致）`
+        : `${peerOf(role, peerId)}からの接続を拒否しました（パスフレーズの不一致）`;
     case 'peer_disconnected':
-      return `${peerOf(role, peerId)} との接続が切れました`;
+      return `${peerOf(role, peerId)}との接続が切れました`;
     case 'peer_connected':
-      return role === 'tx' ? `${peerOf(role, peerId)} に接続しました` : `${peerOf(role, peerId)} から接続されました`;
+      return role === 'tx' ? `${peerOf(role, peerId)}に接続しました` : `${peerOf(role, peerId)}から接続されました`;
     case 'transport_started':
       return role === 'tx' ? '伝送を開始しました' : `受信を開始しました（${p.format ?? ''}）`;
     case 'transport_stopped':

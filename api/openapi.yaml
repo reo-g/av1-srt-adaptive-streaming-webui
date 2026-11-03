@@ -251,14 +251,14 @@ components:
         rtt_ms: { type: [number, 'null'] }
         last_rtt_ms: { type: [number, 'null'] }
         retrans_pct: { type: [number, 'null'], description: rx only (share of packets that arrived by resending); null on tx }
-        send_mbps: { type: [number, 'null'], description: tx; what goes out on the line, resends included }
+        send_mbps: { type: [number, 'null'], description: tx; what goes out on the line, resends included (5 s mean) }
         target_mbps: { type: [number, 'null'], description: tx; video bitrate aimed at now (automatic step or the fixed value) }
         actual_mbps: { type: [number, 'null'], description: tx; video bitrate actually produced, 5 s mean }
-        bandwidth_mbps: { type: [number, 'null'], description: tx; estimated line capacity, only measurable while the line is crowded }
+        bandwidth_mbps: { type: [number, 'null'], description: tx; estimated line capacity, only measurable while the line is crowded (null while the device's own sending cap is the limit) }
         send_late_5m: { type: [integer, 'null'], description: tx; packets that could not be sent in time, last 5 min }
         delay_margin_s: { type: [number, 'null'], description: "tx; seconds left before the receiver's picture would stop (about 6 s normally); one decimal rounded down, the same value as delay_margin_low.margin_s" }
         delay_margin_warn_s: { type: [number, 'null'], description: tx; delay_margin_low is raised below this margin (about 3 s in the standard profile); null on rx, examples: [3] }
-        recv_mbps: { type: [number, 'null'], description: rx }
+        recv_mbps: { type: [number, 'null'], description: rx; what arrives (5 s mean) }
         stalls_5m: { type: [integer, 'null'], description: rx; times the picture stopped, last 5 min }
         stall_s_5m: { type: [number, 'null'], description: rx; total seconds the picture stood still, last 5 min }
         video_latency_ms: { type: [number, 'null'], description: rx; measured capture-to-display delay, null until really measured (the UI then shows delay_target_ms as an estimate) }
