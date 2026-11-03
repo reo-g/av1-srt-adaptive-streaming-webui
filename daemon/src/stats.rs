@@ -311,9 +311,9 @@ struct TxState {
     send: Option<f64>,
     loss: Option<f64>,
     rtt: Option<f64>,
-    /// (t_s, inBytes) of the last 6 s, for the 5 s mean of the video rate
+    /// (t_s, inBytes) of the last 7 s, for the RATE_WINDOW_S mean of the video rate
     input: VecDeque<(f64, f64)>,
-    /// (t_s, byteSent, pktSent, pktRetrans) of the last 6 s, for the 5 s means of the send rate and loss
+    /// (t_s, byteSent, pktSent, pktRetrans) of the last 7 s, for the means of the send rate and loss
     sent: VecDeque<(f64, f64, f64, f64)>,
     drops: Window,
     ack: Option<f64>,
@@ -560,22 +560,22 @@ impl Sampler {
             if let (Some(ts), Some(b)) = (r.t_us, r.in_bytes) {
                 let ts = ts / 1e6;
                 t.input.push_back((ts, b));
-                while t.input.front().is_some_and(|(x, _)| ts - x > 6.0) {
+                while t.input.front().is_some_and(|(x, _)| ts - x > RATE_WINDOW_S + 1.0) {
                     t.input.pop_front();
                 }
             }
             if let (Some(ts), Some(b), Some(n), Some(rt)) = (r.t_us, r.byte_sent, r.pkt_sent, r.pkt_retrans) {
                 let ts = ts / 1e6;
                 t.sent.push_back((ts, b, n, rt));
-                while t.sent.front().is_some_and(|x| ts - x.0 > 6.0) {
+                while t.sent.front().is_some_and(|x| ts - x.0 > RATE_WINDOW_S + 1.0) {
                     t.sent.pop_front();
                 }
             }
             latest = Some(r);
         }
         if let Some(cur) = latest {
-            // 5 s means: the encoder hands over its output in bursts (a group of frames at a time),
-            // so a 100 ms or 1 s window shows the burst rate, up to the cap, instead of the rate
+            // RATE_WINDOW_S means: the encoder hands over its output in bursts (a group of frames at a
+            // time), so a 100 ms or 1 s window shows the burst rate, up to the cap, instead of the rate
             if let Some((send, loss)) = sent_rates(&t.sent) {
                 (t.send, t.loss) = (Some(send), loss);
             }
@@ -677,14 +677,14 @@ impl Sampler {
             r.hist.push_back(x.clone());
         }
         if let Some(last_t) = r.hist.back().and_then(|x| x.t_us) {
-            while r.hist.front().is_some_and(|x| x.t_us.is_none_or(|t| last_t - t > 6e6)) {
+            while r.hist.front().is_some_and(|x| x.t_us.is_none_or(|t| last_t - t > (RATE_WINDOW_S + 1.0) * 1e6)) {
                 r.hist.pop_front();
             }
         }
         if let Some(cur) = valid.into_iter().last() {
-            // 5 s means (the stream arrives in bursts of frames), from the oldest row within 5 s
+            // RATE_WINDOW_S means (the stream arrives in bursts of frames), from the oldest row within it
             let last_t = cur.t_us.unwrap_or(0.0);
-            let first = r.hist.iter().find(|x| x.t_us.is_some_and(|t| last_t - t <= 5e6)).cloned();
+            let first = r.hist.iter().find(|x| x.t_us.is_some_and(|t| last_t - t <= RATE_WINDOW_S * 1e6)).cloned();
             if let Some(p) = first.as_ref().or(r.prev.as_ref()) {
                 let dt = (last_t - p.t_us.unwrap_or(0.0)) / 1e6;
                 if dt >= 1.0 - 1e-6 {
@@ -761,10 +761,16 @@ impl RxState {
 }
 
 /// Video rate (Mbps) from the input byte counter: the mean over the last 5 s (at least 1 s).
-/// Send rate (Mbps) and resent share of the packets (%) over the last 5 s; None before 1 s of rows.
+/// Window of the rate means: 3 keyframe intervals (the keyframe comes every 2 s, fixed). With a
+/// still picture most of the bytes are keyframes, so a 5 s window held 2 or 3 of them in turn and
+/// the shown rate swung between 2.8 and 4.2 Mbps; a whole number of intervals always holds 3.
+const RATE_WINDOW_S: f64 = 6.0;
+
+/// Send rate (Mbps) and resent share of the packets (%) over the last RATE_WINDOW_S; None before 1 s
+/// of rows.
 fn sent_rates(sent: &VecDeque<(f64, f64, f64, f64)>) -> Option<(f64, Option<f64>)> {
     let last = sent.back()?;
-    let first = sent.iter().find(|x| last.0 - x.0 <= 5.0)?;
+    let first = sent.iter().find(|x| last.0 - x.0 <= RATE_WINDOW_S)?;
     let dt = last.0 - first.0;
     if dt < 1.0 {
         return None;
@@ -787,7 +793,7 @@ fn line_capacity(k: &TickRow) -> Option<f64> {
 
 fn video_rate(input: &VecDeque<(f64, f64)>) -> Option<f64> {
     let last = input.back()?;
-    let first = input.iter().find(|(t, _)| last.0 - t <= 5.0)?;
+    let first = input.iter().find(|(t, _)| last.0 - t <= RATE_WINDOW_S)?;
     let dt = last.0 - first.0;
     (dt >= 1.0).then(|| (last.1 - first.1).max(0.0) * 8.0 / dt / 1e6)
 }
