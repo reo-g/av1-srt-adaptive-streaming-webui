@@ -539,6 +539,8 @@ a:hover {
   border-top: 1px solid var(--rule);
 }
 .details dt {
+  flex: 0 1 auto;
+  min-width: min(8em, 50%);
   color: var(--sub);
 }
 .details dd {
@@ -754,15 +756,6 @@ a:hover {
   font-weight: 600;
   color: var(--err-text);
 }
-.field-warn {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--warn-text);
-}
 .help {
   margin: 6px 0 0;
   font-size: 13px;
@@ -778,6 +771,71 @@ a:hover {
   font-size: 16px;
   font-weight: 500;
 }
+/* checkbox with its label (e.g. 繰り返し再生) */
+.check {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.check.disabled {
+  color: var(--sub);
+}
+/* a choice that exists but cannot be used yet */
+.chip-muted {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--btn-line);
+  border-radius: 3px;
+  color: var(--sub);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+/* radio list where each choice needs a short explanation (e.g. 遅延) */
+.choices {
+  display: grid;
+  gap: 8px;
+}
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--btn-line);
+  border-radius: 4px;
+  background: var(--surf);
+  cursor: pointer;
+}
+.choice input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 3px 0 0;
+  accent-color: var(--accent);
+}
+.choice b {
+  font-weight: 600;
+}
+.choice.on {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.choice.disabled {
+  background: var(--side);
+  color: var(--sub);
+  cursor: default;
+}
+.choice .chip-muted {
+  margin-left: 8px;
+}
 .kv {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
@@ -789,32 +847,6 @@ a:hover {
 }
 .kv dd {
   margin: 0;
-}
-.adv-toggle {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  min-height: 48px;
-  padding: 0 28px;
-  border: 0;
-  border-top: 1px solid var(--rule);
-  background: var(--surf);
-  font-weight: 600;
-  text-align: left;
-  cursor: pointer;
-}
-.adv-toggle svg {
-  transition: transform 0.15s;
-}
-.adv-toggle[aria-expanded='true'] svg {
-  transform: rotate(90deg);
-}
-.adv-toggle .note {
-  margin-left: auto;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--muted);
 }
 
 /* pending changes panel */

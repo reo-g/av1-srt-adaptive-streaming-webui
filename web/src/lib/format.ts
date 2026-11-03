@@ -21,3 +21,6 @@ export const duration = (seconds: number): string => {
 
 export const fixed1 = (v: number) => v.toFixed(1);
 export const int = (v: number) => String(Math.round(v));
+
+/** The file name without its folder: the UI never shows device paths. */
+export const fileName = (path: string) => path.slice(path.lastIndexOf('/') + 1);

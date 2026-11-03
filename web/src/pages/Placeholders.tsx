@@ -119,7 +119,7 @@ export function NetworkPage() {
               回線テスト
             </h2>
             <p className="muted" style={{ margin: '2px 0 12px', fontSize: 13 }}>
-              受信機 {status?.peer.id ?? ''} までの帯域を 10 秒間はかります。伝送中は映像に影響するため、止めてから行ってください。
+              受信機 {status?.peer.id ?? ''} まで、どれだけ送れるかを 10 秒間はかります。伝送中は映像に影響するため、止めてから行ってください。
             </p>
             <button type="button" className="btn btn-primary" onClick={start} disabled={test?.state === 'running'}>
               {test?.state === 'running' ? 'はかっています…' : '回線テストを始める'}
@@ -132,11 +132,11 @@ export function NetworkPage() {
                 </div>
                 {test.result && (
                   <dl className="kv" style={{ marginTop: 12 }}>
-                    <dt>帯域</dt>
+                    <dt>送れた量</dt>
                     <dd>{fixed1(test.result.throughput_mbps)} Mbps</dd>
-                    <dt>パケット損失</dt>
+                    <dt>回線の損失</dt>
                     <dd>{fixed1(test.result.loss_pct)} %</dd>
-                    <dt>揺らぎ</dt>
+                    <dt>揺らぎ（遅れのばらつき）</dt>
                     <dd>{fixed1(test.result.jitter_ms)} ms</dd>
                   </dl>
                 )}

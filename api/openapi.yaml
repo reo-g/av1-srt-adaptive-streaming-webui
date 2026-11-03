@@ -94,7 +94,10 @@ paths:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/VideoSettings' } } } }
     put:
       tags: [video settings]
-      summary: Apply. Returns after the encoder has been re-initialised.
+      summary: Apply. Returns once the device has switched over.
+      description: |
+        A new bitrate or mode is taken over without a gap in the picture (a few seconds).
+        A new input sets the link up again (the receiver's picture stops for about 10 s).
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/VideoSettingsInput' } } } }
       responses:
         '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/ApplyVideoResult' } } } }
@@ -191,10 +194,17 @@ components:
         port: { type: integer }
     Alert:
       type: object
+      description: |
+        delay_margin_low (tx, warn): params margin_s. The margin before the receiver's picture would stop is below Stats.delay_margin_warn_s (about 3 s).
+        video_stalled (rx, warn): params count, seconds, window_s. The picture stopped in the last window_s seconds.
+        loss_high (warn): params loss_pct, threshold_pct. Not raised in the standard delay profile, where losses are recovered by resending.
+        peer_rejected_passphrase (error): kept for when encryption is available.
+        peer_unreachable (error, tx), input_lost (error, tx).
+        Alerts are not dismissed automatically; they clear when the cause clears.
       required: [level, code, since]
       properties:
         level: { type: string, enum: [warn, error] }
-        code: { type: string, enum: [loss_high, frames_dropped, peer_rejected_passphrase, peer_unreachable, input_lost] }
+        code: { type: string, enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_unreachable, input_lost] }
         since: { type: string, format: date-time }
         params: { $ref: '#/components/schemas/Params' }
     Media:
@@ -202,8 +212,8 @@ components:
       required: [kind, label, format, preview_fps, audio, black]
       properties:
         kind: { type: string, enum: [camera, file, output] }
-        label: { type: string, examples: [/dev/video0, SDI OUT 1] }
-        format: { type: [string, 'null'], examples: [1080p59.94] }
+        label: { type: string, description: 'a name the operator recognises: the camera name, the file name (no folder), or the output', examples: [Facecam 4K, sample_2160p30.y4m, OUT 1] }
+        format: { type: [string, 'null'], description: 'width×height, U+3000, frame rate', examples: ['3840×2160　30p'] }
         preview_fps: { type: number }
         audio: { type: string, enum: [none] }
         black: { type: boolean }
@@ -222,27 +232,37 @@ components:
         listen_port: { type: [integer, 'null'] }
         alerts: { type: array, items: { $ref: '#/components/schemas/Alert' } }
         media: { $ref: '#/components/schemas/Media' }
+    DelayProfile:
+      type: string
+      enum: [standard, low]
+      description: |
+        standard: about 10 s from capture to display; tolerant of a bad line; automatic quality works.
+        low: about 1.5 s; picture quality fixed; a bad line makes the picture stop more easily.
     Stats:
       type: object
       description: Fields that do not apply to the role, or cannot be measured now, are null.
-      required: [at, loss_pct, loss_threshold_pct, rtt_ms, last_rtt_ms, retrans_pct, buffer_ms, buffer_mode, send_mbps, target_mbps, bandwidth_mbps, send_late_5m, recv_mbps, frames_dropped_5m, video_latency_ms, unrecovered_5m]
+      required: [at, delay_profile, delay_target_ms, loss_pct, loss_threshold_pct, rtt_ms, last_rtt_ms, retrans_pct, send_mbps, target_mbps, actual_mbps, bandwidth_mbps, send_late_5m, delay_margin_s, delay_margin_warn_s, recv_mbps, stalls_5m, stall_s_5m, video_latency_ms, unrecovered_5m]
       properties:
         at: { type: string, format: date-time }
-        loss_pct: { type: [number, 'null'] }
-        loss_threshold_pct: { type: number }
+        delay_profile: { $ref: '#/components/schemas/DelayProfile' }
+        delay_target_ms: { type: integer, description: target delay of the profile in effect, capture to display, examples: [9500] }
+        loss_pct: { type: [number, 'null'], description: 'line loss; tx: resent ÷ sent packets, rx: lost ÷ expected packets' }
+        loss_threshold_pct: { type: [number, 'null'], description: above this loss_high is raised; null while losses are recovered by resending (standard profile) }
         rtt_ms: { type: [number, 'null'] }
         last_rtt_ms: { type: [number, 'null'] }
-        retrans_pct: { type: [number, 'null'] }
-        buffer_ms: { type: number }
-        buffer_mode: { type: string, enum: [auto, manual] }
-        send_mbps: { type: [number, 'null'] }
-        target_mbps: { type: [number, 'null'] }
-        bandwidth_mbps: { type: [number, 'null'] }
-        send_late_5m: { type: [integer, 'null'] }
-        recv_mbps: { type: [number, 'null'] }
-        frames_dropped_5m: { type: [integer, 'null'] }
-        video_latency_ms: { type: [number, 'null'] }
-        unrecovered_5m: { type: [integer, 'null'] }
+        retrans_pct: { type: [number, 'null'], description: rx only (share of packets that arrived by resending); null on tx }
+        send_mbps: { type: [number, 'null'], description: tx; what goes out on the line, resends included }
+        target_mbps: { type: [number, 'null'], description: tx; video bitrate aimed at now (automatic step or the fixed value) }
+        actual_mbps: { type: [number, 'null'], description: tx; video bitrate actually produced, 5 s mean }
+        bandwidth_mbps: { type: [number, 'null'], description: tx; estimated line capacity, only measurable while the line is crowded }
+        send_late_5m: { type: [integer, 'null'], description: tx; packets that could not be sent in time, last 5 min }
+        delay_margin_s: { type: [number, 'null'], description: "tx; seconds left before the receiver's picture would stop (about 6 s normally); one decimal rounded down, the same value as delay_margin_low.margin_s" }
+        delay_margin_warn_s: { type: [number, 'null'], description: tx; delay_margin_low is raised below this margin (about 3 s in the standard profile); null on rx, examples: [3] }
+        recv_mbps: { type: [number, 'null'], description: rx }
+        stalls_5m: { type: [integer, 'null'], description: rx; times the picture stopped, last 5 min }
+        stall_s_5m: { type: [number, 'null'], description: rx; total seconds the picture stood still, last 5 min }
+        video_latency_ms: { type: [number, 'null'], description: rx; measured capture-to-display delay, null until really measured (the UI then shows delay_target_ms as an estimate) }
+        unrecovered_5m: { type: [integer, 'null'], description: rx; packets that could not be recovered, last 5 min }
     StatsHistory:
       type: object
       required: [interval_s, end, series]
@@ -251,7 +271,7 @@ components:
         end: { type: string, format: date-time }
         series:
           type: object
-          description: send_mbps, recv_mbps, loss_pct, rtt_ms, bandwidth_mbps, video_latency_ms, frames_dropped
+          description: send_mbps, recv_mbps, target_mbps, actual_mbps, loss_pct, rtt_ms, bandwidth_mbps, delay_margin_s (tx), stall_s (rx; seconds the picture stood still in each interval)
           additionalProperties: { type: array, items: { type: [number, 'null'] } }
     DeviceEvent:
       type: object
@@ -262,13 +282,25 @@ components:
         level: { $ref: '#/components/schemas/Level' }
         code:
           type: string
-          enum: [loss_high, frames_dropped, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done]
-        params: { $ref: '#/components/schemas/Params' }
+          enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done]
+        params:
+          $ref: '#/components/schemas/Params'
+          description: |
+            delay_margin_low: margin_s. video_stalled: seconds. loss_high: loss_pct.
+            bitrate_changed: mbps, from_mbps, reason (BitrateReason). transport_started (rx): format.
+            listening_started: port. input_detected: format. network_test_done: mbps.
+    BitrateReason:
+      type: string
+      enum: [loss, delay, recovered, manual]
+      description: |
+        Why the video bitrate changed. loss: the line got crowded and losses grew (down).
+        delay: sending fell behind (down). recovered: the line has room again (up).
+        manual: an operator changed the bitrate or the mode.
     FieldError:
       type: object
       required: [field, code]
       properties:
-        field: { type: string, examples: [encode.manual.bitrate_mbps] }
+        field: { type: string, examples: [encode.manual.bitrate_mbps, delay.profile] }
         code: { type: string, enum: [out_of_range, required, too_short, too_long, invalid] }
         params: { $ref: '#/components/schemas/Params' }
     Impact:
@@ -278,8 +310,14 @@ components:
         level: { type: string, enum: [warn, ok, info] }
         code:
           type: string
-          enum: [input_switch_gap, encoder_restart_gap, connection_kept, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, buffer_below_guide]
-        params: { $ref: '#/components/schemas/Params' }
+          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped]
+        params:
+          $ref: '#/components/schemas/Params'
+          description: |
+            input_switch_gap: gap_s (a new input while live sets the link up again; reconnect_gap comes with it and the UI shows the pair as one line).
+            reconnect_gap: gap_s (seconds the receiver's picture is gone while the link is set up again; about the delay of the profile).
+            switch_no_gap: a new bitrate or mode is taken over without a gap.
+            bitrate_near_bandwidth: bandwidth_mbps (the fixed bitrate is above 0.8 × the estimated capacity).
     CheckResult:
       type: object
       required: [ok, errors, impacts]
@@ -299,25 +337,18 @@ components:
             errors: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
     EncodeParams:
       type: object
-      required: [resolution, framerate, bitrate_mbps, rate_control, codec, profile, keyframe_s, bframes, encoder]
+      description: The only encoding parameter that can be chosen. Everything else is fixed (VideoOptions.encoding).
+      required: [bitrate_mbps]
       properties:
-        resolution: { type: string, enum: [source, 1280x720] }
-        framerate: { type: string, enum: [source, '29.97'] }
-        bitrate_mbps: { type: number, minimum: 1, maximum: 40 }
-        rate_control: { type: string, enum: [cbr, vbr] }
-        codec: { type: string, enum: [h264, h265] }
-        profile: { type: string, enum: [high, main, baseline] }
-        keyframe_s: { type: number, minimum: 0.5, maximum: 10 }
-        bframes: { type: integer, enum: [0, 1, 2] }
-        encoder: { type: string, enum: [hardware, software] }
+        bitrate_mbps: { type: number, minimum: 1.5, maximum: 4.0 }
     VideoInput:
       type: object
       required: [kind, camera, file, loop]
       properties:
         kind: { type: string, enum: [camera, file] }
-        camera: { type: string, examples: [/dev/video0] }
-        file: { type: string }
-        loop: { type: boolean }
+        camera: { type: string, description: device path; the UI shows the camera label instead, examples: [/dev/video0] }
+        file: { type: string, description: full path; the UI shows only the file name, examples: [/srv/media/sample_2160p30.y4m] }
+        loop: { type: boolean, description: only when VideoOptions.loop_available; otherwise false }
     VideoSettings:
       type: object
       required: [version, input, encode, audio]
@@ -328,9 +359,12 @@ components:
           type: object
           required: [mode, manual, auto]
           properties:
-            mode: { type: string, enum: [auto, manual] }
+            mode:
+              type: string
+              enum: [auto, manual]
+              description: auto lowers the bitrate when the line gets crowded and raises it when there is room; manual keeps it fixed
             manual: { $ref: '#/components/schemas/EncodeParams' }
-            auto: { $ref: '#/components/schemas/EncodeParams', description: read only — what auto mode uses now }
+            auto: { $ref: '#/components/schemas/EncodeParams', description: read only — the bitrate auto mode aims at now (live value in Stats.target_mbps) }
         audio:
           type: object
           properties: { enabled: { type: boolean, const: false } }
@@ -346,9 +380,18 @@ components:
           properties:
             mode: { type: string, enum: [auto, manual] }
             manual: { $ref: '#/components/schemas/EncodeParams' }
+    VideoEncoding:
+      type: object
+      description: Fixed encoding, shown read-only. "source" means the same as the input.
+      required: [codec, resolution, framerate, keyframe_s]
+      properties:
+        codec: { type: string, enum: [av1] }
+        resolution: { type: string, enum: [source] }
+        framerate: { type: string, enum: [source] }
+        keyframe_s: { type: number, examples: [2] }
     VideoOptions:
       type: object
-      required: [cameras, files, bitrate_range_mbps, keyframe_range_s, bandwidth_mbps]
+      required: [cameras, files, loop_available, bitrate_range_mbps, encoding, bandwidth_mbps]
       properties:
         cameras:
           type: array
@@ -358,7 +401,7 @@ components:
             properties:
               device: { type: string }
               label: { type: string }
-              signal: { type: [string, 'null'], examples: ['1920×1080　59.94p'] }
+              signal: { type: [string, 'null'], description: 'width×height, U+3000, frame rate', examples: ['3840×2160　30p'] }
         files:
           type: array
           items:
@@ -366,11 +409,12 @@ components:
             required: [path, format, duration_s]
             properties:
               path: { type: string }
-              format: { type: string }
+              format: { type: string, examples: ['3840×2160　30p'] }
               duration_s: { type: integer }
-        bitrate_range_mbps: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
-        keyframe_range_s: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
-        bandwidth_mbps: { type: [number, 'null'] }
+        loop_available: { type: boolean, description: false while files can only be played once }
+        bitrate_range_mbps: { type: array, items: { type: number }, minItems: 2, maxItems: 2, examples: [[1.5, 4.0]] }
+        encoding: { $ref: '#/components/schemas/VideoEncoding' }
+        bandwidth_mbps: { type: [number, 'null'], description: estimated line capacity; null unless the line is crowded }
     ApplyVideoResult:
       type: object
       required: [settings, applied_at, impacts]
@@ -378,11 +422,11 @@ components:
         settings: { $ref: '#/components/schemas/VideoSettings' }
         applied_at: { type: string, format: date-time }
         impacts: { type: array, items: { $ref: '#/components/schemas/Impact' } }
-    TransportMode: { type: string, enum: [outbound, inbound, mutual], description: 発信 / 待ち受け / 相互接続 }
+    TransportMode: { type: string, enum: [outbound, inbound, mutual], description: 送信機から接続 / 接続を待つ / 互いに接続 }
     Cipher: { type: string, enum: [aes-128, aes-192, aes-256, none] }
     TransportSettings:
       type: object
-      required: [version, mode, peer, listen_port, buffer, encryption]
+      required: [version, mode, peer, listen_port, delay, encryption]
       properties:
         version: { type: integer }
         mode: { $ref: '#/components/schemas/TransportMode' }
@@ -391,15 +435,11 @@ components:
           required: [host, port]
           properties: { host: { type: string }, port: { type: integer } }
         listen_port: { type: integer }
-        buffer:
+        delay:
           type: object
-          required: [mode, manual_ms, auto_ms, last_rtt_ms, guide_min_ms]
+          required: [profile]
           properties:
-            mode: { type: string, enum: [auto, manual] }
-            manual_ms: { type: integer }
-            auto_ms: { type: integer, description: value auto mode uses now (≥ 4 × RTT, rounded up to 20 ms) }
-            last_rtt_ms: { type: [number, 'null'] }
-            guide_min_ms: { type: [integer, 'null'], description: 4 × last RTT }
+            profile: { $ref: '#/components/schemas/DelayProfile' }
         encryption:
           type: object
           required: [cipher, passphrase_set, passphrase_rejected_at]
@@ -409,32 +449,43 @@ components:
             passphrase_rejected_at: { type: [string, 'null'], format: date-time }
     TransportSettingsInput:
       type: object
-      required: [version, mode, peer, listen_port, buffer, encryption]
+      required: [version, mode, peer, listen_port, delay, encryption]
       properties:
         version: { type: integer }
-        mode: { $ref: '#/components/schemas/TransportMode' }
+        mode: { $ref: '#/components/schemas/TransportMode', description: one of TransportOptions.modes }
         peer:
           type: object
           required: [host, port]
           properties: { host: { type: string }, port: { type: integer } }
         listen_port: { type: integer }
-        buffer:
+        delay:
           type: object
-          required: [mode, manual_ms]
+          required: [profile]
           properties:
-            mode: { type: string, enum: [auto, manual] }
-            manual_ms: { type: integer, description: one of TransportOptions.buffer_presets_ms }
+            profile: { $ref: '#/components/schemas/DelayProfile', description: one of TransportOptions.delay_profiles with available=true }
         encryption:
           type: object
           required: [cipher]
           properties:
-            cipher: { $ref: '#/components/schemas/Cipher' }
-            passphrase: { type: string, writeOnly: true, description: omit to keep the current value }
+            cipher: { $ref: '#/components/schemas/Cipher', description: one of TransportOptions.ciphers }
+            passphrase: { type: string, writeOnly: true, description: omit to keep the current value; ignored while cipher is none }
     TransportOptions:
       type: object
-      required: [buffer_presets_ms]
+      description: What can be chosen. The UI shows a control with a single choice as plain text.
+      required: [modes, ciphers, delay_profiles]
       properties:
-        buffer_presets_ms: { type: array, items: { type: integer }, examples: [[80, 120, 160, 200, 300, 500, 1000]] }
+        modes: { type: array, items: { $ref: '#/components/schemas/TransportMode' }, examples: [[outbound]] }
+        ciphers: { type: array, items: { $ref: '#/components/schemas/Cipher' }, examples: [[none]] }
+        delay_profiles:
+          type: array
+          items:
+            type: object
+            required: [profile, target_ms, available]
+            properties:
+              profile: { $ref: '#/components/schemas/DelayProfile' }
+              target_ms: { type: integer, examples: [9500] }
+              available: { type: boolean, description: false = shown but not selectable yet }
+          examples: [[{ profile: standard, target_ms: 9500, available: true }, { profile: low, target_ms: 1500, available: false }]]
     ApplyTransportResult:
       type: object
       required: [settings, applied_at, impacts]
@@ -447,12 +498,12 @@ components:
       description: |
         One row per key. key=mode: local, peer (TransportMode), verdict compatible|incompatible|unknown.
         key=endpoint: local {host, port}, peer {listen_port}, verdict match|mismatch|unknown.
-        key=buffer: local_ms, local_mode, peer_ms, effective_ms (the larger one is used), verdict effective|unknown.
+        key=delay: local, peer (DelayProfile), verdict match|mismatch|unknown.
         key=cipher: local, peer (Cipher), verdict match|mismatch|unknown.
         key=passphrase: local_set, verdict match|mismatch|unknown, reason peer_rejected|null.
       required: [key, verdict]
       properties:
-        key: { type: string, enum: [mode, endpoint, buffer, cipher, passphrase] }
+        key: { type: string, enum: [mode, endpoint, delay, cipher, passphrase] }
         verdict: { type: string }
       additionalProperties: true
     CompareResult:

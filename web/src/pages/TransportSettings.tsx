@@ -6,6 +6,7 @@ import type {
   Cipher,
   CompareResult,
   CompareRow,
+  DelayProfile,
   Status,
   TransportMode,
   TransportOptions,
@@ -17,7 +18,7 @@ import { Glyph, type Tone } from '../components/Glyph';
 import { Segmented } from '../components/Segmented';
 import { Applied, ApplyDialog, DiscardDialog, FieldError, PendingPanel, Row, type PendingItem } from '../components/Settings';
 import { AlertStrip, Shell } from '../components/Shell';
-import { cipherName, fieldErrorText, modeName, stateLabel } from '../i18n/ja';
+import { cipherName, delayDesc, delayName, fieldErrorText, modeName, modeSentence, stateLabel } from '../i18n/ja';
 import { timeOf } from '../lib/format';
 import { NotDesigned } from './Placeholders';
 
@@ -26,23 +27,20 @@ interface TDraft {
   host: string;
   port: string;
   listen_port: string;
-  bufMode: 'auto' | 'manual';
-  bufMs: string;
+  delay: DelayProfile;
   cipher: Cipher;
   /** '' = keep the current passphrase */
   passphrase: string;
 }
 
-type Key = 'mode' | 'endpoint' | 'listen_port' | 'buffer' | 'cipher' | 'passphrase';
+type Key = 'mode' | 'endpoint' | 'listen_port' | 'delay' | 'cipher' | 'passphrase';
 
 const fromSettings = (s: TransportSettings): TDraft => ({
   mode: s.mode,
   host: s.peer.host,
   port: String(s.peer.port),
   listen_port: String(s.listen_port),
-  bufMode: s.buffer.mode,
-  // Switching to manual starts from the value auto uses now.
-  bufMs: String(s.buffer.mode === 'manual' ? s.buffer.manual_ms : s.buffer.auto_ms),
+  delay: s.delay.profile,
   cipher: s.encryption.cipher,
   passphrase: '',
 });
@@ -52,12 +50,22 @@ const toInput = (d: TDraft, s: TransportSettings): TransportSettingsInput => ({
   mode: d.mode,
   peer: { host: d.host.trim(), port: Number(d.port) },
   listen_port: Number(d.listen_port),
-  buffer: { mode: d.bufMode, manual_ms: Number(d.bufMs) },
-  encryption: { cipher: d.cipher, ...(d.passphrase ? { passphrase: d.passphrase } : {}) },
+  delay: { profile: d.delay },
+  encryption: { cipher: d.cipher, ...(d.passphrase && d.cipher !== 'none' ? { passphrase: d.passphrase } : {}) },
 });
 
 const usesPeer = (m: TransportMode) => m !== 'inbound';
 const usesListen = (m: TransportMode) => m !== 'outbound';
+
+/** Fallbacks until the options arrive; the device sends what can really be chosen. */
+const FALLBACK_OPTIONS: TransportOptions = {
+  modes: ['outbound'],
+  ciphers: ['none'],
+  delay_profiles: [
+    { profile: 'standard', target_ms: 9500, available: true },
+    { profile: 'low', target_ms: 1500, available: false },
+  ],
+};
 
 export function TransportSettingsPage() {
   const { device } = useLive();
@@ -143,8 +151,20 @@ function verdict(tone: Tone, text: string, sub?: string, strong?: boolean) {
   );
 }
 
-function CompareTable({ data, localId }: { data: CompareResult | null; localId: string }) {
-  const rows = data?.rows ?? [];
+function CompareTable({
+  data,
+  localId,
+  targetMs,
+  cipherLabel,
+}: {
+  data: CompareResult | null;
+  localId: string;
+  targetMs: (p: DelayProfile) => number | undefined;
+  cipherLabel: string;
+}) {
+  // Without encryption there is no passphrase to compare.
+  const plain = data?.rows.some((r) => r.key === 'cipher' && r.local === 'none') ?? false;
+  const rows = (data?.rows ?? []).filter((r) => !(plain && r.key === 'passphrase'));
   const cell = (main: string, sub?: string) => (
     <span role="cell">
       {main}
@@ -157,11 +177,15 @@ function CompareTable({ data, localId }: { data: CompareResult | null; localId: 
       case 'mode':
         return (
           <div role="row" className="cmp-row" key={r.key}>
-            <span role="cell" className="muted">接続モード</span>
+            <span role="cell" className="muted">接続方法</span>
             {cell(modeName(r.local))}
             <span aria-hidden="true" style={{ color: 'var(--muted)' }}>→</span>
             {cell(r.peer ? modeName(r.peer) : '—')}
-            {r.verdict === 'compatible' ? verdict('ok', '組み合わせ可') : r.verdict === 'incompatible' ? verdict('err', '組み合わせ不可', undefined, true) : unknown}
+            {r.verdict === 'compatible'
+              ? verdict('ok', '組み合わせできます')
+              : r.verdict === 'incompatible'
+                ? verdict('err', '組み合わせできません', undefined, true)
+                : unknown}
           </div>
         );
       case 'endpoint':
@@ -174,20 +198,24 @@ function CompareTable({ data, localId }: { data: CompareResult | null; localId: 
             {r.verdict === 'match' ? verdict('ok', '一致') : r.verdict === 'mismatch' ? verdict('err', '不一致', undefined, true) : unknown}
           </div>
         );
-      case 'buffer':
+      case 'delay':
         return (
           <div role="row" className="cmp-row" key={r.key}>
-            <span role="cell" className="muted">伝送バッファ</span>
-            {cell(`${r.local_ms} ms`, r.local_mode === 'auto' ? '自動' : '手動')}
+            <span role="cell" className="muted">遅延</span>
+            {cell(delayName(r.local, targetMs(r.local)))}
             <span aria-hidden="true" />
-            {cell(r.peer_ms !== null ? `${r.peer_ms} ms` : '—')}
-            {r.effective_ms !== null ? verdict('ok', `${r.effective_ms} ms で動作`, '異なる場合は大きい方を使用') : unknown}
+            {cell(r.peer ? delayName(r.peer, targetMs(r.peer)) : '—')}
+            {r.verdict === 'match'
+              ? verdict('ok', '一致')
+              : r.verdict === 'mismatch'
+                ? verdict('err', '不一致', '受信機と同じにしてください', true)
+                : unknown}
           </div>
         );
       case 'cipher':
         return (
           <div role="row" className="cmp-row" key={r.key}>
-            <span role="cell" className="muted">暗号化方式</span>
+            <span role="cell" className="muted">{cipherLabel}</span>
             {cell(cipherName(r.local))}
             <span aria-hidden="true" />
             {cell(r.peer ? cipherName(r.peer) : '—')}
@@ -251,6 +279,8 @@ function TransportSettingsTx() {
   const [doneAt, setDoneAt] = useState<string | null>(null);
   const [showPw, setShowPw] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  /** Bumped when the confirmation opens, so its impacts match the link state at that moment. */
+  const [recheck, setRecheck] = useState(0);
   const pwRef = useRef<HTMLInputElement>(null);
 
   const reload = () => {
@@ -270,12 +300,16 @@ function TransportSettingsTx() {
 
   const applied = useMemo(() => (settings ? fromSettings(settings) : null), [settings]);
   const v = stored ?? applied;
+  const opts = options ?? FALLBACK_OPTIONS;
+  const targetMs = (p: DelayProfile) => opts.delay_profiles.find((d) => d.profile === p)?.target_ms;
+  // While only one cipher can be chosen the row is plain text, named 「暗号化」 everywhere on the screen.
+  const singleCipher = opts.ciphers.length === 1 && (!v || opts.ciphers[0] === v.cipher);
+  const cipherLabel = singleCipher ? '暗号化' : '暗号化方式';
 
   const pending: PendingItem[] = useMemo(() => {
     if (!settings || !applied || !v) return [];
-    const bufText = (d: TDraft) => (d.bufMode === 'auto' ? `自動（${settings.buffer.auto_ms} ms）` : `手動（${d.bufMs} ms）`);
     const items: { key: Key; label: string; changed: boolean; from: string; to: string }[] = [
-      { key: 'mode', label: '接続モード', changed: v.mode !== applied.mode, from: modeName(applied.mode), to: modeName(v.mode) },
+      { key: 'mode', label: '接続方法', changed: v.mode !== applied.mode, from: modeName(applied.mode), to: modeName(v.mode) },
       {
         key: 'endpoint',
         label: '接続先',
@@ -291,13 +325,13 @@ function TransportSettingsTx() {
         to: v.listen_port,
       },
       {
-        key: 'buffer',
-        label: '伝送バッファ',
-        changed: v.bufMode !== applied.bufMode || (v.bufMode === 'manual' && Number(v.bufMs) !== Number(applied.bufMs)),
-        from: bufText(applied),
-        to: bufText(v),
+        key: 'delay',
+        label: '遅延',
+        changed: v.delay !== applied.delay,
+        from: delayName(applied.delay, targetMs(applied.delay)),
+        to: delayName(v.delay, targetMs(v.delay)),
       },
-      { key: 'cipher', label: '暗号化方式', changed: v.cipher !== applied.cipher, from: cipherName(applied.cipher), to: cipherName(v.cipher) },
+      { key: 'cipher', label: cipherLabel, changed: v.cipher !== applied.cipher, from: cipherName(applied.cipher), to: cipherName(v.cipher) },
       {
         key: 'passphrase',
         label: 'パスフレーズ',
@@ -308,7 +342,7 @@ function TransportSettingsTx() {
     ];
     return items.filter((i) => i.changed).map((i) => ({ key: i.key, label: i.label, from: i.from, to: i.to, revert: () => revert(i.key) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings, applied, v]);
+  }, [settings, applied, v, options, cipherLabel]);
 
   const n = pending.length;
   useEffect(() => setCount('transport', n), [n, setCount]);
@@ -322,7 +356,8 @@ function TransportSettingsTx() {
       api.transport.check(toInput(v, settings)).then(setCheck).catch(() => undefined);
     }, 200);
     return () => clearTimeout(t);
-  }, [settings, v, n]);
+    // The impacts depend on the link state (live, stopped, not connected) as well as the draft.
+  }, [settings, v, n, recheck, linkState]);
 
   if (!device || !status || !settings || !applied || !v) {
     return (
@@ -343,9 +378,7 @@ function TransportSettingsTx() {
     const back: Partial<TDraft> =
       k === 'endpoint'
         ? { host: a.host, port: a.port }
-        : k === 'buffer'
-          ? { bufMode: a.bufMode, bufMs: a.bufMs }
-          : k === 'passphrase'
+        : k === 'passphrase'
             ? { passphrase: '' }
             : { [k]: (a as unknown as Record<string, string>)[k] };
     setStored({ ...cur, ...back });
@@ -359,8 +392,9 @@ function TransportSettingsTx() {
   const erroring = (status.state === 'reconnecting' || status.state === 'connecting') && status.alerts.some((a) => a.level === 'error');
   const stopped = status.state === 'stopped';
   const rejectedAt = settings.encryption.passphrase_rejected_at;
-  const guide = settings.buffer.guide_min_ms;
-  const short = v.bufMode === 'manual' && guide !== null && Number(v.bufMs) < guide;
+  // A control with a single choice is shown as text (and the current value is kept even if it is not offered).
+  const modeChoices = opts.modes.includes(v.mode) ? opts.modes : [v.mode, ...opts.modes];
+  const cipherChoices = opts.ciphers.includes(v.cipher) ? opts.ciphers : [v.cipher, ...opts.ciphers];
 
   const run = async (f: () => Promise<Status>) => setStatus(await f());
 
@@ -395,7 +429,7 @@ function TransportSettingsTx() {
         ) : stopped ? (
           <StoppedStrip status={status} onStart={() => run(api.start)} />
         ) : (
-          <AlertStrip />
+          <AlertStrip route="transport" />
         )
       }
     >
@@ -408,25 +442,29 @@ function TransportSettingsTx() {
         </div>
         <div className="set-body">
           <div className="set-form">
-            <CompareTable data={compare} localId={device.id} />
+            <CompareTable data={compare} localId={device.id} targetMs={targetMs} cipherLabel={cipherLabel} />
 
             <section aria-labelledby="sec-conn">
               <h2 id="sec-conn" className="sec-title">
                 接続
               </h2>
-              <Row label="接続モード" labelId="lbl-mode" hint="「発信」はこの送信機から受信機へ接続します" changed={changed('mode')}>
-                <Segmented
-                  labelledBy="lbl-mode"
-                  value={v.mode}
-                  onChange={(mode) => set({ mode })}
-                  options={[
-                    { value: 'outbound', label: '発信' },
-                    { value: 'inbound', label: '待ち受け' },
-                    { value: 'mutual', label: '相互接続' },
-                  ]}
-                />
-                {changed('mode') && <Applied value={modeName(applied.mode)} onRevert={() => revert('mode')} />}
-              </Row>
+              {modeChoices.length === 1 ? (
+                <Row label="接続方法">
+                  <div className="measured">
+                    <span>{modeSentence(v.mode)}</span>
+                  </div>
+                </Row>
+              ) : (
+                <Row label="接続方法" labelId="lbl-mode" hint={modeSentence(v.mode)} changed={changed('mode')}>
+                  <Segmented
+                    labelledBy="lbl-mode"
+                    value={v.mode}
+                    onChange={(mode) => set({ mode })}
+                    options={modeChoices.map((m) => ({ value: m, label: modeName(m) }))}
+                  />
+                  {changed('mode') && <Applied value={modeName(applied.mode)} onRevert={() => revert('mode')} />}
+                </Row>
+              )}
               {usesPeer(v.mode) && (
                 <Row label="接続先" labelFor="tr-host" hint="受信機の IP アドレスとポート" changed={changed('endpoint')} invalid={!!errFor('peer.host') || !!errFor('peer.port')}>
                   <div className="inline">
@@ -479,76 +517,36 @@ function TransportSettingsTx() {
                 遅延
               </h2>
               <Row
-                label="伝送バッファ"
-                labelId="lbl-buf"
-                hint={
-                  <>
-                    再送のために待つ時間です。
-                    <br />
-                    実際の映像遅延とは別の値です
-                  </>
-                }
-                changed={changed('buffer')}
+                label="遅延"
+                labelId="lbl-delay"
+                hint="送信機に入った映像が受信側に映るまでの時間です。長いほど回線の乱れに強くなります"
+                changed={changed('delay')}
+                invalid={!!errFor('delay.profile')}
                 top
               >
-                <Segmented
-                  labelledBy="lbl-buf"
-                  value={v.bufMode}
-                  onChange={(bufMode) =>
-                    set(bufMode === 'auto' ? { bufMode, bufMs: applied.bufMode === 'auto' ? applied.bufMs : String(settings.buffer.auto_ms) } : { bufMode })
-                  }
-                  options={[
-                    { value: 'auto', label: '自動' },
-                    { value: 'manual', label: '手動' },
-                  ]}
-                />
-                {v.bufMode === 'auto' ? (
-                  <>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '4px 12px', marginTop: 10 }}>
-                      <span style={{ fontSize: 16, fontWeight: 500 }}>{settings.buffer.auto_ms} ms</span>
-                      {settings.buffer.last_rtt_ms !== null && (
-                        <span style={{ fontSize: 13 }} className="muted">
-                          前回の RTT {settings.buffer.last_rtt_ms} ms から決めた値
+                <div role="radiogroup" aria-labelledby="lbl-delay" className="choices">
+                  {opts.delay_profiles.map((d) => {
+                    const on = v.delay === d.profile;
+                    return (
+                      <label key={d.profile} className={['choice', on ? 'on' : '', d.available ? '' : 'disabled'].filter(Boolean).join(' ')}>
+                        <input
+                          type="radio"
+                          name="tr-delay"
+                          value={d.profile}
+                          checked={on}
+                          disabled={!d.available}
+                          onChange={() => set({ delay: d.profile })}
+                        />
+                        <span>
+                          <b>{delayName(d.profile, d.target_ms)}</b> — {delayDesc(d.profile)}
+                          {!d.available && <span className="chip-muted">準備中</span>}
                         </span>
-                      )}
-                    </div>
-                    <p className="help" style={{ marginTop: 4 }}>
-                      接続のたびに RTT を測り、その 4 倍以上になるよう機器が決めます。
-                    </p>
-                  </>
-                ) : (
-                  <div style={{ marginTop: 10 }}>
-                    <select
-                      id="tr-buf"
-                      aria-labelledby="lbl-buf"
-                      aria-describedby="tr-buf-h"
-                      className={changed('buffer') ? 'select changed' : 'select'}
-                      style={{ minWidth: 160, fontSize: 16, fontWeight: 500 }}
-                      value={v.bufMs}
-                      onChange={(e) => set({ bufMs: e.target.value })}
-                    >
-                      {(options?.buffer_presets_ms ?? [80, 120, 160, 200, 300, 500, 1000]).map((ms) => (
-                        <option key={ms} value={String(ms)}>
-                          {ms} ms
-                        </option>
-                      ))}
-                    </select>
-                    {settings.buffer.last_rtt_ms !== null && guide !== null && (
-                      <p id="tr-buf-h" className="help">
-                        目安は RTT の 4 倍以上。前回の RTT {settings.buffer.last_rtt_ms} ms なら {guide} ms 以上です。
-                      </p>
-                    )}
-                    {short && (
-                      <div className="field-warn">
-                        <Glyph tone="warn" />
-                        目安より短いため、損失が増えると映像が乱れやすくなります
-                      </div>
-                    )}
-                  </div>
-                )}
-                {changed('buffer') && (
-                  <Applied value={applied.bufMode === 'auto' ? `自動（${settings.buffer.auto_ms} ms）` : `手動（${applied.bufMs} ms）`} onRevert={() => revert('buffer')} />
-                )}
+                      </label>
+                    );
+                  })}
+                </div>
+                {errFor('delay.profile') && <FieldError text={fieldErrorText(errFor('delay.profile')!)} />}
+                {changed('delay') && <Applied value={delayName(applied.delay, targetMs(applied.delay))} onRevert={() => revert('delay')} />}
               </Row>
             </section>
 
@@ -556,20 +554,29 @@ function TransportSettingsTx() {
               <h2 id="sec-enc" className="sec-title">
                 暗号化
               </h2>
-              <Row label="暗号化方式" labelFor="tr-ci" changed={changed('cipher')}>
-                <select
-                  id="tr-ci"
-                  className={changed('cipher') ? 'select changed' : 'select'}
-                  value={v.cipher}
-                  onChange={(e) => set({ cipher: e.target.value as Cipher })}
-                >
-                  <option value="aes-128">AES-128</option>
-                  <option value="aes-192">AES-192</option>
-                  <option value="aes-256">AES-256</option>
-                  <option value="none">なし</option>
-                </select>
-                {changed('cipher') && <Applied value={cipherName(applied.cipher)} onRevert={() => revert('cipher')} />}
-              </Row>
+              {cipherChoices.length === 1 ? (
+                <Row label={cipherLabel}>
+                  <div className="measured">
+                    <span>{cipherName(v.cipher)}</span>
+                  </div>
+                </Row>
+              ) : (
+                <Row label={cipherLabel} labelFor="tr-ci" changed={changed('cipher')}>
+                  <select
+                    id="tr-ci"
+                    className={changed('cipher') ? 'select changed' : 'select'}
+                    value={v.cipher}
+                    onChange={(e) => set({ cipher: e.target.value as Cipher })}
+                  >
+                    {cipherChoices.map((c) => (
+                      <option key={c} value={c}>
+                        {cipherName(c)}
+                      </option>
+                    ))}
+                  </select>
+                  {changed('cipher') && <Applied value={cipherName(applied.cipher)} onRevert={() => revert('cipher')} />}
+                </Row>
+              )}
               {v.cipher !== 'none' && (
                 <Row
                   label="パスフレーズ"
@@ -617,7 +624,11 @@ function TransportSettingsTx() {
             impacts={impacts}
             invalid={invalid}
             onDiscard={() => n > 0 && setPhase('discard')}
-            onApply={() => !invalid && n > 0 && setPhase('confirm')}
+            onApply={() => {
+              if (invalid || n === 0) return;
+              setRecheck((x) => x + 1);
+              setPhase('confirm');
+            }}
             doneAt={doneAt}
             doneNote="新しい設定で接続をやり直しています。"
             emptyNote={

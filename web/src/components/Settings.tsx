@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import type { Impact } from '../api/types';
-import { impactText } from '../i18n/ja';
+import { impactText, visibleImpacts } from '../i18n/ja';
 import { href } from '../lib/router';
 import { AlertDialog } from './Dialog';
 import { Glyph } from './Glyph';
@@ -88,7 +88,7 @@ const impactTone = (i: Impact) => (i.level === 'warn' ? 'warn' : i.level === 'ok
 export function ImpactList({ impacts, large }: { impacts: Impact[]; large?: boolean }) {
   return (
     <ul className="impacts">
-      {impacts.map((m) => (
+      {visibleImpacts(impacts).map((m) => (
         <li key={m.code} style={large ? { fontSize: 14 } : undefined}>
           <Glyph tone={impactTone(m)} />
           <span>{impactText(m)}</span>

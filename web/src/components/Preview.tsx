@@ -13,13 +13,15 @@ export function usePageVisible(): boolean {
   return visible;
 }
 
+/** "カメラ Facecam 4K　3840×2160　30p　プレビューは約 5 コマ／秒". The rate is the preview's, not the video's. */
 export const mediaMeta = (m: Media): string => {
+  const preview = `プレビューは約 ${m.preview_fps} コマ／秒`;
   if (m.kind === 'output') {
     if (m.black || !m.format) return `${m.label}　黒を出力中`;
-    return `${m.label}　${m.format}　約 ${m.preview_fps} fps で表示`;
+    return `${m.label}　${m.format}　${preview}`;
   }
   const kind = m.kind === 'camera' ? 'カメラ' : '映像ファイル';
-  return m.format ? `${kind} ${m.label}　${m.format}　約 ${m.preview_fps} fps で表示` : `${kind} ${m.label}　信号なし`;
+  return m.format ? `${kind} ${m.label}　${m.format}　${preview}` : `${kind} ${m.label}　信号なし`;
 };
 
 /** Whether there is a picture to show: tx shows its input, rx shows what it outputs. */

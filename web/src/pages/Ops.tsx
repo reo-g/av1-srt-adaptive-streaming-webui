@@ -7,10 +7,21 @@ import { Chevron, FullscreenIcon, Glyph, toneText, type Tone } from '../componen
 import { mediaMeta, PreviewImage } from '../components/Preview';
 import { Shell } from '../components/Shell';
 import { Sparkline } from '../components/Sparkline';
-import { eventText } from '../i18n/ja';
+import { delayName, eventText } from '../i18n/ja';
 import { fixed1, int, timeOf } from '../lib/format';
 import { openFullscreen, takeReturnFocus } from '../lib/fullscreen';
 import { href } from '../lib/router';
+
+interface Spark {
+  metric: Metric;
+  minSpan: number;
+  floor?: number;
+  /** dashed series behind the line */
+  reference?: Metric;
+  /** dashed horizontal line */
+  threshold?: number;
+  ticks?: boolean;
+}
 
 interface Readout {
   label: string;
@@ -18,15 +29,17 @@ interface Readout {
   unit: string;
   ref: string;
   tone: Tone | null;
-  spark: { metric: Metric; lo: number; hi: number; threshold?: number; ticks?: boolean };
+  spark?: Spark;
 }
 
 const NA = '—';
 
+const hasAlert = (status: Status, code: string) => status.alerts.some((a) => a.code === code);
+
 function readouts(role: Role, st: Stats | null, status: Status): Readout[] {
   const stopped = status.state === 'stopped';
   const live = status.state === 'live' && st !== null;
-  const off = (label: string, _unit: string, ref: string, spark: Readout['spark']): Readout => ({
+  const off = (label: string, ref: string, spark?: Spark): Readout => ({
     label,
     value: NA,
     unit: '',
@@ -34,68 +47,83 @@ function readouts(role: Role, st: Stats | null, status: Status): Readout[] {
     tone: null,
     spark,
   });
+  const noLink = '未接続のため取得できません';
   const loss = (): Readout => {
-    const sp = { metric: 'loss_pct' as const, lo: 0, hi: 3, threshold: st?.loss_threshold_pct ?? 1 };
-    if (!live || st.loss_pct === null) return off('パケット損失', '%', '未取得', sp);
-    const high = st.loss_pct > st.loss_threshold_pct;
+    const thr = st?.loss_threshold_pct ?? null;
+    const sp: Spark = { metric: 'loss_pct', minSpan: 2, floor: 0, ...(thr !== null ? { threshold: thr } : {}) };
+    if (!live || st.loss_pct === null) return off('回線の損失', live ? '未取得' : noLink, sp);
+    // In the standard profile losses are normal and recovered by resending: no threshold, no warning.
     return {
-      label: 'パケット損失',
+      label: '回線の損失',
       value: fixed1(st.loss_pct),
       unit: '%',
-      ref: `基準 ${fixed1(st.loss_threshold_pct)}% 以下`,
-      tone: high ? 'warn' : null,
+      ref: thr === null ? '再送で補っています' : `基準 ${fixed1(thr)}% 以下`,
+      tone: thr !== null && st.loss_pct > thr ? 'warn' : null,
       spark: sp,
     };
   };
 
   if (role === 'tx') {
-    const br = { metric: 'send_mbps' as const, lo: 10, hi: 14, threshold: st?.target_mbps ?? undefined };
-    const rtt = { metric: 'rtt_ms' as const, lo: 20, hi: 60 };
-    const bw = { metric: 'bandwidth_mbps' as const, lo: 0, hi: 60 };
-    const last = st?.last_rtt_ms != null ? `未取得（前回 ${int(st.last_rtt_ms)} ms）` : '未取得';
+    const quality: Spark = { metric: 'actual_mbps', reference: 'target_mbps', minSpan: 1, floor: 0 };
+    // The device says below which margin it warns (delay_margin_low); drawn as the dashed line.
+    const warnS = st?.delay_margin_warn_s ?? null;
+    const margin: Spark = { metric: 'delay_margin_s', minSpan: 4, floor: 0, ...(warnS !== null ? { threshold: warnS } : {}) };
+    const send: Spark = { metric: 'send_mbps', minSpan: 1, floor: 0 };
+    const target = live && st.target_mbps !== null ? `目標 ${fixed1(st.target_mbps)} Mbps` : '';
+    const low =
+      live && (hasAlert(status, 'delay_margin_low') || (warnS !== null && st.delay_margin_s !== null && st.delay_margin_s < warnS));
+    const marginRef = low
+      ? warnS !== null
+        ? `${warnS} 秒を下回っています`
+        : '余裕が少なくなっています'
+      : warnS !== null
+        ? `破線の ${warnS} 秒を下回ると警告します`
+        : '';
     return [
-      live && st.send_mbps !== null
+      live && st.actual_mbps !== null
+        ? { label: '画質（実際）', value: fixed1(st.actual_mbps), unit: 'Mbps', ref: target, tone: null, spark: quality }
+        : off('画質（実際）', live ? target || '未取得' : noLink, quality),
+      live && st.delay_margin_s !== null
         ? {
-            label: '送信ビットレート',
-            value: fixed1(st.send_mbps),
-            unit: 'Mbps',
-            ref: st.target_mbps !== null ? `設定 ${fixed1(st.target_mbps)} Mbps（再送分を含む）` : '',
-            tone: null,
-            spark: br,
+            label: '映像が止まるまでの余裕',
+            value: fixed1(st.delay_margin_s),
+            unit: '秒',
+            ref: marginRef,
+            tone: low ? 'warn' : null,
+            spark: margin,
           }
-        : off('送信ビットレート', 'Mbps', '未接続のため取得できません', br),
+        : off('映像が止まるまでの余裕', live ? '未取得' : noLink, margin),
       loss(),
-      live && st.rtt_ms !== null
-        ? { label: 'RTT', value: int(st.rtt_ms), unit: 'ms', ref: '往復の遅れ', tone: null, spark: rtt }
-        : off('RTT', 'ms', last, rtt),
-      live && st.bandwidth_mbps !== null
-        ? { label: '推定帯域', value: int(st.bandwidth_mbps), unit: 'Mbps', ref: '回線から推定', tone: null, spark: bw }
-        : off('推定帯域', 'Mbps', '未取得', bw),
+      live && st.send_mbps !== null
+        ? { label: '送っているデータ量', value: fixed1(st.send_mbps), unit: 'Mbps', ref: '1 秒あたり。送り直した分を含む', tone: null, spark: send }
+        : off('送っているデータ量', live ? '未取得' : noLink, send),
     ];
   }
 
-  const br = { metric: 'recv_mbps' as const, lo: 10, hi: 14 };
-  const drop = { metric: 'frames_dropped' as const, lo: 0, hi: 1, ticks: true };
-  const lat = { metric: 'video_latency_ms' as const, lo: 280, hi: 340 };
-  const bufRef = `伝送バッファは ${st?.buffer_ms ?? '—'} ms`;
+  const recv: Spark = { metric: 'recv_mbps', minSpan: 1, floor: 0 };
+  const stall: Spark = { metric: 'stall_s', minSpan: 1, ticks: true };
+  const measured = live && st.video_latency_ms !== null;
+  const target = st ? fixed1(st.delay_target_ms / 1000) : NA;
   return [
     live && st.recv_mbps !== null
-      ? { label: '受信ビットレート', value: fixed1(st.recv_mbps), unit: 'Mbps', ref: '直近 1 秒の平均', tone: null, spark: br }
-      : off('受信ビットレート', 'Mbps', '未接続のため取得できません', br),
+      ? { label: '受け取っているデータ量', value: fixed1(st.recv_mbps), unit: 'Mbps', ref: '1 秒あたり（直近 1 秒の平均）', tone: null, spark: recv }
+      : off('受け取っているデータ量', live ? '未取得' : noLink, recv),
     loss(),
-    live && st.frames_dropped_5m !== null
+    live && st.stalls_5m !== null
       ? {
-          label: '映像の欠落',
-          value: String(st.frames_dropped_5m),
-          unit: 'フレーム',
-          ref: '直近 5 分',
-          tone: st.frames_dropped_5m > 0 ? 'warn' : null,
-          spark: drop,
+          label: '直近 5 分で映像が止まった回数',
+          value: String(st.stalls_5m),
+          unit: '回',
+          ref: st.stalls_5m > 0 ? `合計 ${fixed1(st.stall_s_5m ?? 0)} 秒` : '止まっていません',
+          tone: st.stalls_5m > 0 ? 'warn' : null,
+          spark: stall,
         }
-      : off('映像の欠落', 'フレーム', '未取得', drop),
-    live && st.video_latency_ms !== null
-      ? { label: '映像遅延（実測）', value: int(st.video_latency_ms), unit: 'ms', ref: bufRef, tone: null, spark: lat }
-      : { ...off('映像遅延（実測）', 'ms', bufRef, lat), ref: bufRef },
+      : off('直近 5 分で映像が止まった回数', live ? '未取得' : noLink, stall),
+    measured
+      ? { label: '映像の遅れ', value: fixed1(st.video_latency_ms! / 1000), unit: '秒', ref: `入力から表示まで（実測）。目標 ${target} 秒`, tone: null }
+      : live
+        ? { label: '映像の遅れ（目安）', value: target, unit: '秒', ref: '入力から表示まで。まだ実測していません', tone: null }
+        : off('映像の遅れ（目安）', noLink),
   ];
 }
 
@@ -103,29 +131,39 @@ function details(role: Role, st: Stats | null, status: Status): { label: string;
   const stopped = status.state === 'stopped';
   const live = status.state === 'live' && st !== null;
   const na = stopped ? '— 停止中' : '— 未取得';
+  const rtt = {
+    label: '回線の往復時間',
+    value: live && st.rtt_ms !== null ? `${int(st.rtt_ms)} ms` : st?.last_rtt_ms != null && !stopped ? `— 未取得（前回 ${int(st.last_rtt_ms)} ms）` : na,
+  };
+  const delay = { label: '遅延の設定', value: st ? delayName(st.delay_profile, st.delay_target_ms) : NA };
   if (role === 'tx') {
     return [
-      { label: '再送率', value: live && st.retrans_pct !== null ? `${fixed1(st.retrans_pct)} %` : na },
+      rtt,
       {
-        label: '送信が間に合わなかったパケット（5 分）',
+        label: '回線の推定容量',
+        value: live
+          ? st.bandwidth_mbps !== null
+            ? `${fixed1(st.bandwidth_mbps)} Mbps`
+            : '— 余裕あり（混んだときだけ測ります）'
+          : na,
+      },
+      {
+        label: '送りきれずに捨てたデータ（直近 5 分）',
         value: live && st.send_late_5m !== null ? String(st.send_late_5m) : na,
         warn: live && (st.send_late_5m ?? 0) > 0,
       },
-      {
-        label: `伝送バッファ（${st?.buffer_mode === 'manual' ? '手動' : '自動'}）`,
-        value: st ? `${st.buffer_ms} ms` : NA,
-      },
+      delay,
     ];
   }
-  const last = st?.last_rtt_ms != null && !stopped ? `— 未取得（前回 ${int(st.last_rtt_ms)} ms）` : na;
   return [
-    { label: 'RTT', value: live && st.rtt_ms !== null ? `${int(st.rtt_ms)} ms` : last },
-    { label: '再送の割合', value: live && st.retrans_pct !== null ? `${fixed1(st.retrans_pct)} %` : na },
+    rtt,
+    { label: '送り直して届いた割合', value: live && st.retrans_pct !== null ? `${fixed1(st.retrans_pct)} %` : na },
     {
-      label: '回復できなかったパケット（5 分）',
+      label: '届かなかったデータ（直近 5 分）',
       value: live && st.unrecovered_5m !== null ? String(st.unrecovered_5m) : na,
       warn: live && (st.unrecovered_5m ?? 0) > 0,
     },
+    delay,
   ];
 }
 
@@ -135,15 +173,16 @@ interface Stage {
   note: string;
 }
 
-function signalPath(role: Role, status: Status, st: Stats | null): { stages: Stage[]; dashedFrom: (i: number) => boolean } {
+function signalPath(role: Role, status: Status): { stages: Stage[]; dashedFrom: (i: number) => boolean } {
   const peer = status.peer.id ?? '';
-  const has = (c: string) => status.alerts.some((a) => a.code === c);
-  const loss = status.alerts.find((a) => a.code === 'loss_high');
-  const lossNote = loss ? `損失 ${fixed1(Number(loss.params?.loss_pct ?? st?.loss_pct ?? 0))}%` : '';
+  const has = (c: string) => hasAlert(status, c);
+  const find = (c: string) => status.alerts.find((a) => a.code === c);
+  const loss = find('loss_high');
+  const lossNote = loss ? `損失 ${fixed1(Number(loss.params?.loss_pct ?? 0))}%` : '';
   const s = (name: string, tone: Tone | null = null, note = ''): Stage => ({ name, tone, note });
 
   if (role === 'tx') {
-    const names = ['入力', 'エンコード', '送出', '回線', `受信機 ${peer}`];
+    const names = ['入力', '圧縮', '送出', '回線', `受信機 ${peer}`];
     if (status.state === 'stopped')
       return {
         stages: [s(names[0]), s(names[1]), s(names[2], 'off', '停止中'), s(names[3]), s(names[4], 'off', '未接続')],
@@ -162,13 +201,20 @@ function signalPath(role: Role, status: Status, st: Stats | null): { stages: Sta
         dashedFrom: (i) => i >= 2,
       };
     }
+    const crowded = has('delay_margin_low');
     return {
-      stages: [s(names[0]), s(names[1]), s(names[2]), loss ? s(names[3], 'warn', lossNote) : s(names[3]), s(names[4])],
+      stages: [
+        s(names[0]),
+        s(names[1]),
+        s(names[2]),
+        crowded ? s(names[3], 'warn', '混み合っています') : loss ? s(names[3], 'warn', lossNote) : s(names[3]),
+        s(names[4]),
+      ],
       dashedFrom: () => false,
     };
   }
 
-  const names = [`送信機 ${peer}`, '回線', '受信', 'デコード', '映像出力'];
+  const names = [`送信機 ${peer}`, '回線', '受信', '復元', '映像出力'];
   if (status.state === 'stopped')
     return {
       stages: [s(names[0], 'off', '未接続'), s(names[1]), s(names[2]), s(names[3]), s(names[4], 'off', '黒を出力')],
@@ -187,14 +233,14 @@ function signalPath(role: Role, status: Status, st: Stats | null): { stages: Sta
       dashedFrom: (i) => i <= 2,
     };
   }
-  const frames = st?.frames_dropped_5m ?? 0;
+  const stalled = find('video_stalled');
   return {
     stages: [
       s(names[0]),
       loss ? s(names[1], 'warn', lossNote) : s(names[1]),
       s(names[2]),
-      frames > 0 ? s(names[3], 'warn', `欠落 ${frames} フレーム`) : s(names[3]),
-      s(names[4]),
+      s(names[3]),
+      stalled ? s(names[4], 'warn', `${stalled.params?.count ?? ''} 回停止`) : s(names[4]),
     ],
     dashedFrom: () => false,
   };
@@ -241,7 +287,7 @@ export function OpsPage() {
   const stopped = status.state === 'stopped';
   const reads = readouts(role, stats, status);
   const rows = details(role, stats, status);
-  const path = signalPath(role, status, stats);
+  const path = signalPath(role, status);
 
   const run = async (f: () => Promise<Status>) => {
     setBusy(true);
@@ -315,19 +361,24 @@ export function OpsPage() {
                     </b>
                     <span>{r.unit}</span>
                   </div>
-                  <Sparkline
-                    values={seriesOf(history, r.spark.metric)}
-                    lo={r.spark.lo}
-                    hi={r.spark.hi}
-                    threshold={r.spark.threshold}
-                    ticks={r.spark.ticks}
-                    label={`${r.label}の推移（直近 5 分）`}
-                  />
+                  {r.spark && (
+                    <Sparkline
+                      values={seriesOf(history, r.spark.metric)}
+                      reference={r.spark.reference ? seriesOf(history, r.spark.reference) : undefined}
+                      threshold={r.spark.threshold}
+                      minSpan={r.spark.minSpan}
+                      floor={r.spark.floor}
+                      ticks={r.spark.ticks}
+                      label={`${r.label}の推移（直近 5 分）`}
+                    />
+                  )}
                 </div>
                 <div className="readout-ref">{r.ref}</div>
               </div>
             ))}
-            <p className="spark-note">線は直近 5 分の推移（破線は基準）</p>
+            <p className="spark-note">
+              {tx ? '線は直近 5 分の推移（破線は目標と警告の線）' : '線は直近 5 分の推移（縦線は映像の停止）'}
+            </p>
             <div>
               <button type="button" className="disclosure" aria-expanded={more} onClick={() => setMore(!more)}>
                 <Chevron />
@@ -339,7 +390,15 @@ export function OpsPage() {
                     <div key={d.label}>
                       <dt>{d.label}</dt>
                       <dd style={{ color: d.warn ? 'var(--warn-text)' : d.value.startsWith('—') ? 'var(--sub)' : 'var(--ink)' }}>
-                        {d.value}
+                        {d.warn ? (
+                          // A warning is never shown by colour alone: shape and words too.
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                            <Glyph tone="warn" />
+                            {d.value}（映像が乱れたおそれ）
+                          </span>
+                        ) : (
+                          d.value
+                        )}
                       </dd>
                     </div>
                   ))}

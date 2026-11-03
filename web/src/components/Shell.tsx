@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { useDrafts, useLive } from '../api/live';
-import type { Role, Status } from '../api/types';
+import type { Alert, Role, Status } from '../api/types';
 import { alertLabel, alertText, roleName, stateLabel } from '../i18n/ja';
 import { duration, timeOf } from '../lib/format';
 import { href, type Route } from '../lib/router';
@@ -107,8 +107,28 @@ function Nav({ current }: { current: Route }) {
   );
 }
 
+/**
+ * Where the operator can do something about an alert, or null when there is nothing to change
+ * here. The receiver's settings screens are not designed yet, and picture stops on the receiver
+ * are dealt with on the transmitter, so the receiver shows no link.
+ */
+function alertLink(role: Role, a: Alert): { route: Route; text: string } | null {
+  if (role !== 'tx') return null;
+  switch (a.code) {
+    case 'delay_margin_low': // lower the fixed quality, or check it in 映像設定
+    case 'input_lost':
+      return { route: 'video', text: '映像設定を開く' };
+    case 'peer_unreachable':
+    case 'peer_rejected_passphrase':
+    case 'loss_high':
+      return { route: 'transport', text: '伝送設定を開く' };
+    default:
+      return null;
+  }
+}
+
 /** The thin status strip under the header. Warnings and errors never auto-hide. */
-export function AlertStrip({ link }: { link?: boolean }) {
+export function AlertStrip({ route }: { route?: Route }) {
   const { device, status } = useLive();
   if (!device || !status || status.alerts.length === 0) return null;
   const worst = status.alerts.some((a) => a.level === 'error') ? 'error' : 'warn';
@@ -118,6 +138,8 @@ export function AlertStrip({ link }: { link?: boolean }) {
     .map((a) => alertText(device.role, a, status.peer.id))
     .join('');
   const tone: Tone = worst === 'error' ? 'err' : 'warn';
+  // No link to the screen the operator is already on.
+  const link = alertLink(device.role, lead);
   return (
     <section role="status" aria-label="現在の状況" className={`strip tone-${tone}`}>
       <p>
@@ -127,7 +149,7 @@ export function AlertStrip({ link }: { link?: boolean }) {
         </span>
         <span className="strip-text">{text}</span>
       </p>
-      {link && <a href={href('transport')}>伝送設定を開く</a>}
+      {link && link.route !== route && <a href={href(link.route)}>{link.text}</a>}
     </section>
   );
 }
@@ -143,7 +165,7 @@ export function Shell({ route, banner, children }: { route: Route; banner?: Reac
       <div className="layout">
         <Nav current={route} />
         <div className="content">
-          {banner === undefined ? <AlertStrip link={route !== 'transport'} /> : banner}
+          {banner === undefined ? <AlertStrip route={route} /> : banner}
           <main className="main">{children}</main>
         </div>
       </div>

@@ -2,6 +2,16 @@
 
 送信機（TX）と受信機（RX）は同じプログラムを役割違いで動かします。GStreamer と iperf はコマンドとして起動せず、自作の常駐プログラムにライブラリとして組み込みます。パイプラインはコードの中で組み立て、画面とのやり取りは `/api/v1` だけにします。
 
+> **試作の段階の進め方（2026-11-04 の決定）**
+> いまは試作の段階なので、制御プロセス（Rust の常駐プログラム）が、いまある映像のプログラム（送信・エンコード制御・受信・再生。一部は Python）を **子プロセスとして起動して動かします**。設定はそれぞれの起動引数と環境変数で渡し、統計はそれぞれが書き出すファイルと出力から読みます。
+> そのため、この文書の次の決まりは **製品化の段階に先送り** します。
+> - 設定を起動引数や環境変数で渡さない（Unix ソケットで渡す）
+> - 機器に Python を置かない
+> - パイプラインをプロセスの中で組み立てる、回線テストをライブラリとして組み込む
+> - 「2. 外から見えるもの（隠し方）」の対策すべて（プロセス名・スレッド名・ディスク上のファイル名・パッケージ名など）
+>
+> 先送りしないもの：画面・API（パス、項目名、コード）・利用者に見えるログの文・HTTP ヘッダには実装の名前を出さない（`npm run check:terms`）。オフラインで動く。GPL のエンコーダを使わない。API の値と子プロセスの統計の対応は「5. API との対応」を参照。
+
 ```
 PC・タブレットのブラウザ
    │  HTTP + WebSocket（/api/v1。中立な名前だけ）
@@ -39,7 +49,7 @@ PC・タブレットのブラウザ
 ### 言語
 
 - Rust を推奨（gstreamer-rs は GStreamer の開発者が保守しているバインディング。Web は axum、静的ファイルの埋め込みは rust-embed。単一バイナリで配れる）。C++ でもよい。
-- Python はソースがそのまま機器に置かれるので使わない。
+- Python はソースがそのまま機器に置かれるので使わない（試作の段階では、いまある Python のプログラムを子プロセスとして使う。上の注記を参照）。
 
 ## 2. 外から見えるもの（隠し方）
 
@@ -69,21 +79,31 @@ PC・タブレットのブラウザ
 ## 4. ライセンス（出荷前に専門家に確認すること）
 
 - **GStreamer（LGPL）**：動的リンクのまま同梱すれば、自作部分を公開する必要はない。ライセンス表示と、利用者がライブラリを差し替えられることが条件。LGPL は「改変と、そのデバッグのためのリバースエンジニアリング」を認めるよう求めているので、利用規約でリバースエンジニアリングを全面的に禁じない。
-- **x264enc（GPL）**：映像設定の「ソフトウェア」エンコードを x264 で作ると、プログラム全体の公開を求められるおそれがある。ハードウェアエンコーダ（VA-API、NVENC、V4L2 など）、x264 の商用ライセンス、OpenH264（BSD）のいずれかにする。H.264 の特許の扱いも別に確認する。
+- **映像のエンコーダ**：映像は AV1 のソフトウェアエンコーダで作る。GPL のエンコーダ（x264 など）はプログラム全体の公開を求められるおそれがあるので使わない。AV1 のエンコーダのライセンスと特許の条件は出荷前に確認する。
 - **libsrt（MPL 2.0）・iperf3（BSD）**：ライセンス表示が必要。libsrt のファイルを変更したら、そのソースの公開も必要。
 - ライセンス一覧には名前が出るので、運用画面ではなく「機器情報」のライセンス表示や添付文書に置く。
 
 ## 5. API との対応（実装メモ）
 
-| API | 映像プロセスでの取り方 |
+試作の段階では、下の値を子プロセスの統計（送信側の高速統計、エンコード制御の記録、受信側の統計、再生側の 1 秒ごとの出力）から 1 秒ごとの差分で作る。
+
+| API | 取り方 |
 | --- | --- |
 | `Stats.rtt_ms` | 送受信の統計の RTT（`msRTT`） |
-| `Stats.loss_pct` | 損失パケット数 ÷ 受信（送信）パケット数 |
-| `Stats.retrans_pct` | 再送パケットの割合 |
-| `Stats.bandwidth_mbps` | 推定帯域（`mbpsBandwidth`） |
-| `Stats.send_late_5m` | 送信側で破棄したパケット（`pktSndDrop`）の直近 5 分 |
-| `Stats.unrecovered_5m` | 受信側で回復できなかったパケット（`pktRcvDrop`）の直近 5 分 |
-| `Stats.buffer_ms` / `TransportSettings.buffer` | `latency`（`SRTO_LATENCY`）。自動のときは前回の RTT の 4 倍以上を 20 ms 単位で切り上げて設定 |
-| `Stats.video_latency_ms` | 受信機の実測（映像のタイムスタンプと出力時刻の差） |
-| `Alert peer_rejected_passphrase` | 接続拒否の理由がパスフレーズ不一致のとき（`SRT_REJ_BADSECRET`） |
-| `TransportMode outbound / inbound / mutual` | caller / listener / rendezvous |
+| `Stats.loss_pct` | 送信機：再送パケット数 ÷ 送信パケット数（`pktRetrans` / `pktSent`。NAK による損失数は RTT が大きいと多めに出るので使わない）。受信機：損失パケット数 ÷ 届くはずのパケット数 |
+| `Stats.loss_threshold_pct` | 標準の遅延では `null`（損失は再送で補うので警告しない） |
+| `Stats.retrans_pct` | 受信機だけ。再送で届いたパケットの割合。送信機は `null` |
+| `Stats.send_mbps` | 送信バイト数の差分（再送分を含む） |
+| `Stats.target_mbps` / `actual_mbps` | エンコード制御のいまの目標 / エンコーダの出力の実測（5 秒平均） |
+| `Stats.bandwidth_mbps` | 送信待ちが溜まっているときの ACK レートからの推定（`nd_c`）。溜まっていないときは `null`（`mbpsBandwidth` は使わない） |
+| `Stats.delay_margin_s` / `delay_margin_warn_s` | never-drop 制御の残り予算（D0 − H。小数 1 桁は切り捨てで、`delay_margin_low` の `margin_s` と同じ値にする）。警告の基準（標準の遅延では 3 秒）を `delay_margin_warn_s` で返し、下回ったら `delay_margin_low` |
+| `Stats.send_late_5m` | 送信側で破棄したパケット（`pktSndDrop`）の直近 5 分（never-drop ではふつう 0） |
+| `Stats.unrecovered_5m` | 受信側で回復できなかったパケット（`pktRcvDrop` ＋ 欠番）の直近 5 分 |
+| `Stats.stalls_5m` / `stall_s_5m` | 再生側が数えた映像の停止の回数と合計秒数（直近 5 分） |
+| `Stats.delay_profile` / `delay_target_ms` / `TransportSettings.delay` | 標準：送受信の `latency`（`SRTO_LATENCY`）8000 ms と再生まで 9.5 s。低遅延（準備中）：約 1.5 s |
+| `Stats.video_latency_ms` | 受信機の実測（送信機に入った時刻と表示時刻の差）。測れるまでは `null` |
+| `Media.label` | 画面に出す名前。カメラは名前（例「Facecam 4K」）、ファイルはフォルダーを除いたファイル名。デバイスのパスは出さない |
+| `Impact reconnect_gap` / `input_switch_gap` の `gap_s` | 接続をやり直したときに受信側の映像が途切れる秒数。遅延の設定でおよそ決まる（標準で約 10 秒） |
+| `Event bitrate_changed` | エンコード制御の判断と切り替え完了の記録から。理由は損失 → `loss`、送り出しの遅れ → `delay`、上げ → `recovered`、操作 → `manual` |
+| `Alert peer_rejected_passphrase` | 接続拒否の理由がパスフレーズ不一致のとき（`SRT_REJ_BADSECRET`）。暗号化ができてから |
+| `TransportMode outbound / inbound / mutual` | caller / listener / rendezvous（いまは送信機が caller、受信機が listener だけ） |

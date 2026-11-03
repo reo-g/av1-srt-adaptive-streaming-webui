@@ -146,7 +146,7 @@ export function FullscreenPage() {
           <div className="left">
             <span style={{ fontSize: 18, fontWeight: 600 }}>{device.id}</span>
             <span>{tx ? '入力映像' : '受信映像'}</span>
-            <span className="dim">{mediaMeta(status.media).replace(' で表示', '')}</span>
+            <span className="dim">{mediaMeta(status.media)}</span>
           </div>
           <div className="right">
             <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>

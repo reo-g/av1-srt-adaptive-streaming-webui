@@ -37,6 +37,9 @@ In dev builds a small switcher (bottom right) changes the mock's role and scenar
    the daemon's private code and developer-only logs.
    The repository name is not a product name: never derive binary, package, service, host or
    file names on the device from it.
+   During the prototype phase the device-side part of this rule (process, thread, file and
+   package names on the device) is deferred; see "Prototype phase" below. The UI, the API,
+   user-visible log lines and HTTP headers must stay neutral now.
 2. **Offline.** No CDN, web font service, analytics or update check. Everything the UI needs is
    bundled into `web/dist` (the Geist font comes from `@fontsource-variable/geist`).
 3. **The API contract is the boundary.** UI and daemon talk only through `/api/v1` as described
@@ -50,7 +53,15 @@ In dev builds a small switcher (bottom right) changes the mock's role and scenar
 
 ## Building the device side (next step)
 
-Follow `docs/architecture.md`. In short: one control daemon (HTTP + WebSocket, serves `web/dist`)
+**Prototype phase (user decision 2026-11-04).** For now the daemon drives the existing media
+programs (sender, encoder bridge, receiver, player; some are Python) as child processes and
+passes their configuration through argv and environment variables. The rules "no argv/env",
+"no Python on the device", "pipelines built in-process", "bandwidth test linked as a library"
+and the hiding measures in `docs/architecture.md` §2 are deferred to the commercial phase.
+Still required now: neutral names in the UI, API, user-visible logs and HTTP headers
+(`npm run check:terms`), offline operation, no GPL encoders.
+
+The target design for the commercial phase: follow `docs/architecture.md`. In short: one control daemon (HTTP + WebSocket, serves `web/dist`)
 and one media process, both started by systemd under a dedicated user. The media process builds
 pipelines through the framework's API (never a command-line launcher, never a pipeline string),
 gives every element a neutral name, receives its configuration over a Unix socket (never argv or

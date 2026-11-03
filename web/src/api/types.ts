@@ -41,9 +41,10 @@ export interface Peer {
 }
 
 export type AlertCode =
-  | 'loss_high' // params: loss_pct, threshold_pct
-  | 'frames_dropped' // rx; params: frames, window_s
-  | 'peer_rejected_passphrase'
+  | 'delay_margin_low' // tx; params: margin_s. The margin before the receiver's picture would stop fell below about 3 s
+  | 'video_stalled' // rx; params: count, seconds, window_s. The picture stopped in the last window_s seconds
+  | 'loss_high' // params: loss_pct, threshold_pct. Not raised in the standard delay profile (losses are recovered by resending)
+  | 'peer_rejected_passphrase' // kept for when encryption is available
   | 'peer_unreachable'
   | 'input_lost';
 
@@ -57,8 +58,8 @@ export interface Alert {
 /** What the preview shows: the input on tx, the output on rx. */
 export interface Media {
   kind: 'camera' | 'file' | 'output';
-  label: string; // "/dev/video0", "/srv/media/a.mp4", "SDI OUT 1"
-  format: string | null; // "1080p59.94"; null while there is no signal
+  label: string; // what the operator recognises: camera name "Facecam 4K", file name "sample_2160p30.y4m", "OUT 1"
+  format: string | null; // "3840×2160　30p" (U+3000 between); null while there is no signal
   preview_fps: number; // ≈5
   audio: 'none';
   black: boolean; // rx: the output is black
@@ -80,35 +81,50 @@ export interface Status {
 
 // ---------------------------------------------------------------- stats
 
+/**
+ * standard  about 10 s from capture to display; tolerant of a bad line; automatic quality works
+ * low       about 1.5 s; picture quality fixed; a bad line makes the picture stop more easily
+ */
+export type DelayProfile = 'standard' | 'low';
+
+/** Fields that do not apply to the role, or cannot be measured now, are null. */
 export interface Stats {
   at: string;
-  loss_pct: number | null;
-  loss_threshold_pct: number; // 1.0
+  delay_profile: DelayProfile; // profile in effect
+  delay_target_ms: number; // target delay of that profile (capture to display), e.g. 9500
+  loss_pct: number | null; // line loss; tx: resent ÷ sent packets, rx: lost ÷ expected packets
+  /** Above this loss_high is raised. null while losses are recovered by resending (standard profile). */
+  loss_threshold_pct: number | null;
   rtt_ms: number | null;
   last_rtt_ms: number | null; // shown as "前回 38 ms" while rtt is unavailable
-  retrans_pct: number | null; // tx 再送率 / rx 再送の割合
-  buffer_ms: number; // transmission buffer in effect
-  buffer_mode: 'auto' | 'manual';
+  retrans_pct: number | null; // rx only: share of packets that arrived by resending (null on tx)
   // tx only (null on rx)
-  send_mbps: number | null;
-  target_mbps: number | null;
-  bandwidth_mbps: number | null;
+  send_mbps: number | null; // what goes out on the line, resends included
+  target_mbps: number | null; // video bitrate the device aims at now
+  actual_mbps: number | null; // video bitrate actually produced (5 s mean)
+  bandwidth_mbps: number | null; // estimated line capacity; only measurable while the line is crowded
   send_late_5m: number | null; // packets that could not be sent in time, last 5 min
+  delay_margin_s: number | null; // seconds left before the receiver's picture would stop (≈6 s normally); 1 decimal rounded down, same as delay_margin_low.margin_s
+  /** Below this margin delay_margin_low is raised (about 3 s in the standard profile). */
+  delay_margin_warn_s: number | null;
   // rx only (null on tx)
   recv_mbps: number | null;
-  frames_dropped_5m: number | null;
-  video_latency_ms: number | null; // measured glass-to-output latency
+  stalls_5m: number | null; // times the picture stopped, last 5 min
+  stall_s_5m: number | null; // total seconds the picture stood still, last 5 min
+  video_latency_ms: number | null; // measured capture-to-display delay; null until it is really measured
   unrecovered_5m: number | null; // packets that could not be recovered, last 5 min
 }
 
 export type Metric =
   | 'send_mbps'
   | 'recv_mbps'
+  | 'target_mbps'
+  | 'actual_mbps'
   | 'loss_pct'
   | 'rtt_ms'
   | 'bandwidth_mbps'
-  | 'video_latency_ms'
-  | 'frames_dropped';
+  | 'delay_margin_s' // tx
+  | 'stall_s'; // rx: seconds the picture stood still in each interval
 
 /** Sparkline data: oldest first, `null` where nothing was measured. */
 export interface StatsHistory {
@@ -120,8 +136,9 @@ export interface StatsHistory {
 // ---------------------------------------------------------------- events
 
 export type EventCode =
+  | 'delay_margin_low' // tx; params: margin_s
+  | 'video_stalled' // rx; params: seconds
   | 'loss_high' // params: loss_pct
-  | 'frames_dropped' // params: frames
   | 'peer_rejected_passphrase'
   | 'peer_disconnected'
   | 'peer_connected'
@@ -130,11 +147,20 @@ export type EventCode =
   | 'listening_started' // params: port
   | 'input_detected' // params: format
   | 'device_started'
-  | 'bitrate_changed' // params: mbps
+  | 'bitrate_changed' // params: mbps, from_mbps, reason (BitrateReason)
   | 'video_settings_applied'
   | 'transport_settings_applied'
   | 'passphrase_changed'
   | 'network_test_done'; // params: mbps
+
+/**
+ * Why the video bitrate changed (bitrate_changed.reason).
+ * loss       the line got crowded and losses grew (automatic, down)
+ * delay      sending fell behind (automatic, down)
+ * recovered  the line has room again (automatic, up)
+ * manual     an operator changed the bitrate or the mode
+ */
+export type BitrateReason = 'loss' | 'delay' | 'recovered' | 'manual';
 
 export interface DeviceEvent {
   id: string;
@@ -157,7 +183,7 @@ export type LiveMessage =
 // ---------------------------------------------------------------- shared settings types
 
 export interface FieldError {
-  /** Dotted path of the input field, e.g. "encode.manual.bitrate_mbps". */
+  /** Dotted path of the input field, e.g. "encode.manual.bitrate_mbps", "delay.profile". */
   field: string;
   code: 'out_of_range' | 'required' | 'too_short' | 'too_long' | 'invalid';
   params?: Params; // min, max
@@ -165,19 +191,17 @@ export interface FieldError {
 
 export type ImpactCode =
   // video
-  | 'input_switch_gap'
-  | 'encoder_restart_gap'
-  | 'connection_kept'
+  | 'input_switch_gap' // params: gap_s; reconnect_gap comes with it (the UI shows the pair as one line)
+  | 'switch_no_gap'
   | 'manual_fixed'
   | 'auto_decides'
   | 'bitrate_lower_quality'
   | 'bitrate_near_bandwidth' // params: bandwidth_mbps
-  // transport
+  // transport (reconnect_gap also when the input changes while live)
   | 'reconnect'
-  | 'reconnect_gap'
+  | 'reconnect_gap' // params: gap_s
   | 'no_peer_effect'
-  | 'saved_while_stopped'
-  | 'buffer_below_guide'; // params: guide_ms
+  | 'saved_while_stopped';
 
 export interface Impact {
   level: 'warn' | 'ok' | 'info';
@@ -204,16 +228,9 @@ export interface ApiError {
 
 // ---------------------------------------------------------------- video settings (tx)
 
+/** The only encoding parameter that can be chosen. Everything else is fixed (VideoOptions.encoding). */
 export interface EncodeParams {
-  resolution: 'source' | '1280x720';
-  framerate: 'source' | '29.97';
   bitrate_mbps: number;
-  rate_control: 'cbr' | 'vbr';
-  codec: 'h264' | 'h265';
-  profile: 'high' | 'main' | 'baseline';
-  keyframe_s: number;
-  bframes: 0 | 1 | 2;
-  encoder: 'hardware' | 'software';
 }
 
 export interface VideoSettings {
@@ -221,14 +238,15 @@ export interface VideoSettings {
   input: {
     kind: 'camera' | 'file';
     camera: string; // "/dev/video0"
-    file: string; // "/srv/media/colorbars_1080p59.mp4"
-    loop: boolean;
+    file: string; // "/srv/media/sample_2160p30.y4m"
+    loop: boolean; // only when VideoOptions.loop_available
   };
   encode: {
+    /** auto: the device lowers the bitrate when the line gets crowded and raises it when there is room. manual: fixed. */
     mode: 'auto' | 'manual';
-    /** Values used in manual mode. Kept while in auto so switching back restores them. */
+    /** The fixed bitrate. Kept while in auto so switching back restores it. */
     manual: EncodeParams;
-    /** Read only: what the device chose in auto mode right now. */
+    /** Read only: the bitrate auto mode aims at right now (the live value is Stats.target_mbps). */
     auto: EncodeParams;
   };
   audio: { enabled: false };
@@ -240,17 +258,26 @@ export interface VideoSettingsInput {
   encode: { mode: 'auto' | 'manual'; manual: EncodeParams };
 }
 
+/** Fixed encoding: shown read-only. "source" = the same as the input. */
+export interface VideoEncoding {
+  codec: 'av1';
+  resolution: 'source';
+  framerate: 'source';
+  keyframe_s: number; // 2
+}
+
 export interface VideoOptions {
-  cameras: { device: string; label: string; signal: string | null }[]; // signal "1920×1080　59.94p"
-  files: { path: string; format: string; duration_s: number }[];
-  bitrate_range_mbps: [number, number]; // [1, 40]
-  keyframe_range_s: [number, number]; // [0.5, 10]
-  bandwidth_mbps: number | null; // for the hint "回線の推定帯域は 52 Mbps"
+  cameras: { device: string; label: string; signal: string | null }[]; // signal "3840×2160　30p" (U+3000 between)
+  files: { path: string; format: string; duration_s: number }[]; // format "3840×2160　30p"
+  loop_available: boolean; // false: files play once
+  bitrate_range_mbps: [number, number]; // [1.5, 4.0]
+  encoding: VideoEncoding;
+  bandwidth_mbps: number | null; // estimated line capacity, null unless the line is crowded
 }
 
 // ---------------------------------------------------------------- transport settings (tx)
 
-export type TransportMode = 'outbound' | 'inbound' | 'mutual'; // 発信 / 待ち受け / 相互接続
+export type TransportMode = 'outbound' | 'inbound' | 'mutual'; // 送信機から接続 / 接続を待つ / 互いに接続
 export type Cipher = 'aes-128' | 'aes-192' | 'aes-256' | 'none';
 
 export interface TransportSettings {
@@ -258,13 +285,7 @@ export interface TransportSettings {
   mode: TransportMode;
   peer: { host: string; port: number };
   listen_port: number;
-  buffer: {
-    mode: 'auto' | 'manual';
-    manual_ms: number;
-    auto_ms: number; // what auto mode uses now
-    last_rtt_ms: number | null; // RTT the auto value was based on
-    guide_min_ms: number | null; // 4 × RTT
-  };
+  delay: { profile: DelayProfile };
   encryption: {
     cipher: Cipher;
     passphrase_set: boolean; // the value itself is never returned
@@ -277,7 +298,7 @@ export interface TransportSettingsInput {
   mode: TransportMode;
   peer: { host: string; port: number };
   listen_port: number;
-  buffer: { mode: 'auto' | 'manual'; manual_ms: number };
+  delay: { profile: DelayProfile };
   encryption: {
     cipher: Cipher;
     /** Write only. Omit to keep the current value. */
@@ -285,8 +306,12 @@ export interface TransportSettingsInput {
   };
 }
 
+/** What can be chosen. A control with a single choice is shown as text. */
 export interface TransportOptions {
-  buffer_presets_ms: number[]; // [80, 120, 160, 200, 300, 500, 1000]
+  modes: TransportMode[]; // ["outbound"]
+  ciphers: Cipher[]; // ["none"]
+  /** available=false: shown but cannot be chosen yet (「準備中」). */
+  delay_profiles: { profile: DelayProfile; target_ms: number; available: boolean }[];
 }
 
 export type CompareRow =
@@ -297,14 +322,7 @@ export type CompareRow =
       peer: { listen_port: number } | null;
       verdict: 'match' | 'mismatch' | 'unknown';
     }
-  | {
-      key: 'buffer';
-      local_ms: number;
-      local_mode: 'auto' | 'manual';
-      peer_ms: number | null;
-      effective_ms: number | null; // the larger of the two is used
-      verdict: 'effective' | 'unknown';
-    }
+  | { key: 'delay'; local: DelayProfile; peer: DelayProfile | null; verdict: 'match' | 'mismatch' | 'unknown' }
   | { key: 'cipher'; local: Cipher; peer: Cipher | null; verdict: 'match' | 'mismatch' | 'unknown' }
   | { key: 'passphrase'; local_set: boolean; verdict: 'match' | 'mismatch' | 'unknown'; reason: 'peer_rejected' | null };
 
