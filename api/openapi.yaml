@@ -253,7 +253,7 @@ components:
         retrans_pct: { type: [number, 'null'], description: rx only (share of packets that arrived by resending); null on tx }
         send_mbps: { type: [number, 'null'], description: tx; what goes out on the line, resends included (6 s mean) }
         target_mbps: { type: [number, 'null'], description: tx; video bitrate aimed at now (automatic step or the fixed value) }
-        actual_mbps: { type: [number, 'null'], description: tx; video bitrate actually produced, 6 s mean (3 keyframe intervals) }
+        actual_mbps: { type: [number, 'null'], description: tx; video bitrate actually produced: mean of the last 3 keyframe intervals (about 6 s) }
         bandwidth_mbps: { type: [number, 'null'], description: tx; estimated line capacity, only measurable while the line is crowded (null while the device's own sending cap is the limit) }
         send_late_5m: { type: [integer, 'null'], description: tx; packets that could not be sent in time, last 5 min }
         delay_margin_s: { type: [number, 'null'], description: "tx; seconds left before the receiver's picture would stop (about 6 s normally); one decimal rounded down, the same value as delay_margin_low.margin_s" }

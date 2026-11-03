@@ -153,6 +153,9 @@ pub struct TickRow {
     /// sending-rate cap in force, kbps; a capacity sample at or near it measured the cap, not the line
     #[serde(rename = "nd_Mnow")]
     pub nd_mnow: Option<f64>,
+    /// realized video rate on GOP boundaries (mean of the active encoder's last 3 GOPs), kbps
+    #[serde(rename = "R_enc")]
+    pub r_enc: Option<f64>,
 }
 
 /// Controller event (BRIDGE_EVENTS_JSONL); `decide` and `complete` are joined by `cmd`.
@@ -325,6 +328,9 @@ struct TxState {
     outstanding: bool,
     tick: Option<TickRow>,
     tick_at: Option<Instant>,
+    /// last GOP-boundary rate (kbps) and when it was read: shown across a switch until the new
+    /// encoder has closed a GOP
+    last_r_enc: Option<(Instant, f64)>,
     decides: HashMap<String, EventRow>,
 }
 
@@ -627,6 +633,16 @@ impl Sampler {
             if let (true, Some(k)) = (fresh(t.tick_at), &t.tick) {
                 st.target_mbps = k.cur.map(|c| round(c / 1000.0, 2));
                 st.bandwidth_mbps = line_capacity(k).map(|c| round(c / 1000.0, 2));
+                // the controller's GOP-boundary rate when it has one (a fixed window swings with the
+                // number of keyframes it holds); the window mean right after a switch
+                if let Some(r) = k.r_enc {
+                    t.last_r_enc = Some((now, r));
+                }
+                if let Some((at, r)) = t.last_r_enc {
+                    if now.duration_since(at) <= R_ENC_HOLD {
+                        st.actual_mbps = Some(round(r / 1000.0, 2));
+                    }
+                }
                 st.delay_margin_s = k.nd_budget.map(|b| floor1(b.max(0.0)));
             }
             // Silence between the rows' own times; by arrival time only when no rows come at all.
@@ -766,6 +782,10 @@ impl RxState {
 /// the shown rate swung between 2.8 and 4.2 Mbps; a whole number of intervals always holds 3.
 const RATE_WINDOW_S: f64 = 6.0;
 
+/// How long the last GOP-boundary rate is shown while a new encoder has not closed a GOP yet
+/// (a switch takes about 5-8 s until then; the window mean meanwhile spans the switch and dips).
+const R_ENC_HOLD: Duration = Duration::from_secs(15);
+
 /// Send rate (Mbps) and resent share of the packets (%) over the last RATE_WINDOW_S; None before 1 s
 /// of rows.
 fn sent_rates(sent: &VecDeque<(f64, f64, f64, f64)>) -> Option<(f64, Option<f64>)> {
@@ -853,8 +873,26 @@ mod tests {
     }
 
     #[test]
+    fn actual_rate_prefers_the_gop_boundary_rate() {
+        let d = tmpdir("tx_renc");
+        let fast: Vec<&str> = FAST_ROWS.lines().collect();
+        let mut s = Sampler::new(Role::Tx, 9500, 3.0, None);
+        let t0 = Instant::now();
+        append(&d.join(FAST), &fast[..11]);
+        append(&d.join(TICKS), &[r#"{"cur":3500,"nd_budget":6.4,"nd_c":null,"R_enc":2412.7}"#]);
+        let o = s.sample(live(&d), t0);
+        assert_eq!(o.stats.actual_mbps, Some(2.41));
+        append(&d.join(TICKS), &[r#"{"cur":2500,"nd_budget":6.4,"nd_c":null,"R_enc":null}"#]);
+        let o = s.sample(live(&d), t0 + Duration::from_secs(1));
+        assert_eq!(o.stats.actual_mbps, Some(2.41), "no GOP closed yet after a switch: the last GOP rate");
+        let o = s.sample(live(&d), t0 + Duration::from_secs(17));
+        assert_eq!(o.stats.actual_mbps, None, "held 15 s at most (and the rows are stale by now)");
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
     fn capacity_at_the_cap_is_not_the_line() {
-        let k = |c: Option<f64>, m: Option<f64>| TickRow { cur: None, nd_budget: None, nd_c: c, nd_mnow: m };
+        let k = |c: Option<f64>, m: Option<f64>| TickRow { nd_c: c, nd_mnow: m, ..TickRow::default() };
         assert_eq!(line_capacity(&k(Some(5050.0), Some(5000.0))), None, "at the cap: line not measured");
         assert_eq!(line_capacity(&k(Some(4600.0), Some(5000.0))), None, "0.92 of the cap");
         assert_eq!(line_capacity(&k(Some(2875.3), Some(5400.0))), Some(2875.3));
