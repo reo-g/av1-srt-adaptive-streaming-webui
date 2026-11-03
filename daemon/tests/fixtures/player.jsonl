@@ -1,0 +1,4 @@
+{"t":5100.0,"frames":30,"fps":30.0,"stalls":0,"stall_ms":0,"last_gap_ms":34.0,"pts":1.0}
+{"t":5101.0,"frames":60,"fps":30.0,"stalls":0,"stall_ms":0,"last_gap_ms":35.1,"pts":2.0}
+{"t":5102.0,"frames":88,"fps":28.0,"stalls":1,"stall_ms":433,"last_gap_ms":466.3,"pts":2.93}
+{"t":5103.0,"frames":118,"fps":30.0,"stalls":1,"stall_ms":433,"last_gap_ms":33.4,"pts":3.93}

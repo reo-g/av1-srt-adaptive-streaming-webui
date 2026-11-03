@@ -410,7 +410,10 @@ function TransportSettingsTx() {
       api.transport.compare().then(setCompare).catch(() => undefined);
     } catch (e) {
       setPhase('edit');
-      if (e instanceof ApiFailure && e.status === 409) {
+      if (e instanceof ApiFailure && e.body?.error.code === 'busy') {
+        // The device applies settings only while the transmission is stopped (for now).
+        setNotice('伝送中は設定を適用できません。運用画面で伝送を停止してから、もう一度適用してください。');
+      } else if (e instanceof ApiFailure && e.status === 409) {
         setNotice('ほかの画面で設定が変わったため、適用しませんでした。最新の値を読み込みました。');
         reload();
       } else {

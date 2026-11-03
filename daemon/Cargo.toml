@@ -1,0 +1,22 @@
+[package]
+name = "ctrld"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+# Pick dependency versions that build with rust-version (the dev machine has 1.85).
+resolver = "3"
+publish = false
+description = "Device daemon: serves the web UI and the device API, drives the media programs"
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
+libc = "0.2"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
+toml = "0.8"
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,8 @@
+{"ev":"decide","cmd":7,"cause":"nd-budget","first_actor":"nd","t":12005.2,"wall_rel":5.2,"R_old":3500,"R_new":2500,"state":"NORMAL","raw":0,"B":0.4,"A":0.3,"t_rel":5.2}
+{"ev":"cycle_ret","cmd":7,"t":12005.25,"dur":0.05,"new_enc":2,"t_rel":5.25}
+{"ev":"new_first_out","cmd":7,"t":12006.9,"pts":6.9,"size":81234,"key":1,"t_rel":6.9}
+{"ev":"old_last_out","cmd":7,"t":12007.1,"frames":51,"bytes":712345,"t_rel":7.1}
+{"ev":"complete","cmd":7,"t":12007.1,"wall_rel":7.1,"H_cmd":2.31,"t_rel":7.1}
+{"ev":"decide","cmd":8,"cause":"nd-up","first_actor":"nd","t":12008.0,"wall_rel":8.0,"R_old":2500,"R_new":3000,"state":"NORMAL","raw":0,"t_rel":8.0}
+{"ev":"complete","cmd":8,"t":12009.9,"wall_rel":9.9,"H_cmd":2.2,"t_rel":9.9}
+{"ev":"decide","cmd":9,"cause":"loss","first_actor":"legacy","t":12010.5,"wall_rel":10.5,"R_old":3000,"R_new":2500,"state":"NORMAL","raw":0,"t_rel":10.5}

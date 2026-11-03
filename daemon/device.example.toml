@@ -1,0 +1,57 @@
+# ctrld device configuration (default path ~/.config/ctrld/device.toml, or --config <path>).
+# This example is for the transmitter (tx). For the receiver set role = "rx", drop [tx] and
+# set [rx].listen_port; the [profile] tables for the other role are ignored.
+
+id = "TX-01"                 # shown in the UI
+role = "tx"                  # "tx" | "rx"
+serial = "EVO-X2-0001"
+
+# run_dir = "/run/user/1000/ctrld"   # default $XDG_RUNTIME_DIR/ctrld (tmpfs): per-session working files
+# state_dir = "~/.local/state/ctrld" # applied settings (settings.json)
+# archive_dir = "~/ctrld/archive"    # keep every session's files (stats, logs) for offline analysis
+# archive_video = false              # rx with archive_dir: also keep the received stream (~1.8 GB/h)
+
+[http]
+bind = "0.0.0.0"
+port = 8080
+
+[media]
+# A copy of the system repo with the same layout, kept apart from the experiment scripts.
+repo = "~/ctrld/media"
+# python = "python3"
+# sender = "sender/scripts/srt_proper_sender"
+# bridge = "sender/scripts/encoder_restart_bridge.py"
+# receiver = "receiver/srt_proper_receiver"
+# player = "receiver/scripts/ll_player.py"
+# bridge_cwd = "~/ctrld/media/sender"       # default <repo>/sender (the bridge's curve file is relative)
+# The children inherit only a fixed list of variables (PATH, HOME, locale, XDG_*, plugin and
+# driver paths; see README); add more names here, a trailing * is a prefix.
+# pass_env = ["GST_DEBUG*"]
+
+[tx]
+camera = "/dev/video0"
+peer_host = "192.168.0.88"   # initial receiver address; the transport settings screen changes it later
+peer_port = 60021
+# media_dir = "~/ctrld/media/test_data"     # 4K30 .y4m files that can be chosen as input
+
+[rx]
+listen_port = 60021
+
+# The profile: environment and arguments of each child. The built-in defaults are the standard
+# profile (the current automatic mode, see daemon/src/profile.rs). Entries here replace a
+# default; an empty string removes it. The daemon adds the session file paths itself.
+[profile.bridge_env]
+# SVT_PRESET = 8
+# HYSTER_UP_SEC = 60
+
+[profile.sender_env]
+# SRT_OHEADBW = 50
+
+[profile.receiver_env]
+
+# [profile]
+# sender_args = ["-", "{peer_host}", "{peer_port}", "8000", "live", "10000", "5000"]
+# receiver_args = ["{out}", "{listen_port}", "8000"]
+# player_args = ["--out", "/dev/null", "--dec", "vaav1dec", "--ts-offset-ms", "7000", "--no-record", "--stats-fd", "4"]
+# delay_target_ms = 9500
+# delay_margin_warn_s = 3.0

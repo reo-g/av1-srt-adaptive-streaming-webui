@@ -1,0 +1,8 @@
+{"t":1001.0,"frames":30,"fps":30.0,"stalls":0,"stall_ms":0.0,"last_gap_ms":33.3,"pts":null}
+{"t":1002.0,"frames":60,"fps":30.0,"stalls":0,"stall_ms":0.0,"last_gap_ms":33.3,"pts":null}
+{"t":1003.0,"frames":60,"fps":0.0,"stalls":1,"stall_ms":1000.0,"last_gap_ms":1033.3,"pts":null}
+{"t":1004.0,"frames":60,"fps":0.0,"stalls":1,"stall_ms":2000.0,"last_gap_ms":2033.3,"pts":null}
+{"t":1005.0,"frames":66,"fps":6.0,"stalls":2,"stall_ms":2800.0,"last_gap_ms":2533.3,"pts":null}
+{"t":1006.0,"frames":90,"fps":24.0,"stalls":2,"stall_ms":3000.0,"last_gap_ms":533.3,"pts":null}
+{"t":1007.0,"frames":120,"fps":30.0,"stalls":2,"stall_ms":3000.0,"last_gap_ms":33.3,"pts":null}
+{"t":1008.0,"frames":150,"fps":30.0,"stalls":2,"stall_ms":3000.0,"last_gap_ms":33.3,"pts":null}
