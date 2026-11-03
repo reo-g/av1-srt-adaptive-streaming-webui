@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>映像設定 — 送信機</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#FFFFFF;text-wrap:pretty;word-break:auto-phrase;overflow-wrap:break-word}
+*{box-sizing:border-box}
+h1,h2,h3{text-wrap:balance}
+button,input,select{font:inherit;color:inherit}
+a{color:#1B1F24;text-underline-offset:3px}a:hover{color:#556174}
+:focus-visible{outline:2px solid #1B1F24;outline-offset:2px}
+</style>
+</helmet>
+<div style="min-height: 100dvh; display: flex; flex-direction: column; background: #FFFFFF; color: #1B1F24; font-family: 'Geist', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic UI', 'BIZ UDPGothic', Meiryo, sans-serif; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 32px; min-height: 56px; padding: 8px 24px; background: #FFFFFF; border-bottom: 1px solid #E1E6EC">
+  <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px">
+    <span style="font-size: 16px; font-weight: 600">TX-01</span>
+    <span style="color: #556174">送信機</span>
+    <span style="color: #87929F">192.168.10.21</span>
+  </div>
+  <div style="display: flex; align-items: center; gap: 8px">
+    <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z" fill="#1D7A4C"></path></svg>
+    <span style="font-weight: 600; color: #1D7A4C">伝送中</span>
+    <span style="color: #556174">00:42:45</span>
+    <span aria-hidden="true" style="width: 1px; height: 16px; margin: 0 8px; background: #E1E6EC"></span>
+    <span style="font-size: 16px; font-weight: 500">10:42:50<span style="margin-left: 4px; font-size: 13px; font-weight: 400; color: #556174">JST</span></span>
+  </div>
+</header>
+
+<div style="flex: 1 1 auto; display: flex; align-items: stretch">
+  <nav aria-label="メニュー" style="flex: 0 0 200px; padding: 16px 12px 32px; background: #F6F8FA; border-right: 1px solid #E1E6EC">
+    <a href="R-ops-a.dc.html" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">運用</a>
+    <div style="margin: 20px 12px 4px; font-size: 12px; color: #87929F">設定</div>
+    <a href="R-av.dc.html" aria-current="page" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 0 4px 4px 0; background: #FFFFFF; box-shadow: inset 3px 0 0 #1B1F24; color: #1B1F24; font-weight: 600; text-decoration: none">映像<sc-if value="{{ hasN }}" hint-placeholder-val="{{ true }}"><span aria-label="未適用の変更 {{ n }} 件" style="min-width: 20px; padding: 0 6px; border-radius: 10px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px; text-align: center">{{ n }}</span></sc-if></a>
+    <a href="R-trans.dc.html" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">伝送</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">録画</a>
+    <div style="margin: 20px 12px 4px; font-size: 12px; color: #87929F">管理</div>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">ネットワーク</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">ログ</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">機器情報</a>
+  </nav>
+
+  <div style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column">
+    <main style="flex: 1 1 auto; padding: 24px 32px 40px">
+      <div style="background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px">
+        <div style="padding: 24px 28px; border-bottom: 1px solid #E1E6EC">
+          <h1 style="margin: 0; font-size: 20px; font-weight: 600">映像設定</h1>
+          <p style="margin: 2px 0 0; font-size: 13px; color: #556174">送信機 TX-01 は伝送中です。変更は「適用」するまで機器に反映されません。音声はいまは送りません。</p>
+        </div>
+
+        <div style="display: flex; flex-wrap: wrap; align-items: stretch">
+          <div style="flex: 999 1 520px; min-width: 0; padding: 0 0 16px">
+
+            <section aria-labelledby="av-in">
+              <h2 id="av-in" style="margin: 0; padding: 24px 28px 10px; font-size: 16px; font-weight: 600">入力</h2>
+              <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5; background: {{ srcBg }}">
+                <div style="flex: 1 1 200px; min-width: 0; padding-top: 8px"><span id="av-src-l" style="display: flex; align-items: center; gap: 8px; font-weight: 600">入力の種類<sc-if value="{{ srcC }}" hint-placeholder-val="{{ false }}"><span style="padding: 0 6px; border-radius: 3px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px">変更</span></sc-if></span></div>
+                <div style="flex: 2 1 300px; min-width: 0">
+                  <div role="group" aria-labelledby="av-src-l" style="display: inline-flex; border: 1px solid #BFC7D2; border-radius: 4px; overflow: hidden"><button type="button" aria-pressed="{{ isCam }}" onClick="{{ pickCam }}" style="min-height: 40px; padding: 0 16px; border: 0; font-weight: 600; cursor: pointer; {{ segCam }}">カメラ</button><button type="button" aria-pressed="{{ isFile }}" onClick="{{ pickFile }}" style="min-height: 40px; padding: 0 16px; border: 0; border-left: 1px solid #BFC7D2; font-weight: 600; cursor: pointer; {{ segFile }}">映像ファイル</button></div>
+                  <sc-if value="{{ srcC }}" hint-placeholder-val="{{ false }}"><div style="display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-top: 6px; font-size: 13px; color: #556174">適用中　{{ aSrc }}<button type="button" onClick="{{ revSrc }}" style="padding: 0; border: 0; background: none; color: #1B1F24; font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button></div></sc-if>
+                </div>
+              </div>
+              <sc-if value="{{ isCam }}" hint-placeholder-val="{{ true }}">
+                <div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                    <div style="flex: 1 1 200px; min-width: 0"><label for="av-dev" style="font-weight: 600">デバイス</label><div style="font-size: 13px; color: #556174">この機器につながっている映像デバイス</div></div>
+                    <div style="flex: 2 1 300px; min-width: 0"><select id="av-dev" style="min-width: 300px; max-width: 100%; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>/dev/video0（HD Capture）</option><option>/dev/video2（USB Camera）</option></select></div>
+                  </div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                    <div style="flex: 1 1 200px; min-width: 0"><div style="font-weight: 600">検出された入力信号</div><div style="font-size: 13px; color: #556174">デバイスから検出した値です（変更できません）</div></div>
+                    <div style="flex: 2 1 300px; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 40px"><span style="padding: 0 6px; border: 1px solid #1B1F24; border-radius: 3px; font-size: 12px; font-weight: 500; line-height: 18px">実測</span><span style="font-size: 16px; font-weight: 500">1920×1080　59.94p</span></div>
+                  </div>
+                </div>
+              </sc-if>
+              <sc-if value="{{ isFile }}" hint-placeholder-val="{{ false }}">
+                <div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                    <div style="flex: 1 1 200px; min-width: 0; padding-top: 8px"><label for="av-file" style="font-weight: 600">ファイル</label></div>
+                    <div style="flex: 2 1 300px; min-width: 0">
+                      <select id="av-file" style="min-width: 300px; max-width: 100%; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>/srv/media/colorbars_1080p59.mp4</option><option>/srv/media/sample_1080p30.mp4</option></select>
+                      <label style="display: flex; align-items: center; gap: 8px; margin-top: 10px"><input type="checkbox" checked="checked" style="width: 16px; height: 16px; margin: 0; accent-color: #1B1F24">最後まで再生したら最初から繰り返す</label>
+                    </div>
+                  </div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                    <div style="flex: 1 1 200px; min-width: 0"><div style="font-weight: 600">ファイルの形式</div><div style="font-size: 13px; color: #556174">ファイルから読み取った値です（変更できません）</div></div>
+                    <div style="flex: 2 1 300px; min-width: 0; display: flex; align-items: center; gap: 10px; min-height: 40px"><span style="padding: 0 6px; border: 1px solid #1B1F24; border-radius: 3px; font-size: 12px; font-weight: 500; line-height: 18px">実測</span><span style="font-size: 16px; font-weight: 500">1920×1080　59.94p　長さ 10:00</span></div>
+                  </div>
+                </div>
+              </sc-if>
+            </section>
+
+            <section aria-labelledby="av-ve">
+              <h2 id="av-ve" style="margin: 0; padding: 28px 28px 10px; font-size: 16px; font-weight: 600">映像エンコード</h2>
+              <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5; background: {{ modeBg }}">
+                <div style="flex: 1 1 200px; min-width: 0"><span id="av-mode-l" style="display: flex; align-items: center; gap: 8px; font-weight: 600">エンコードの設定<sc-if value="{{ modeC }}" hint-placeholder-val="{{ true }}"><span style="padding: 0 6px; border-radius: 3px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px">変更</span></sc-if></span><div style="font-size: 13px; color: #556174">自動では、入力と回線の状態に合わせて機器が決めます</div></div>
+                <div style="flex: 2 1 300px; min-width: 0">
+                  <div role="group" aria-labelledby="av-mode-l" style="display: inline-flex; border: 1px solid #BFC7D2; border-radius: 4px; overflow: hidden"><button type="button" aria-pressed="{{ isAuto }}" onClick="{{ pickAuto }}" style="min-height: 40px; padding: 0 16px; border: 0; font-weight: 600; cursor: pointer; {{ segAuto }}">自動</button><button type="button" aria-pressed="{{ isManual }}" onClick="{{ pickManual }}" style="min-height: 40px; padding: 0 16px; border: 0; border-left: 1px solid #BFC7D2; font-weight: 600; cursor: pointer; {{ segManual }}">手動</button></div>
+                  <sc-if value="{{ modeC }}" hint-placeholder-val="{{ true }}"><div style="display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-top: 6px; font-size: 13px; color: #556174">適用中　{{ aMode }}<button type="button" onClick="{{ revMode }}" style="padding: 0; border: 0; background: none; color: #1B1F24; font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button></div></sc-if>
+                </div>
+              </div>
+
+              <sc-if value="{{ isAuto }}" hint-placeholder-val="{{ false }}">
+                <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                  <div style="flex: 1 1 200px; min-width: 0"><div style="display: flex; align-items: center; gap: 8px; font-weight: 600">いまの値<span style="padding: 0 6px; border: 1px solid #1B1F24; border-radius: 3px; font-size: 12px; font-weight: 500; line-height: 18px">自動</span></div><div style="font-size: 13px; color: #556174">機器が決めた値です。手動にすると変更できます</div></div>
+                  <div style="flex: 2 1 300px; min-width: 0">
+                    <dl style="display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 24px; margin: 0">
+                      <dt style="color: #556174">解像度</dt><dd style="margin: 0">1920×1080（入力と同じ）</dd>
+                      <dt style="color: #556174">フレームレート</dt><dd style="margin: 0">59.94p（入力と同じ）</dd>
+                      <dt style="color: #556174">ビットレート</dt><dd style="margin: 0">{{ aBrAuto }}（回線に合わせて調整）</dd>
+                      <dt style="color: #556174">コーデック</dt><dd style="margin: 0">H.264 High</dd>
+                    </dl>
+                  </div>
+                </div>
+              </sc-if>
+
+              <sc-if value="{{ isManual }}" hint-placeholder-val="{{ true }}">
+                <div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                    <div style="flex: 1 1 200px; min-width: 0"><label for="av-res" style="font-weight: 600">解像度</label></div>
+                    <div style="flex: 2 1 300px; min-width: 0"><select id="av-res" style="min-width: 240px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>入力と同じ（1920×1080）</option><option>1280×720</option></select></div>
+                  </div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                    <div style="flex: 1 1 200px; min-width: 0"><label for="av-fps" style="font-weight: 600">フレームレート</label></div>
+                    <div style="flex: 2 1 300px; min-width: 0"><select id="av-fps" style="min-width: 240px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>入力と同じ（59.94p）</option><option>29.97p</option></select></div>
+                  </div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5; background: {{ brBg }}">
+                    <div style="flex: 1 1 200px; min-width: 0"><label for="av-br" style="display: flex; align-items: center; gap: 8px; font-weight: 600">ビットレート<sc-if value="{{ brC }}" hint-placeholder-val="{{ true }}"><span style="padding: 0 6px; border-radius: 3px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px">変更</span></sc-if></label><div style="font-size: 13px; color: #556174">1〜40 Mbps。回線の推定帯域は 52 Mbps</div></div>
+                    <div style="flex: 2 1 300px; min-width: 0">
+                      <div style="display: flex; align-items: center; gap: 8px"><input id="av-br" type="text" inputmode="decimal" value="{{ v.br }}" onChange="{{ onBr }}" aria-invalid="{{ brErr }}" style="width: 120px; height: 40px; padding: 0 10px; border: 1px solid {{ brBd }}; box-shadow: {{ brSh }}; border-radius: 4px; background: #FFFFFF; font-size: 16px; font-weight: 500; text-align: right"><span style="color: #556174">Mbps</span></div>
+                      <sc-if value="{{ brErr }}" hint-placeholder-val="{{ false }}"><div style="display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; font-weight: 600; color: #B42318"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2H10V10H2Z" fill="#C0362C"></path></svg>1〜40 の数値を入力してください</div></sc-if>
+                      <sc-if value="{{ brC }}" hint-placeholder-val="{{ true }}"><div style="display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-top: 6px; font-size: 13px; color: #556174">適用中　{{ aBr }}<button type="button" onClick="{{ revBr }}" style="padding: 0; border: 0; background: none; color: #1B1F24; font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button></div></sc-if>
+                    </div>
+                  </div>
+                  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                    <div style="flex: 1 1 200px; min-width: 0"><span id="av-rc-l" style="font-weight: 600">レート制御</span><div style="font-size: 13px; color: #556174">CBR は帯域が一定で、伝送が安定します</div></div>
+                    <div style="flex: 2 1 300px; min-width: 0"><div role="group" aria-labelledby="av-rc-l" style="display: inline-flex; border: 1px solid #BFC7D2; border-radius: 4px; overflow: hidden"><button type="button" aria-pressed="true" style="min-height: 40px; padding: 0 16px; border: 0; background: #1B1F24; color: #FFFFFF; font-weight: 600">CBR（固定）</button><button type="button" aria-pressed="false" style="min-height: 40px; padding: 0 16px; border: 0; border-left: 1px solid #BFC7D2; background: #FFFFFF; font-weight: 600; cursor: pointer">VBR（可変）</button></div></div>
+                  </div>
+                  <button type="button" aria-expanded="{{ adv }}" aria-controls="av-adv" onClick="{{ toggleAdv }}" style="display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 0 28px; border: 0; border-top: 1px solid #EDF1F5; background: #FFFFFF; font-weight: 600; text-align: left; cursor: pointer">
+                    <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="transform: rotate({{ advRot }}deg)"><path d="M4 2l4 4-4 4" fill="none" stroke="#1B1F24" stroke-width="1.6"></path></svg>
+                    詳細設定（5 項目）
+                    <sc-if value="{{ advHidden }}" hint-placeholder-val="{{ false }}"><span style="padding: 0 6px; border-radius: 3px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px">変更 1 件を含む</span></sc-if>
+                    <span style="margin-left: auto; font-size: 12px; font-weight: 400; color: #87929F">通常は変更不要です</span>
+                  </button>
+                  <sc-if value="{{ adv }}" hint-placeholder-val="{{ true }}">
+                    <div id="av-adv">
+                      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                        <div style="flex: 1 1 200px; min-width: 0"><label for="av-codec" style="font-weight: 600">コーデック</label><div style="font-size: 13px; color: #556174">受信機が対応している形式を選びます</div></div>
+                        <div style="flex: 2 1 300px; min-width: 0"><select id="av-codec" style="min-width: 240px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>H.264</option><option>H.265</option></select></div>
+                      </div>
+                      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                        <div style="flex: 1 1 200px; min-width: 0"><label for="av-prof" style="font-weight: 600">プロファイル</label></div>
+                        <div style="flex: 2 1 300px; min-width: 0"><select id="av-prof" style="min-width: 240px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>High</option><option>Main</option><option>Baseline</option></select></div>
+                      </div>
+                      <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5; background: {{ gopBg }}">
+                        <div style="flex: 1 1 200px; min-width: 0"><label for="av-gop" style="display: flex; align-items: center; gap: 8px; font-weight: 600">キーフレーム間隔<sc-if value="{{ gopC }}" hint-placeholder-val="{{ true }}"><span style="padding: 0 6px; border-radius: 3px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px">変更</span></sc-if></label><div style="font-size: 13px; color: #556174">0.5〜10 秒。短いほど乱れから早く回復し、長いほど画質が上がります</div></div>
+                        <div style="flex: 2 1 300px; min-width: 0">
+                          <div style="display: flex; align-items: center; gap: 8px"><input id="av-gop" type="text" inputmode="decimal" value="{{ v.gop }}" onChange="{{ onGop }}" aria-invalid="{{ gopErr }}" style="width: 120px; height: 40px; padding: 0 10px; border: 1px solid {{ gopBd }}; box-shadow: {{ gopSh }}; border-radius: 4px; background: #FFFFFF; font-size: 16px; font-weight: 500; text-align: right"><span style="color: #556174">秒</span></div>
+                          <sc-if value="{{ gopErr }}" hint-placeholder-val="{{ false }}"><div style="display: flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 13px; font-weight: 600; color: #B42318"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2H10V10H2Z" fill="#C0362C"></path></svg>0.5〜10 の数値を入力してください</div></sc-if>
+                          <sc-if value="{{ gopC }}" hint-placeholder-val="{{ true }}"><div style="display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-top: 6px; font-size: 13px; color: #556174">適用中　{{ aGop }}<button type="button" onClick="{{ revGop }}" style="padding: 0; border: 0; background: none; color: #1B1F24; font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button></div></sc-if>
+                        </div>
+                      </div>
+                      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                        <div style="flex: 1 1 200px; min-width: 0"><label for="av-bf" style="font-weight: 600">B フレーム</label><div style="font-size: 13px; color: #556174">0 にすると遅延が最小になります</div></div>
+                        <div style="flex: 2 1 300px; min-width: 0"><select id="av-bf" style="min-width: 240px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>0</option><option>1</option><option>2</option></select></div>
+                      </div>
+                      <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5; border-bottom: 1px solid #EDF1F5">
+                        <div style="flex: 1 1 200px; min-width: 0"><label for="av-enc" style="font-weight: 600">エンコーダ</label></div>
+                        <div style="flex: 2 1 300px; min-width: 0"><select id="av-enc" style="min-width: 240px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>ハードウェア</option><option>ソフトウェア</option></select></div>
+                      </div>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-if>
+            </section>
+          </div>
+
+          <aside aria-labelledby="av-sum" style="flex: 1 1 300px; min-width: 0; border-left: 1px solid #E1E6EC">
+            <div style="position: sticky; top: 0; padding: 24px 24px 28px">
+              <h2 id="av-sum" style="margin: 0; font-size: 16px; font-weight: 600">変更内容</h2>
+              <sc-if value="{{ showList }}" hint-placeholder-val="{{ true }}">
+                <div>
+                  <p style="margin: 4px 0 0; font-weight: 600">未適用の変更が {{ n }} 件あります</p>
+                  <ul style="list-style: none; margin: 12px 0 0; padding: 0; border-top: 1px solid #EDF1F5">
+                    <sc-for list="{{ pending }}" as="p" hint-placeholder-count="3">
+                      <li style="display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 0; border-bottom: 1px solid #EDF1F5">
+                        <span style="font-weight: 600">{{ p.label }}</span>
+                        <button type="button" onClick="{{ p.revert }}" style="padding: 0; border: 0; background: none; font-size: 13px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button>
+                        <span style="grid-column: 1 / -1"><span style="color: #556174">{{ p.from }}</span><span aria-label="から" style="margin: 0 8px; color: #87929F">→</span><span style="font-weight: 600">{{ p.to }}</span></span>
+                      </li>
+                    </sc-for>
+                  </ul>
+                  <h3 style="margin: 20px 0 8px; font-size: 14px; font-weight: 600">適用したときの影響</h3>
+                  <ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+                    <sc-for list="{{ impacts }}" as="m" hint-placeholder-count="3">
+                      <li style="display: flex; align-items: flex-start; gap: 10px; font-size: 13px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="flex: 0 0 auto; margin-top: 6px"><path d="{{ m.st.d }}" fill="{{ m.st.fill }}"></path></svg><span>{{ m.text }}</span></li>
+                    </sc-for>
+                  </ul>
+                  <sc-if value="{{ invalid }}" hint-placeholder-val="{{ false }}"><p style="margin: 14px 0 0; font-size: 13px; font-weight: 600; color: #B42318">入力に誤りがある項目があります。直すと適用できます。</p></sc-if>
+                  <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px">
+                    <button type="button" onClick="{{ askDiscard }}" style="flex: 1 1 120px; min-height: 44px; padding: 0 14px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">すべて取り消す</button>
+                    <button type="button" onClick="{{ openConfirm }}" disabled="{{ cannot }}" style="flex: 2 1 170px; min-height: 44px; padding: 0 14px; border: 1px solid #1B1F24; border-radius: 4px; background: #1B1F24; color: #FFFFFF; font-weight: 600; cursor: pointer; opacity: {{ applyOp }}">内容を確認して適用…</button>
+                  </div>
+                </div>
+              </sc-if>
+              <sc-if value="{{ showDone }}" hint-placeholder-val="{{ false }}">
+                <div role="status" style="display: flex; gap: 10px; align-items: flex-start; margin-top: 12px">
+                  <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true" style="flex: 0 0 auto; margin-top: 5px"><path d="M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z" fill="#1D7A4C"></path></svg>
+                  <div>
+                    <div style="font-weight: 600; color: #1D7A4C">{{ doneAt }} に適用しました</div>
+                    <div style="font-size: 13px; color: #556174">エンコーダの再初期化が終わり、伝送を続けています。</div>
+                    <a href="R-ops-a.dc.html" style="font-size: 13px">運用画面で確認する</a>
+                  </div>
+                </div>
+              </sc-if>
+              <sc-if value="{{ showNone }}" hint-placeholder-val="{{ false }}">
+                <div>
+                  <p style="margin: 8px 0 0; color: #556174">未適用の変更はありません。表示中の値はすべて適用済みです。</p>
+                  <a href="R-ops-a.dc.html" style="display: inline-block; margin-top: 8px; font-size: 13px; font-weight: 600">運用画面へ戻る</a>
+                </div>
+              </sc-if>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<sc-if value="{{ showDialog }}" hint-placeholder-val="{{ false }}">
+  <div style="position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background: rgba(27, 31, 36, 0.45)">
+    <div role="alertdialog" aria-modal="true" aria-labelledby="av-dlg" aria-describedby="av-dlg-d" style="width: min(600px, 100%); max-height: calc(100dvh - 48px); overflow: auto; background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px">
+      <div style="padding: 24px 24px 8px">
+        <h2 id="av-dlg" style="margin: 0; font-size: 20px; font-weight: 600">変更を適用しますか</h2>
+        <p id="av-dlg-d" style="margin: 4px 0 0; color: #556174">送信機 TX-01 は受信機 RX-02 へ伝送中です。</p>
+      </div>
+      <div style="padding: 12px 24px 4px">
+        <div style="display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 6px 0; border-bottom: 2px solid #1B1F24; font-size: 12px; color: #556174"><span>項目</span><span>適用中</span><span>変更後</span></div>
+        <sc-for list="{{ pending }}" as="p" hint-placeholder-count="3">
+          <div style="display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid #EDF1F5"><span style="font-weight: 600">{{ p.label }}</span><span style="color: #556174">{{ p.from }}</span><span style="font-weight: 600">{{ p.to }}</span></div>
+        </sc-for>
+      </div>
+      <div style="padding: 16px 24px 4px">
+        <h3 style="margin: 0 0 8px; font-size: 14px; font-weight: 600">適用すると</h3>
+        <ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+          <sc-for list="{{ impacts }}" as="m" hint-placeholder-count="3">
+            <li style="display: flex; align-items: flex-start; gap: 10px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="flex: 0 0 auto; margin-top: 7px"><path d="{{ m.st.d }}" fill="{{ m.st.fill }}"></path></svg><span>{{ m.text }}</span></li>
+          </sc-for>
+        </ul>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 16px; padding: 16px 24px; border-top: 1px solid #EDF1F5">
+        <sc-if value="{{ notApplying }}" hint-placeholder-val="{{ true }}">
+          <div style="display: flex; flex-wrap: wrap; gap: 8px">
+            <button type="button" onClick="{{ closeConfirm }}" style="min-height: 44px; padding: 0 18px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">戻って編集する</button>
+            <button type="button" onClick="{{ apply }}" style="min-height: 44px; padding: 0 22px; border: 1px solid #1B1F24; border-radius: 4px; background: #1B1F24; color: #FFFFFF; font-weight: 600; cursor: pointer">適用する</button>
+          </div>
+        </sc-if>
+        <sc-if value="{{ applying }}" hint-placeholder-val="{{ false }}">
+          <div role="status" style="display: flex; align-items: center; min-height: 44px; font-weight: 600">適用しています。エンコーダを再初期化中です…</div>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+</sc-if>
+<sc-if value="{{ showDiscard }}" hint-placeholder-val="{{ false }}">
+  <div style="position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background: rgba(27, 31, 36, 0.45)">
+    <div role="alertdialog" aria-modal="true" aria-labelledby="av-dis-t" aria-describedby="av-dis-d" style="width: min(480px, 100%); background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px">
+      <div style="padding: 24px 24px 8px">
+        <h2 id="av-dis-t" style="margin: 0; font-size: 20px; font-weight: 600">未適用の変更 {{ n }} 件を取り消しますか</h2>
+        <p id="av-dis-d" style="margin: 8px 0 0">入力した値は破棄され、適用中の値に戻ります。</p>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; padding: 16px 24px; border-top: 1px solid #EDF1F5">
+        <button type="button" onClick="{{ cancelDiscard }}" style="min-height: 44px; padding: 0 18px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">戻る</button>
+        <button type="button" onClick="{{ confirmDiscard }}" style="min-height: 44px; padding: 0 20px; border: 1px solid #C0362C; border-radius: 4px; background: #C0362C; color: #FFFFFF; font-weight: 600; cursor: pointer">取り消す</button>
+      </div>
+    </div>
+  </div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"view":{"editor":"enum","options":["既定（自動）","手動で編集中","確認ダイアログ","適用後"],"default":"既定（自動）","section":"表示状態"},"$preview":{"width":1440,"height":820}}'>
+class Component extends DCLogic {
+  componentWillUnmount() {
+    if (this._t) clearTimeout(this._t);
+  }
+  renderVals() {
+    const s = this.state || {};
+    const view = this.props.view ?? '既定（自動）';
+    // 適用中は「自動」。編集の見本は「手動に切り替えてビットレートとキーフレーム間隔を変える」
+    const A0 = { src: 'cam', mode: 'auto', br: '12.0', gop: '1.0' };
+    const E0 = { src: 'cam', mode: 'manual', br: '8.0', gop: '2.0' };
+    const init = view === '確認ダイアログ' ? 'confirm' : (view === '適用後' ? 'done' : 'edit');
+    const phase = s.phase || init;
+    const a = s.a || (init === 'done' ? E0 : A0);
+    const v = s.v || (view === '既定（自動）' ? A0 : E0);
+    const adv = s.adv === undefined ? true : s.adv;
+    const save = (patch) => this.setState(Object.assign({ phase, a, v, adv }, patch));
+    const num = (x) => { const t = String(x).trim(); return /^\d+(\.\d+)?$/.test(t) ? parseFloat(t) : NaN; };
+    const manual = v.mode === 'manual';
+    const same = (key) => ((key === 'src' || key === 'mode') ? v[key] === a[key] : (!manual || num(v[key]) === num(a[key])));
+    const brN = num(v.br);
+    const gopN = num(v.gop);
+    const brErr = manual && !(brN >= 1 && brN <= 40);
+    const gopErr = manual && !(gopN >= 0.5 && gopN <= 10);
+    const srcName = (x) => (x === 'file' ? '映像ファイル' : 'カメラ');
+    const modeName = (x) => (x === 'auto' ? '自動' : '手動');
+    const autoMark = a.mode === 'auto' ? '（自動）' : '';
+    const F = [
+      { key: 'src', label: '入力の種類', from: srcName(a.src), to: srcName(v.src) },
+      { key: 'mode', label: 'エンコードの設定', from: modeName(a.mode), to: modeName(v.mode) },
+      { key: 'br', label: 'ビットレート', from: a.br + ' Mbps' + autoMark, to: v.br + ' Mbps' },
+      { key: 'gop', label: 'キーフレーム間隔', from: a.gop + ' 秒' + autoMark, to: v.gop + ' 秒' }
+    ];
+    const reset = (key) => {
+      const nv = Object.assign({}, v, { [key]: a[key] });
+      if (key === 'mode' && a.mode === 'auto') { nv.br = a.br; nv.gop = a.gop; }
+      return nv;
+    };
+    const pending = F.filter((f) => !same(f.key)).map((f) => ({
+      label: f.label, from: f.from, to: f.to,
+      revert: () => save({ v: reset(f.key), phase: 'edit' })
+    }));
+    const n = pending.length;
+    const srcC = !same('src');
+    const modeC = !same('mode');
+    const brC = !same('br');
+    const gopC = !same('gop');
+    const invalid = brErr || gopErr;
+    const W = { d: 'M6 1.2L11 10.4H1Z', fill: '#D4890F' };
+    const OK = { d: 'M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z', fill: '#1D7A4C' };
+    const INFO = { d: 'M3.5 6a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0Z', fill: '#87929F' };
+    const impacts = [];
+    if (srcC) impacts.push({ st: W, text: '入力を切り替える間、受信側の映像が約 1 秒途切れます' });
+    if (modeC || brC || gopC) impacts.push({ st: W, text: '伝送中のため、受信側の映像が約 2 秒途切れます（エンコーダの再初期化）' });
+    if (n > 0) impacts.push({ st: OK, text: '接続は維持されます。再接続は起きません' });
+    if (modeC && manual) impacts.push({ st: INFO, text: '手動の値は、入力や回線が変わっても自動では変わりません' });
+    if (modeC && !manual) impacts.push({ st: INFO, text: '解像度・フレームレート・ビットレートは機器が決めます' });
+    if (brC && !brErr && brN < num(a.br)) impacts.push({ st: INFO, text: 'ビットレートを下げると、動きの多い場面で画質が下がることがあります' });
+    if (brC && !brErr && brN > 30) impacts.push({ st: W, text: '推定帯域 52 Mbps に対して余裕が少なくなり、損失が増えるおそれがあります' });
+    const field = (key) => (e) => save({ v: Object.assign({}, v, { [key]: e.target.value }), phase: 'edit' });
+    const rowBg = (c, bad) => (bad ? '#FDEEEC' : (c ? '#F2F4F7' : 'transparent'));
+    const inBd = (c, bad) => (bad ? '#C0362C' : (c ? '#1B1F24' : '#87929F'));
+    const inSh = (c, bad) => (bad ? 'inset 0 0 0 1px #C0362C' : (c ? 'inset 0 0 0 1px #1B1F24' : 'none'));
+    const SEL = 'background: #1B1F24; color: #FFFFFF';
+    const UNSEL = 'background: #FFFFFF; color: #1B1F24';
+    const apply = () => {
+      save({ phase: 'applying' });
+      if (this._t) clearTimeout(this._t);
+      this._t = setTimeout(() => this.setState((st) => ({ phase: 'done', a: Object.assign({}, st.v || v) })), 1600);
+    };
+    return {
+      v, n, hasN: n > 0, pending, impacts,
+      isCam: v.src === 'cam', isFile: v.src === 'file', isAuto: !manual, isManual: manual,
+      segCam: v.src === 'cam' ? SEL : UNSEL, segFile: v.src === 'file' ? SEL : UNSEL,
+      segAuto: manual ? UNSEL : SEL, segManual: manual ? SEL : UNSEL,
+      pickCam: () => save({ v: Object.assign({}, v, { src: 'cam' }), phase: 'edit' }),
+      pickFile: () => save({ v: Object.assign({}, v, { src: 'file' }), phase: 'edit' }),
+      pickAuto: () => save({ v: Object.assign({}, v, { mode: 'auto', br: a.br, gop: a.gop }), phase: 'edit' }),
+      pickManual: () => save({ v: Object.assign({}, v, { mode: 'manual' }), phase: 'edit' }),
+      srcC, modeC, brC, gopC, brErr, gopErr,
+      aSrc: srcName(a.src), aMode: modeName(a.mode), aBr: a.br + ' Mbps' + autoMark, aGop: a.gop + ' 秒' + autoMark,
+      aBrAuto: a.br + ' Mbps',
+      srcBg: rowBg(srcC, false), modeBg: rowBg(modeC, false), brBg: rowBg(brC, brErr), gopBg: rowBg(gopC, gopErr),
+      brBd: inBd(brC, brErr), gopBd: inBd(gopC, gopErr),
+      brSh: inSh(brC, brErr), gopSh: inSh(gopC, gopErr),
+      onBr: field('br'), onGop: field('gop'),
+      revSrc: () => save({ v: reset('src'), phase: 'edit' }),
+      revMode: () => save({ v: reset('mode'), phase: 'edit' }),
+      revBr: () => save({ v: reset('br'), phase: 'edit' }),
+      revGop: () => save({ v: reset('gop'), phase: 'edit' }),
+      adv, toggleAdv: () => save({ adv: !adv }),
+      advHidden: !adv && gopC, advRot: adv ? '90' : '0',
+      showList: n > 0, showDone: n === 0 && phase === 'done', showNone: n === 0 && phase !== 'done',
+      invalid, cannot: invalid || n === 0, applyOp: (invalid || n === 0) ? '0.45' : '1',
+      openConfirm: () => { if (!invalid && n > 0) save({ phase: 'confirm' }); },
+      closeConfirm: () => save({ phase: 'edit' }),
+      apply,
+      askDiscard: () => { if (n > 0) save({ phase: 'discard' }); },
+      cancelDiscard: () => save({ phase: 'edit' }),
+      confirmDiscard: () => save({ v: Object.assign({}, a), phase: 'edit' }),
+      showDiscard: phase === 'discard' && n > 0,
+      showDialog: (phase === 'confirm' || phase === 'applying') && n > 0,
+      applying: phase === 'applying', notApplying: phase !== 'applying',
+      doneAt: '10:43:05'
+    };
+  }
+}
+</script>
+</body>
+</html>

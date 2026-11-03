@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>全画面表示 — 受信機</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#000000;text-wrap:pretty;word-break:auto-phrase;overflow-wrap:break-word}
+*{box-sizing:border-box}
+h1,h2,h3{text-wrap:balance}
+button,input,select{font:inherit;color:inherit}
+a{color:#F3F5F7;text-underline-offset:3px}
+:focus-visible{outline:2px solid #F3F5F7;outline-offset:2px}
+</style>
+</helmet>
+<div style="position: relative; min-height: 100dvh; overflow: hidden; background: #000000; color: #F3F5F7; font-family: 'Geist', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic UI', 'BIZ UDPGothic', Meiryo, sans-serif; font-size: 16px; line-height: 1.6; font-variant-numeric: tabular-nums">
+  <h1 style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); margin: -1px">{{ pv.title }}（全画面）</h1>
+
+  <div onClick="{{ toggleUi }}" style="position: absolute; inset: 0; display: grid; place-items: center; cursor: {{ cursor }}">
+    <div style="position: relative; width: min(100vw, calc(100dvh * 16 / 9)); aspect-ratio: 16 / 9; display: flex; align-items: center; justify-content: center; background: #0F1318; color: {{ pv.phColor }}; font-size: 20px">
+      {{ pv.ph }}
+      <sc-if value="{{ safe }}" hint-placeholder-val="{{ false }}">
+        <div aria-hidden="true" style="position: absolute; inset: 3.5%; border: 1px dashed rgba(255, 255, 255, 0.5); pointer-events: none"><span style="position: absolute; top: 4px; left: 8px; font-size: 12px; color: rgba(255, 255, 255, 0.7)">アクション 93%</span></div>
+        <div aria-hidden="true" style="position: absolute; inset: 5%; border: 1px dashed rgba(255, 255, 255, 0.32); pointer-events: none"><span style="position: absolute; top: 4px; left: 8px; font-size: 12px; color: rgba(255, 255, 255, 0.6)">タイトル 90%</span></div>
+      </sc-if>
+    </div>
+  </div>
+
+  <div style="position: absolute; top: 0; left: 0; right: 0; display: flex; flex-direction: column">
+    <sc-if value="{{ al.show }}" hint-placeholder-val="{{ true }}">
+      <section role="status" aria-label="現在の状況" style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; padding: 14px 32px; background: {{ al.st.tint }}; border-top: 4px solid {{ al.st.fill }}; color: #1B1F24">
+        <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: {{ al.st.text }}"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="{{ al.st.d }}" fill="{{ al.st.fill }}"></path></svg>{{ al.label }}</span>
+        <span style="font-size: 18px; font-weight: 600">{{ al.text }}</span>
+      </section>
+    </sc-if>
+    <sc-if value="{{ ui }}" hint-placeholder-val="{{ true }}">
+      <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 32px; padding: 14px 32px; background: rgba(10, 12, 15, 0.72)">
+        <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px">
+          <span style="font-size: 18px; font-weight: 600">{{ pv.device }}</span>
+          <span>{{ pv.title }}</span>
+          <span style="color: #C3CAD3">{{ pv.meta }}</span>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px">
+          <span style="display: inline-flex; align-items: center; gap: 8px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="{{ top.st.d }}" fill="{{ top.dk.fill }}" stroke="{{ top.dk.stroke }}" stroke-width="1.5"></path></svg><span style="font-weight: 600; color: {{ top.dk.text }}">{{ top.state }}</span><span style="color: #C3CAD3">{{ top.sub }}</span></span>
+          <span aria-hidden="true" style="width: 1px; height: 18px; background: rgba(255, 255, 255, 0.25)"></span>
+          <span style="font-size: 18px; font-weight: 500">10:42:18<span style="margin-left: 4px; font-size: 14px; font-weight: 400; color: #C3CAD3">JST</span></span>
+          <button type="button" aria-pressed="{{ safe }}" onClick="{{ toggleSafe }}" style="min-height: 40px; padding: 0 16px; border: 1px solid rgba(255, 255, 255, 0.45); border-radius: 4px; background: {{ safeBtn.bg }}; color: {{ safeBtn.fg }}; font-weight: 600; cursor: pointer">セーフエリア</button>
+          <a href="{{ pv.back }}" style="display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 16px; border: 1px solid rgba(255, 255, 255, 0.45); border-radius: 4px; color: #F3F5F7; font-weight: 600; text-decoration: none"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M5 1.5V5H1.5M12.5 5H9V1.5M9 12.5V9h3.5M1.5 9H5v3.5" fill="none" stroke="#F3F5F7" stroke-width="1.5"></path></svg>全画面を終了<span style="font-weight: 400; color: #AEB6C2">Esc</span></a>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"scenario":{"editor":"enum","options":["正常","回線警告","接続エラー"],"default":"回線警告","section":"表示状態"},"overlay":{"editor":"enum","options":["表示","非表示"],"default":"表示","section":"表示状態"},"$preview":{"width":1920,"height":1080}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const s = this.state || {};
+    const scen = this.props.scenario ?? '回線警告';
+    const k = scen === '正常' ? 'ok' : (scen === '接続エラー' ? 'err' : 'warn');
+    const ui = s.ui === undefined ? (this.props.overlay ?? '表示') === '表示' : s.ui;
+    const safe = !!s.safe;
+    const meter = s.meter === undefined ? true : s.meter;
+    const set = (patch) => this.setState(Object.assign({ ui, safe, meter }, patch));
+    const SUB = '#556174';
+    const G = {
+      ok: { d: 'M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z', fill: '#1D7A4C', stroke: 'none', text: '#1D7A4C', tint: 'transparent' },
+      warn: { d: 'M6 1.2L11 10.4H1Z', fill: '#D4890F', stroke: 'none', text: '#8F5300', tint: '#FFF6E5' },
+      err: { d: 'M2 2H10V10H2Z', fill: '#C0362C', stroke: 'none', text: '#B42318', tint: '#FDEEEC' },
+      off: { d: 'M2 6a4 4 0 1 0 8 0a4 4 0 1 0 -8 0Z', fill: 'none', stroke: SUB, text: SUB, tint: 'transparent' },
+      none: { d: '', fill: 'none', stroke: 'none', text: SUB, tint: 'transparent' }
+    };
+    // 暗い帯の上で使う状態色
+    const DK = {
+      ok: { fill: '#4CC38A', stroke: 'none', text: '#7FD9AA' },
+      warn: { fill: '#F0A93B', stroke: 'none', text: '#F5C26B' },
+      off: { fill: 'none', stroke: '#AEB6C2', text: '#C3CAD3' }
+    };
+    const pick = (o) => o[k];
+    const top = pick({
+      ok: { st: G.ok, dk: DK.ok, state: '受信中', sub: '00:42:13' },
+      warn: { st: G.ok, dk: DK.ok, state: '受信中', sub: '00:42:13' },
+      err: { st: G.off, dk: DK.off, state: '待ち受け中', sub: 'ポート 9000' }
+    });
+    const al = pick({
+      ok: { show: false, st: G.none, label: '', text: '' },
+      warn: { show: true, st: G.warn, label: '警告', text: '回線のパケット損失が基準を超えています（2.1%）。直近 5 分で映像が 3 フレーム欠落しました。' },
+      err: { show: true, st: G.err, label: '接続エラー', text: '送信機 TX-01 からの接続を拒否しました。パスフレーズが一致していません。' }
+    });
+    const pv = k === 'err'
+      ? { device: 'RX-02', title: '受信映像', meta: 'SDI OUT 1　黒を出力中', ph: '受信映像なし（送信機からの接続を待っています）', phColor: '#A9B2BE', back: 'R-ops-b.dc.html' }
+      : { device: 'RX-02', title: '受信映像', meta: 'SDI OUT 1　1080p59.94　約 5 fps', ph: '受信映像', phColor: '#5E6672', back: 'R-ops-b.dc.html' };
+    const pct = (db) => ((60 + db) / 60 * 100).toFixed(1);
+    const lv = k === 'err' ? null : [[-18.4, -14.6], [-19.9, -15.3]];
+    const meters = ['L', 'R'].map((ch, i) => ({ ch, fill: lv ? pct(lv[i][0]) : '0', peak: lv ? pct(lv[i][1]) : '0', peakShow: lv ? 'block' : 'none', value: lv ? '−' + Math.abs(lv[i][1]).toFixed(1) : '—' }));
+    const on = { bg: '#F3F5F7', fg: '#101214' };
+    const offBtn = { bg: 'transparent', fg: '#F3F5F7' };
+    return {
+      top, al, pv, meters, ui, safe, meter,
+      cursor: ui ? 'default' : 'none',
+      meterRow: meter ? 'flex' : 'none',
+      safeBtn: safe ? on : offBtn,
+      meterBtn: meter ? on : offBtn,
+      toggleUi: () => set({ ui: !ui }),
+      toggleSafe: () => set({ safe: !safe }),
+      toggleMeter: () => set({ meter: !meter })
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,317 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>伝送設定 — 送信機</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#FFFFFF;text-wrap:pretty;word-break:auto-phrase;overflow-wrap:break-word}
+*{box-sizing:border-box}
+h1,h2,h3{text-wrap:balance}
+button,input,select{font:inherit;color:inherit}
+a{color:#1B1F24;text-underline-offset:3px}a:hover{color:#556174}
+:focus-visible{outline:2px solid #1B1F24;outline-offset:2px}
+</style>
+</helmet>
+<div style="min-height: 100dvh; display: flex; flex-direction: column; background: #FFFFFF; color: #1B1F24; font-family: 'Geist', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic UI', 'BIZ UDPGothic', Meiryo, sans-serif; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 32px; min-height: 56px; padding: 8px 24px; background: #FFFFFF; border-bottom: 1px solid #E1E6EC">
+  <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px">
+    <span style="font-size: 16px; font-weight: 600">TX-01</span>
+    <span style="color: #556174">送信機</span>
+    <span style="color: #87929F">192.168.10.21</span>
+  </div>
+  <div style="display: flex; align-items: center; gap: 8px">
+    <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="{{ top.st.d }}" fill="{{ top.st.fill }}" stroke="{{ top.st.stroke }}" stroke-width="1.5"></path></svg>
+    <span style="font-weight: 600; color: {{ top.st.text }}">{{ top.state }}</span>
+    <span style="color: #556174">{{ top.sub }}</span>
+    <span aria-hidden="true" style="width: 1px; height: 16px; margin: 0 8px; background: #E1E6EC"></span>
+    <span style="font-size: 16px; font-weight: 500">10:42:18<span style="margin-left: 4px; font-size: 13px; font-weight: 400; color: #556174">JST</span></span>
+  </div>
+</header>
+
+<div style="flex: 1 1 auto; display: flex; align-items: stretch">
+  <nav aria-label="メニュー" style="flex: 0 0 200px; padding: 16px 12px 32px; background: #F6F8FA; border-right: 1px solid #E1E6EC">
+    <a href="R-ops-a.dc.html" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">運用</a>
+    <div style="margin: 20px 12px 4px; font-size: 12px; color: #87929F">設定</div>
+    <a href="R-av.dc.html" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">映像</a>
+    <a href="R-trans.dc.html" aria-current="page" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 0 4px 4px 0; background: #FFFFFF; box-shadow: inset 3px 0 0 #1B1F24; color: #1B1F24; font-weight: 600; text-decoration: none">伝送<sc-if value="{{ hasN }}" hint-placeholder-val="{{ true }}"><span aria-label="未適用の変更 {{ n }} 件" style="min-width: 20px; padding: 0 6px; border-radius: 10px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px; text-align: center">{{ n }}</span></sc-if></a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">録画</a>
+    <div style="margin: 20px 12px 4px; font-size: 12px; color: #87929F">管理</div>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">ネットワーク</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">ログ</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">機器情報</a>
+  </nav>
+
+  <div style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column">
+    <sc-if value="{{ showErr }}" hint-placeholder-val="{{ true }}">
+      <section role="status" aria-label="現在の状況" style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px 40px; padding: 20px 32px 24px; background: #FDEEEC; border-top: 4px solid #C0362C; border-bottom: 1px solid #E1E6EC">
+        <div style="flex: 1 1 520px; min-width: 0">
+          <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 20px; color: #556174">
+            <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: #B42318"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2H10V10H2Z" fill="#C0362C"></path></svg>接続エラー</span>
+            <span>次の試行まで <span style="color: #1B1F24">4 秒</span></span>
+            <span>前回の接続 <span style="color: #1B1F24">10:41:58 まで</span></span>
+          </div>
+          <p style="margin: 8px 0 0; font-size: 24px; line-height: 1.4; font-weight: 600"><span style="display: inline-block">受信機が接続を拒否しています。</span><span style="display: inline-block">パスフレーズが受信機と一致していません。</span></p>
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px">
+          <button type="button" style="min-height: 44px; padding: 0 18px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">今すぐ再試行</button>
+          <button type="button" onClick="{{ askStop }}" style="display: inline-flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 20px; border: 1px solid #1B1F24; border-radius: 4px; background: #1B1F24; color: #FFFFFF; font-weight: 600; cursor: pointer"><svg width="9" height="9" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" fill="#FFFFFF"></rect></svg>伝送を停止…</button>
+        </div>
+      </section>
+    </sc-if>
+    <sc-if value="{{ stopped }}" hint-placeholder-val="{{ false }}">
+      <section role="status" aria-label="現在の状況" style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 32px; padding: 16px 32px; background: #F6F8FA; border-top: 4px solid #87929F; border-bottom: 1px solid #E1E6EC">
+        <p style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin: 0">
+          <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: #556174"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 6a4 4 0 1 0 8 0a4 4 0 1 0 -8 0Z" fill="none" stroke="#556174" stroke-width="1.5"></path></svg>停止中</span>
+          <span style="font-size: 16px; font-weight: 600">10:42:20 に伝送を停止しました。再接続も止まっています。</span>
+        </p>
+        <button type="button" onClick="{{ restart }}" style="min-height: 44px; padding: 0 20px; border: 1px solid #1B1F24; border-radius: 4px; background: #1B1F24; color: #FFFFFF; font-weight: 600; cursor: pointer">伝送を開始</button>
+      </section>
+    </sc-if>
+
+    <main style="flex: 1 1 auto; padding: 24px 32px 40px">
+      <div style="background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px">
+        <div style="padding: 24px 28px; border-bottom: 1px solid #E1E6EC">
+          <h1 style="margin: 0; font-size: 20px; font-weight: 600">伝送設定</h1>
+          <p style="margin: 2px 0 0; font-size: 13px; color: #556174">受信機 RX-02（10.20.1.15:9000）へ送ります。変更は「適用」するまで反映されません。</p>
+        </div>
+
+        <div style="display: flex; flex-wrap: wrap; align-items: stretch">
+          <div style="flex: 999 1 560px; min-width: 0; padding: 0 0 16px">
+
+            <section aria-labelledby="sr-cmp">
+              <div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 4px 24px; padding: 24px 28px 0">
+                <h2 id="sr-cmp" style="margin: 0; font-size: 16px; font-weight: 600">送信機と受信機の設定を比べる</h2>
+                <span style="font-size: 13px; color: #556174">受信機の値は接続時に受け取ったものです</span>
+              </div>
+              <div style="margin: 12px 16px; overflow-x: auto">
+                <div role="table" aria-labelledby="sr-cmp" style="min-width: 640px">
+                  <div role="row" style="display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr) 24px minmax(0, 1.2fr) minmax(0, 1.4fr); gap: 16px; align-items: end; padding: 8px 12px; border-bottom: 2px solid #1B1F24">
+                    <span role="columnheader" style="font-size: 13px; color: #556174">項目</span>
+                    <span role="columnheader" style="font-weight: 600">送信機 TX-01</span>
+                    <span aria-hidden="true"></span>
+                    <span role="columnheader" style="font-weight: 600">受信機 RX-02</span>
+                    <span role="columnheader" style="font-size: 13px; color: #556174">照合</span>
+                  </div>
+                  <div role="row" style="display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr) 24px minmax(0, 1.2fr) minmax(0, 1.4fr); gap: 16px; align-items: center; min-height: 52px; padding: 8px 12px; border-bottom: 1px solid #EDF1F5">
+                    <span role="cell" style="color: #556174">接続モード</span><span role="cell">発信</span><span aria-hidden="true" style="color: #87929F">→</span><span role="cell">待ち受け</span>
+                    <span role="cell" style="display: inline-flex; align-items: center; gap: 8px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z" fill="#1D7A4C"></path></svg>組み合わせ可</span>
+                  </div>
+                  <div role="row" style="display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr) 24px minmax(0, 1.2fr) minmax(0, 1.4fr); gap: 16px; align-items: center; min-height: 52px; padding: 8px 12px; border-bottom: 1px solid #EDF1F5">
+                    <span role="cell" style="color: #556174">接続先とポート</span><span role="cell">10.20.1.15:9000 へ接続</span><span aria-hidden="true" style="color: #87929F">→</span><span role="cell">ポート 9000 で待ち受け</span>
+                    <span role="cell" style="display: inline-flex; align-items: center; gap: 8px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z" fill="#1D7A4C"></path></svg>一致</span>
+                  </div>
+                  <div role="row" style="display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr) 24px minmax(0, 1.2fr) minmax(0, 1.4fr); gap: 16px; align-items: center; min-height: 52px; padding: 8px 12px; border-bottom: 1px solid #EDF1F5">
+                    <span role="cell" style="color: #556174">伝送バッファ</span><span role="cell">160 ms<span style="display: block; font-size: 13px; color: #556174">自動</span></span><span aria-hidden="true"></span><span role="cell">120 ms</span>
+                    <span role="cell"><span style="display: inline-flex; align-items: center; gap: 8px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z" fill="#1D7A4C"></path></svg>160 ms で動作</span><span style="display: block; font-size: 13px; color: #556174">異なる場合は大きい方を使用</span></span>
+                  </div>
+                  <div role="row" style="display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr) 24px minmax(0, 1.2fr) minmax(0, 1.4fr); gap: 16px; align-items: center; min-height: 52px; padding: 8px 12px; border-bottom: 1px solid #EDF1F5">
+                    <span role="cell" style="color: #556174">暗号化方式</span><span role="cell">AES-128</span><span aria-hidden="true"></span><span role="cell">AES-128</span>
+                    <span role="cell" style="display: inline-flex; align-items: center; gap: 8px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z" fill="#1D7A4C"></path></svg>一致</span>
+                  </div>
+                  <div role="row" style="display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.2fr) 24px minmax(0, 1.2fr) minmax(0, 1.4fr); gap: 16px; align-items: center; min-height: 52px; padding: 8px 12px; background: #FDEEEC">
+                    <span role="cell" style="color: #556174">パスフレーズ</span>
+                    <span role="cell">設定済み<span style="display: block; font-size: 13px; color: #556174">値は表示しません</span></span>
+                    <span aria-hidden="true"></span>
+                    <span role="cell"><span style="color: #556174">—</span><span style="display: block; font-size: 13px; color: #556174">受信機からは送られません</span></span>
+                    <span role="cell"><span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: #B42318"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="M2 2H10V10H2Z" fill="#C0362C"></path></svg>不一致</span><span style="display: block; font-size: 13px; color: #556174">受信機の拒否理由より</span></span>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section aria-labelledby="sr-c">
+              <h2 id="sr-c" style="margin: 0; padding: 28px 28px 10px; font-size: 16px; font-weight: 600">接続</h2>
+              <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                <div style="flex: 1 1 200px; min-width: 0"><span id="sr-mode" style="font-weight: 600">接続モード</span><div style="font-size: 13px; color: #556174">「発信」はこの送信機から受信機へ接続します</div></div>
+                <div style="flex: 2 1 300px; min-width: 0"><div role="group" aria-labelledby="sr-mode" style="display: inline-flex; flex-wrap: wrap; border: 1px solid #BFC7D2; border-radius: 4px; overflow: hidden"><button type="button" aria-pressed="true" style="min-height: 40px; padding: 0 16px; border: 0; background: #1B1F24; color: #FFFFFF; font-weight: 600">発信</button><button type="button" aria-pressed="false" style="min-height: 40px; padding: 0 16px; border: 0; border-left: 1px solid #BFC7D2; background: #FFFFFF; font-weight: 600; cursor: pointer">待ち受け</button><button type="button" aria-pressed="false" style="min-height: 40px; padding: 0 16px; border: 0; border-left: 1px solid #BFC7D2; background: #FFFFFF; font-weight: 600; cursor: pointer">相互接続</button></div></div>
+              </div>
+              <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                <div style="flex: 1 1 200px; min-width: 0"><label for="sr-host" style="font-weight: 600">接続先</label><div style="font-size: 13px; color: #556174">受信機の IP アドレスとポート</div></div>
+                <div style="flex: 2 1 300px; min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px"><input id="sr-host" type="text" value="10.20.1.15" style="width: 200px; max-width: 100%; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><span style="color: #556174">:</span><input type="text" inputmode="numeric" value="9000" aria-label="ポート" style="width: 96px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF; text-align: right"></div>
+              </div>
+            </section>
+
+            <section aria-labelledby="sr-l">
+              <h2 id="sr-l" style="margin: 0; padding: 28px 28px 10px; font-size: 16px; font-weight: 600">遅延</h2>
+              <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5; background: {{ bufBg }}">
+                <div style="flex: 1 1 200px; min-width: 0"><span id="sr-buf-l" style="display: flex; align-items: center; gap: 8px; font-weight: 600">伝送バッファ<sc-if value="{{ bufC }}" hint-placeholder-val="{{ false }}"><span style="padding: 0 6px; border-radius: 3px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px">変更</span></sc-if></span><div style="font-size: 13px; color: #556174">再送のために待つ時間です。<br>実際の映像遅延とは別の値です</div></div>
+                <div style="flex: 2 1 300px; min-width: 0">
+                  <div role="group" aria-labelledby="sr-buf-l" style="display: inline-flex; border: 1px solid #BFC7D2; border-radius: 4px; overflow: hidden"><button type="button" aria-pressed="{{ bufAuto }}" onClick="{{ pickBufAuto }}" style="min-height: 40px; padding: 0 16px; border: 0; font-weight: 600; cursor: pointer; {{ segBufAuto }}">自動</button><button type="button" aria-pressed="{{ bufManual }}" onClick="{{ pickBufManual }}" style="min-height: 40px; padding: 0 16px; border: 0; border-left: 1px solid #BFC7D2; font-weight: 600; cursor: pointer; {{ segBufManual }}">手動</button></div>
+                  <sc-if value="{{ bufAuto }}" hint-placeholder-val="{{ true }}">
+                    <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-top: 10px"><span style="font-size: 16px; font-weight: 500">160 ms</span><span style="font-size: 13px; color: #556174">前回の RTT 38 ms から決めた値</span></div>
+                    <p style="margin: 4px 0 0; font-size: 13px; color: #556174">接続のたびに RTT を測り、その 4 倍以上になるよう機器が決めます。</p>
+                  </sc-if>
+                  <sc-if value="{{ bufManual }}" hint-placeholder-val="{{ false }}">
+                    <div style="margin-top: 10px">
+                      <select id="sr-buf" value="{{ buf }}" onChange="{{ onBuf }}" aria-labelledby="sr-buf-l" aria-describedby="sr-buf-h" style="min-width: 160px; height: 40px; padding: 0 10px; border: 1px solid {{ bufBd }}; box-shadow: {{ bufSh }}; border-radius: 4px; background: #FFFFFF; font-size: 16px; font-weight: 500"><option value="80">80 ms</option><option value="120">120 ms</option><option value="160">160 ms</option><option value="200">200 ms</option><option value="300">300 ms</option><option value="500">500 ms</option><option value="1000">1000 ms</option></select>
+                      <p id="sr-buf-h" style="margin: 6px 0 0; font-size: 13px; color: #556174">目安は RTT の 4 倍以上。前回の RTT 38 ms なら 152 ms 以上です。</p>
+                      <sc-if value="{{ bufShort }}" hint-placeholder-val="{{ false }}"><div style="display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 13px; font-weight: 600; color: #8F5300"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="flex: 0 0 auto"><path d="M6 1.2L11 10.4H1Z" fill="#D4890F"></path></svg>目安より短いため、損失が増えると映像が乱れやすくなります</div></sc-if>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{ bufC }}" hint-placeholder-val="{{ false }}"><div style="display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-top: 6px; font-size: 13px; color: #556174">適用中　自動（160 ms）<button type="button" onClick="{{ revBuf }}" style="padding: 0; border: 0; background: none; color: #1B1F24; font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button></div></sc-if>
+                </div>
+              </div>
+            </section>
+
+            <section aria-labelledby="sr-e">
+              <h2 id="sr-e" style="margin: 0; padding: 28px 28px 10px; font-size: 16px; font-weight: 600">暗号化</h2>
+              <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5">
+                <div style="flex: 1 1 200px; min-width: 0"><label for="sr-ci" style="font-weight: 600">暗号化方式</label></div>
+                <div style="flex: 2 1 300px; min-width: 0"><select id="sr-ci" style="min-width: 240px; height: 40px; padding: 0 10px; border: 1px solid #87929F; border-radius: 4px; background: #FFFFFF"><option>AES-128</option><option>AES-192</option><option>AES-256</option><option>なし</option></select></div>
+              </div>
+              <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px 24px; padding: 14px 28px; border-top: 1px solid #EDF1F5; border-bottom: 1px solid #EDF1F5; background: {{ pw.bg }}">
+                <div style="flex: 1 1 200px; min-width: 0"><label for="sr-pw" style="display: flex; align-items: center; gap: 8px; font-weight: 600">パスフレーズ<sc-if value="{{ changed }}" hint-placeholder-val="{{ true }}"><span style="padding: 0 6px; border-radius: 3px; background: #1B1F24; color: #FFFFFF; font-size: 12px; font-weight: 500; line-height: 20px">変更</span></sc-if></label><div style="font-size: 13px; color: #556174">受信機 RX-02 と同じ値にしてください</div></div>
+                <div style="flex: 2 1 300px; min-width: 0">
+                  <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px"><input id="sr-pw" type="password" value="{{ pw.value }}" autocomplete="off" aria-describedby="sr-pw-e" style="width: 260px; max-width: 100%; height: 40px; padding: 0 10px; border: 1px solid {{ pw.bd }}; box-shadow: {{ pw.sh }}; border-radius: 4px; background: #FFFFFF"><button type="button" style="min-height: 40px; padding: 0 14px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">表示する</button></div>
+                  <div id="sr-pw-e" style="display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; font-weight: 600; color: #B42318"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="flex: 0 0 auto"><path d="M2 2H10V10H2Z" fill="#C0362C"></path></svg>適用中の値は 10:42:16 に受信機から拒否されました</div>
+                  <sc-if value="{{ changed }}" hint-placeholder-val="{{ true }}"><div style="display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; margin-top: 4px; font-size: 13px; color: #556174">適用中　設定済み（値は表示しません）<button type="button" onClick="{{ revert }}" style="padding: 0; border: 0; background: none; color: #1B1F24; font-size: 13px; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button></div></sc-if>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <aside aria-labelledby="sr-sum" style="flex: 1 1 300px; min-width: 0; border-left: 1px solid #E1E6EC">
+            <div style="position: sticky; top: 0; padding: 24px 24px 28px">
+              <h2 id="sr-sum" style="margin: 0; font-size: 16px; font-weight: 600">変更内容</h2>
+              <sc-if value="{{ showList }}" hint-placeholder-val="{{ true }}">
+                <div>
+                  <p style="margin: 4px 0 0; font-weight: 600">未適用の変更が {{ n }} 件あります</p>
+                  <ul style="list-style: none; margin: 12px 0 0; padding: 0; border-top: 1px solid #EDF1F5">
+                    <sc-for list="{{ pending }}" as="p" hint-placeholder-count="1">
+                      <li style="display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 0; border-bottom: 1px solid #EDF1F5">
+                        <span style="font-weight: 600">{{ p.label }}</span>
+                        <button type="button" onClick="{{ p.revert }}" style="padding: 0; border: 0; background: none; font-size: 13px; text-decoration: underline; text-underline-offset: 3px; cursor: pointer">元に戻す</button>
+                        <span style="grid-column: 1 / -1"><span style="color: #556174">{{ p.from }}</span><span aria-label="から" style="margin: 0 8px; color: #87929F">→</span><span style="font-weight: 600">{{ p.to }}</span></span>
+                      </li>
+                    </sc-for>
+                  </ul>
+                  <h3 style="margin: 20px 0 8px; font-size: 14px; font-weight: 600">適用したときの影響</h3>
+                  <ul style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+                    <sc-for list="{{ impacts }}" as="m" hint-placeholder-count="2">
+                      <li style="display: flex; align-items: flex-start; gap: 10px; font-size: 13px"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="flex: 0 0 auto; margin-top: 6px"><path d="{{ m.st.d }}" fill="{{ m.st.fill }}"></path></svg><span>{{ m.text }}</span></li>
+                    </sc-for>
+                  </ul>
+                  <div style="display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px">
+                    <button type="button" onClick="{{ askDiscard }}" style="flex: 1 1 120px; min-height: 44px; padding: 0 14px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">すべて取り消す</button>
+                    <button type="button" style="flex: 2 1 170px; min-height: 44px; padding: 0 14px; border: 1px solid #1B1F24; border-radius: 4px; background: #1B1F24; color: #FFFFFF; font-weight: 600; cursor: pointer">内容を確認して適用…</button>
+                  </div>
+                </div>
+              </sc-if>
+              <sc-if value="{{ showNone }}" hint-placeholder-val="{{ false }}">
+                <div>
+                  <p style="margin: 8px 0 0; color: #556174">未適用の変更はありません。適用中のパスフレーズは受信機と一致していません。</p>
+                  <a href="#sr-pw" style="display: inline-block; margin-top: 8px; font-size: 13px; font-weight: 600">パスフレーズを入力する</a>
+                </div>
+              </sc-if>
+            </div>
+          </aside>
+        </div>
+      </div>
+    </main>
+  </div>
+</div>
+
+<sc-if value="{{ stopAsk }}" hint-placeholder-val="{{ false }}">
+  <div style="position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background: rgba(27, 31, 36, 0.45)">
+    <div role="alertdialog" aria-modal="true" aria-labelledby="sr-stop-t" aria-describedby="sr-stop-d" style="width: min(480px, 100%); background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px">
+      <div style="padding: 24px 24px 8px">
+        <h2 id="sr-stop-t" style="margin: 0; font-size: 20px; font-weight: 600">伝送を停止しますか</h2>
+        <p id="sr-stop-d" style="margin: 8px 0 0">受信機 RX-02 への再接続をやめ、送信を止めます。</p>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; padding: 16px 24px; border-top: 1px solid #EDF1F5">
+        <button type="button" onClick="{{ cancelStop }}" style="min-height: 44px; padding: 0 18px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">キャンセル</button>
+        <button type="button" onClick="{{ confirmStop }}" style="min-height: 44px; padding: 0 20px; border: 1px solid #C0362C; border-radius: 4px; background: #C0362C; color: #FFFFFF; font-weight: 600; cursor: pointer">伝送を停止する</button>
+      </div>
+    </div>
+  </div>
+</sc-if>
+<sc-if value="{{ discardAsk }}" hint-placeholder-val="{{ false }}">
+  <div style="position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background: rgba(27, 31, 36, 0.45)">
+    <div role="alertdialog" aria-modal="true" aria-labelledby="sr-dis-t" aria-describedby="sr-dis-d" style="width: min(480px, 100%); background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px">
+      <div style="padding: 24px 24px 8px">
+        <h2 id="sr-dis-t" style="margin: 0; font-size: 20px; font-weight: 600">未適用の変更 {{ n }} 件を取り消しますか</h2>
+        <p id="sr-dis-d" style="margin: 8px 0 0">入力した値は破棄され、適用中の値に戻ります。</p>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; padding: 16px 24px; border-top: 1px solid #EDF1F5">
+        <button type="button" onClick="{{ cancelDiscard }}" style="min-height: 44px; padding: 0 18px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">戻る</button>
+        <button type="button" onClick="{{ revertAll }}" style="min-height: 44px; padding: 0 20px; border: 1px solid #C0362C; border-radius: 4px; background: #C0362C; color: #FFFFFF; font-weight: 600; cursor: pointer">取り消す</button>
+      </div>
+    </div>
+  </div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"buffer":{"editor":"enum","options":["自動","手動"],"default":"自動","section":"表示状態"},"$preview":{"width":1440,"height":1450}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const s = this.state || {};
+    const stopAsk = !!s.stopAsk;
+    const stopped = !!s.stopped;
+    const discardAsk = !!s.discardAsk;
+    const discarded = !!s.discarded;
+    const bufManual = s.bufManual === undefined ? (this.props.buffer ?? '自動') === '手動' : s.bufManual;
+    const buf = s.buf || '160';
+    const set = (patch) => this.setState(Object.assign({ stopAsk, stopped, discardAsk, discarded, bufManual, buf }, patch));
+    const SUB = '#556174';
+    const G = {
+      warn: { d: 'M6 1.2L11 10.4H1Z', fill: '#D4890F', stroke: 'none', text: '#8F5300', tint: '#FFF6E5' },
+      off: { d: 'M2 6a4 4 0 1 0 8 0a4 4 0 1 0 -8 0Z', fill: 'none', stroke: SUB, text: SUB, tint: 'transparent' },
+      ok: { d: 'M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z', fill: '#1D7A4C', stroke: 'none', text: '#1D7A4C', tint: 'transparent' },
+      info: { d: 'M3.5 6a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0Z', fill: '#87929F', stroke: 'none', text: SUB, tint: 'transparent' }
+    };
+    // 適用中の伝送バッファは「自動（160 ms）」。手動にすると変更として数える
+    const changed = !discarded;
+    const bufC = bufManual;
+    const backToAuto = { bufManual: false, buf: '160' };
+    const pending = [];
+    if (changed) pending.push({ label: 'パスフレーズ', from: '設定済み', to: '新しい値（非表示）', revert: () => set({ discarded: true }) });
+    if (bufC) pending.push({ label: '伝送バッファ', from: '自動（160 ms）', to: '手動（' + buf + ' ms）', revert: () => set(backToAuto) });
+    const n = pending.length;
+    const bufShort = bufManual && parseInt(buf, 10) < 152;
+    const impacts = [];
+    if (stopped) impacts.push({ st: G.info, text: '設定を保存します。伝送は停止したままです' });
+    else {
+      impacts.push({ st: G.info, text: '接続をやり直します' });
+      impacts.push({ st: G.ok, text: 'いまは未接続のため、受信側への追加の影響はありません' });
+    }
+    if (bufShort) impacts.push({ st: G.warn, text: '伝送バッファが目安の 152 ms より短く、損失が増えると映像が乱れやすくなります' });
+    const SEL = 'background: #1B1F24; color: #FFFFFF';
+    const UNSEL = 'background: #FFFFFF; color: #1B1F24';
+    const inBd = (c) => (c ? '#1B1F24' : '#87929F');
+    return {
+      top: stopped ? { st: G.off, state: '停止中', sub: '10:42:20 から' } : { st: G.warn, state: '再接続中', sub: '5 回目' },
+      showErr: !stopped, stopped,
+      changed, pending, n, hasN: n > 0, showList: n > 0, showNone: n === 0, impacts,
+      pw: changed
+        ? { bg: '#F2F4F7', bd: '#1B1F24', sh: 'inset 0 0 0 1px #1B1F24', value: 'new-passphrase-2026' }
+        : { bg: 'transparent', bd: '#87929F', sh: 'none', value: 'old-passphrase-01' },
+      bufAuto: !bufManual, bufManual, buf, bufC, bufShort,
+      bufBg: bufC ? '#F2F4F7' : 'transparent',
+      segBufAuto: bufManual ? UNSEL : SEL, segBufManual: bufManual ? SEL : UNSEL,
+      bufBd: inBd(bufC), bufSh: bufC ? 'inset 0 0 0 1px #1B1F24' : 'none',
+      pickBufAuto: () => set(backToAuto),
+      pickBufManual: () => set({ bufManual: true }),
+      onBuf: (e) => set({ buf: e.target.value }),
+      revBuf: () => set(backToAuto),
+      stopAsk, discardAsk,
+      askStop: () => set({ stopAsk: true }),
+      cancelStop: () => set({ stopAsk: false }),
+      confirmStop: () => set({ stopAsk: false, stopped: true }),
+      restart: () => set({ stopped: false }),
+      askDiscard: () => { if (n > 0) set({ discardAsk: true }); },
+      cancelDiscard: () => set({ discardAsk: false }),
+      revert: () => set({ discarded: true }),
+      revertAll: () => set(Object.assign({ discardAsk: false, discarded: true }, backToAuto))
+    };
+  }
+}
+</script>
+</body>
+</html>

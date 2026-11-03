@@ -1,0 +1,694 @@
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiFailure, api } from '../api/client';
+import { useDrafts, useDraftState, useLive } from '../api/live';
+import type {
+  CheckResult,
+  Cipher,
+  CompareResult,
+  CompareRow,
+  Status,
+  TransportMode,
+  TransportOptions,
+  TransportSettings,
+  TransportSettingsInput,
+} from '../api/types';
+import { AlertDialog } from '../components/Dialog';
+import { Glyph, type Tone } from '../components/Glyph';
+import { Segmented } from '../components/Segmented';
+import { Applied, ApplyDialog, DiscardDialog, FieldError, PendingPanel, Row, type PendingItem } from '../components/Settings';
+import { AlertStrip, Shell } from '../components/Shell';
+import { cipherName, fieldErrorText, modeName, stateLabel } from '../i18n/ja';
+import { timeOf } from '../lib/format';
+import { NotDesigned } from './Placeholders';
+
+interface TDraft {
+  mode: TransportMode;
+  host: string;
+  port: string;
+  listen_port: string;
+  bufMode: 'auto' | 'manual';
+  bufMs: string;
+  cipher: Cipher;
+  /** '' = keep the current passphrase */
+  passphrase: string;
+}
+
+type Key = 'mode' | 'endpoint' | 'listen_port' | 'buffer' | 'cipher' | 'passphrase';
+
+const fromSettings = (s: TransportSettings): TDraft => ({
+  mode: s.mode,
+  host: s.peer.host,
+  port: String(s.peer.port),
+  listen_port: String(s.listen_port),
+  bufMode: s.buffer.mode,
+  // Switching to manual starts from the value auto uses now.
+  bufMs: String(s.buffer.mode === 'manual' ? s.buffer.manual_ms : s.buffer.auto_ms),
+  cipher: s.encryption.cipher,
+  passphrase: '',
+});
+
+const toInput = (d: TDraft, s: TransportSettings): TransportSettingsInput => ({
+  version: s.version,
+  mode: d.mode,
+  peer: { host: d.host.trim(), port: Number(d.port) },
+  listen_port: Number(d.listen_port),
+  buffer: { mode: d.bufMode, manual_ms: Number(d.bufMs) },
+  encryption: { cipher: d.cipher, ...(d.passphrase ? { passphrase: d.passphrase } : {}) },
+});
+
+const usesPeer = (m: TransportMode) => m !== 'inbound';
+const usesListen = (m: TransportMode) => m !== 'outbound';
+
+export function TransportSettingsPage() {
+  const { device } = useLive();
+  if (device && device.role === 'rx') {
+    return <NotDesigned route="transport" title="伝送設定" note="受信機の伝送設定（待ち受けポートやパスフレーズ）はまだデザインしていません。" />;
+  }
+  return <TransportSettingsTx />;
+}
+
+function ErrorStrip({ status, onRetry, onAskStop }: { status: Status; onRetry: () => void; onAskStop: () => void }) {
+  const rejected = status.alerts.some((a) => a.code === 'peer_rejected_passphrase');
+  const lines = rejected
+    ? ['受信機が接続を拒否しています。', 'パスフレーズが受信機と一致していません。']
+    : ['受信機に接続できません。', 'ケーブルと受信機の電源を確認してください。'];
+  return (
+    <section role="status" aria-label="現在の状況" className="strip strip-lg tone-err">
+      <div style={{ flex: '1 1 520px', minWidth: 0 }}>
+        <div className="meta">
+          <span className="strip-label">
+            <Glyph tone="err" size={12} />
+            接続エラー
+          </span>
+          {status.next_retry_s !== null && (
+            <span>
+              次の試行まで <b>{status.next_retry_s} 秒</b>
+            </span>
+          )}
+          {status.last_live_until && (
+            <span>
+              前回の接続 <b>{timeOf(status.last_live_until)} まで</b>
+            </span>
+          )}
+        </div>
+        <p className="big">
+          {lines.map((l) => (
+            <span key={l} className="nowrap-phrase">
+              {l}
+            </span>
+          ))}
+        </p>
+      </div>
+      <div className="inline">
+        <button type="button" className="btn" onClick={onRetry}>
+          今すぐ再試行
+        </button>
+        <button type="button" className="btn btn-primary" onClick={onAskStop}>
+          <svg width="9" height="9" viewBox="0 0 12 12" aria-hidden="true">
+            <rect x="1" y="1" width="10" height="10" fill="currentColor" />
+          </svg>
+          伝送を停止…
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function StoppedStrip({ status, onStart }: { status: Status; onStart: () => void }) {
+  return (
+    <section role="status" aria-label="現在の状況" className="strip tone-off">
+      <p>
+        <span className="strip-label">
+          <Glyph tone="off" size={12} />
+          停止中
+        </span>
+        <span className="strip-text">{timeOf(status.since)} に伝送を停止しました。再接続も止まっています。</span>
+      </p>
+      <button type="button" className="btn btn-primary" onClick={onStart}>
+        伝送を開始
+      </button>
+    </section>
+  );
+}
+
+function verdict(tone: Tone, text: string, sub?: string, strong?: boolean) {
+  return (
+    <span role="cell">
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontWeight: strong ? 600 : 400, color: strong ? 'var(--err-text)' : undefined }}>
+        <Glyph tone={tone} />
+        {text}
+      </span>
+      {sub && <small>{sub}</small>}
+    </span>
+  );
+}
+
+function CompareTable({ data, localId }: { data: CompareResult | null; localId: string }) {
+  const rows = data?.rows ?? [];
+  const cell = (main: string, sub?: string) => (
+    <span role="cell">
+      {main}
+      {sub && <small>{sub}</small>}
+    </span>
+  );
+  const unknown = verdict('na', '未取得');
+  const render = (r: CompareRow) => {
+    switch (r.key) {
+      case 'mode':
+        return (
+          <div role="row" className="cmp-row" key={r.key}>
+            <span role="cell" className="muted">接続モード</span>
+            {cell(modeName(r.local))}
+            <span aria-hidden="true" style={{ color: 'var(--muted)' }}>→</span>
+            {cell(r.peer ? modeName(r.peer) : '—')}
+            {r.verdict === 'compatible' ? verdict('ok', '組み合わせ可') : r.verdict === 'incompatible' ? verdict('err', '組み合わせ不可', undefined, true) : unknown}
+          </div>
+        );
+      case 'endpoint':
+        return (
+          <div role="row" className="cmp-row" key={r.key}>
+            <span role="cell" className="muted">接続先とポート</span>
+            {cell(`${r.local.host}:${r.local.port} へ接続`)}
+            <span aria-hidden="true" style={{ color: 'var(--muted)' }}>→</span>
+            {cell(r.peer ? `ポート ${r.peer.listen_port} で待ち受け` : '—')}
+            {r.verdict === 'match' ? verdict('ok', '一致') : r.verdict === 'mismatch' ? verdict('err', '不一致', undefined, true) : unknown}
+          </div>
+        );
+      case 'buffer':
+        return (
+          <div role="row" className="cmp-row" key={r.key}>
+            <span role="cell" className="muted">伝送バッファ</span>
+            {cell(`${r.local_ms} ms`, r.local_mode === 'auto' ? '自動' : '手動')}
+            <span aria-hidden="true" />
+            {cell(r.peer_ms !== null ? `${r.peer_ms} ms` : '—')}
+            {r.effective_ms !== null ? verdict('ok', `${r.effective_ms} ms で動作`, '異なる場合は大きい方を使用') : unknown}
+          </div>
+        );
+      case 'cipher':
+        return (
+          <div role="row" className="cmp-row" key={r.key}>
+            <span role="cell" className="muted">暗号化方式</span>
+            {cell(cipherName(r.local))}
+            <span aria-hidden="true" />
+            {cell(r.peer ? cipherName(r.peer) : '—')}
+            {r.verdict === 'match' ? verdict('ok', '一致') : r.verdict === 'mismatch' ? verdict('err', '不一致', undefined, true) : unknown}
+          </div>
+        );
+      case 'passphrase':
+        return (
+          <div role="row" className={r.verdict === 'mismatch' ? 'cmp-row bad' : 'cmp-row'} key={r.key}>
+            <span role="cell" className="muted">パスフレーズ</span>
+            {cell(r.local_set ? '設定済み' : '未設定', '値は表示しません')}
+            <span aria-hidden="true" />
+            <span role="cell">
+              <span className="muted">—</span>
+              <small>受信機からは送られません</small>
+            </span>
+            {r.verdict === 'mismatch'
+              ? verdict('err', '不一致', r.reason === 'peer_rejected' ? '受信機の拒否理由より' : undefined, true)
+              : r.verdict === 'match'
+                ? verdict('ok', '一致', '接続できているため')
+                : verdict('na', '未確認')}
+          </div>
+        );
+    }
+  };
+  return (
+    <section aria-labelledby="sec-cmp">
+      <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'baseline', gap: '4px 24px', padding: '24px 28px 0' }}>
+        <h2 id="sec-cmp" style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
+          送信機と受信機の設定を比べる
+        </h2>
+        <span style={{ fontSize: 13 }} className="muted">
+          {data?.received_at ? `受信機の値は接続時（${timeOf(data.received_at)}）に受け取ったものです` : '受信機の値は接続時に受け取ったものです'}
+        </span>
+      </div>
+      <div className="cmp-wrap">
+        <div role="table" aria-labelledby="sec-cmp" className="cmp">
+          <div role="row" className="cmp-row head">
+            <span role="columnheader" style={{ fontSize: 13 }} className="muted">項目</span>
+            <span role="columnheader" style={{ fontWeight: 600 }}>送信機 {localId}</span>
+            <span aria-hidden="true" />
+            <span role="columnheader" style={{ fontWeight: 600 }}>受信機 {data?.peer_id ?? ''}</span>
+            <span role="columnheader" style={{ fontSize: 13 }} className="muted">照合</span>
+          </div>
+          {rows.map(render)}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TransportSettingsTx() {
+  const { device, status, setStatus } = useLive();
+  const { setCount } = useDrafts();
+  const [settings, setSettings] = useState<TransportSettings | null>(null);
+  const [options, setOptions] = useState<TransportOptions | null>(null);
+  const [compare, setCompare] = useState<CompareResult | null>(null);
+  const [stored, setStored] = useDraftState<TDraft>('transport', null);
+  const [check, setCheck] = useState<CheckResult | null>(null);
+  const [phase, setPhase] = useState<'edit' | 'confirm' | 'applying' | 'discard' | 'stop'>('edit');
+  const [doneAt, setDoneAt] = useState<string | null>(null);
+  const [showPw, setShowPw] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const pwRef = useRef<HTMLInputElement>(null);
+
+  const reload = () => {
+    api.transport.get().then(setSettings).catch(() => undefined);
+    api.transport.compare().then(setCompare).catch(() => undefined);
+  };
+  useEffect(() => {
+    reload();
+    api.transport.options().then(setOptions).catch(() => undefined);
+  }, []);
+  // The comparison changes when the link state changes.
+  const linkState = status?.state;
+  useEffect(() => {
+    api.transport.compare().then(setCompare).catch(() => undefined);
+    api.transport.get().then(setSettings).catch(() => undefined);
+  }, [linkState]);
+
+  const applied = useMemo(() => (settings ? fromSettings(settings) : null), [settings]);
+  const v = stored ?? applied;
+
+  const pending: PendingItem[] = useMemo(() => {
+    if (!settings || !applied || !v) return [];
+    const bufText = (d: TDraft) => (d.bufMode === 'auto' ? `自動（${settings.buffer.auto_ms} ms）` : `手動（${d.bufMs} ms）`);
+    const items: { key: Key; label: string; changed: boolean; from: string; to: string }[] = [
+      { key: 'mode', label: '接続モード', changed: v.mode !== applied.mode, from: modeName(applied.mode), to: modeName(v.mode) },
+      {
+        key: 'endpoint',
+        label: '接続先',
+        changed: usesPeer(v.mode) && (v.host.trim() !== applied.host || Number(v.port) !== Number(applied.port)),
+        from: `${applied.host}:${applied.port}`,
+        to: `${v.host.trim()}:${v.port}`,
+      },
+      {
+        key: 'listen_port',
+        label: '待ち受けポート',
+        changed: usesListen(v.mode) && Number(v.listen_port) !== Number(applied.listen_port),
+        from: applied.listen_port,
+        to: v.listen_port,
+      },
+      {
+        key: 'buffer',
+        label: '伝送バッファ',
+        changed: v.bufMode !== applied.bufMode || (v.bufMode === 'manual' && Number(v.bufMs) !== Number(applied.bufMs)),
+        from: bufText(applied),
+        to: bufText(v),
+      },
+      { key: 'cipher', label: '暗号化方式', changed: v.cipher !== applied.cipher, from: cipherName(applied.cipher), to: cipherName(v.cipher) },
+      {
+        key: 'passphrase',
+        label: 'パスフレーズ',
+        changed: v.cipher !== 'none' && v.passphrase !== '',
+        from: settings.encryption.passphrase_set ? '設定済み' : '未設定',
+        to: '新しい値（非表示）',
+      },
+    ];
+    return items.filter((i) => i.changed).map((i) => ({ key: i.key, label: i.label, from: i.from, to: i.to, revert: () => revert(i.key) }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings, applied, v]);
+
+  const n = pending.length;
+  useEffect(() => setCount('transport', n), [n, setCount]);
+
+  useEffect(() => {
+    if (!settings || !v || n === 0) {
+      setCheck(null);
+      return;
+    }
+    const t = setTimeout(() => {
+      api.transport.check(toInput(v, settings)).then(setCheck).catch(() => undefined);
+    }, 200);
+    return () => clearTimeout(t);
+  }, [settings, v, n]);
+
+  if (!device || !status || !settings || !applied || !v) {
+    return (
+      <Shell route="transport" banner={null}>
+        <p className="muted">読み込み中…</p>
+      </Shell>
+    );
+  }
+
+  const set = (patch: Partial<TDraft>) => {
+    setDoneAt(null);
+    setNotice(null);
+    setStored({ ...v, ...patch });
+  };
+  function revert(k: Key) {
+    const a = applied!;
+    const cur = v!;
+    const back: Partial<TDraft> =
+      k === 'endpoint'
+        ? { host: a.host, port: a.port }
+        : k === 'buffer'
+          ? { bufMode: a.bufMode, bufMs: a.bufMs }
+          : k === 'passphrase'
+            ? { passphrase: '' }
+            : { [k]: (a as unknown as Record<string, string>)[k] };
+    setStored({ ...cur, ...back });
+  }
+  const changed = (k: Key) => pending.some((p) => p.key === k);
+  const errors = check?.errors ?? [];
+  const errFor = (field: string) => errors.find((e) => e.field === field);
+  const impacts = check?.impacts ?? [];
+  const invalid = errors.length > 0;
+
+  const erroring = (status.state === 'reconnecting' || status.state === 'connecting') && status.alerts.some((a) => a.level === 'error');
+  const stopped = status.state === 'stopped';
+  const rejectedAt = settings.encryption.passphrase_rejected_at;
+  const guide = settings.buffer.guide_min_ms;
+  const short = v.bufMode === 'manual' && guide !== null && Number(v.bufMs) < guide;
+
+  const run = async (f: () => Promise<Status>) => setStatus(await f());
+
+  const apply = async () => {
+    setPhase('applying');
+    try {
+      const res = await api.transport.apply(toInput(v, settings));
+      setSettings(res.settings);
+      setStored(null);
+      setShowPw(false);
+      setDoneAt(timeOf(res.applied_at));
+      setPhase('edit');
+      api.transport.compare().then(setCompare).catch(() => undefined);
+    } catch (e) {
+      setPhase('edit');
+      if (e instanceof ApiFailure && e.status === 409) {
+        setNotice('ほかの画面で設定が変わったため、適用しませんでした。最新の値を読み込みました。');
+        reload();
+      } else {
+        setNotice('適用できませんでした。入力内容を確認してください。');
+      }
+    }
+  };
+
+  const peer = status.peer.id ?? '';
+  return (
+    <Shell
+      route="transport"
+      banner={
+        erroring ? (
+          <ErrorStrip status={status} onRetry={() => run(api.retry)} onAskStop={() => setPhase('stop')} />
+        ) : stopped ? (
+          <StoppedStrip status={status} onStart={() => run(api.start)} />
+        ) : (
+          <AlertStrip />
+        )
+      }
+    >
+      <div className="card">
+        <div className="set-head">
+          <h1>伝送設定</h1>
+          <p>
+            受信機 {peer}（{settings.peer.host}:{settings.peer.port}）へ送ります。変更は「適用」するまで反映されません。
+          </p>
+        </div>
+        <div className="set-body">
+          <div className="set-form">
+            <CompareTable data={compare} localId={device.id} />
+
+            <section aria-labelledby="sec-conn">
+              <h2 id="sec-conn" className="sec-title">
+                接続
+              </h2>
+              <Row label="接続モード" labelId="lbl-mode" hint="「発信」はこの送信機から受信機へ接続します" changed={changed('mode')}>
+                <Segmented
+                  labelledBy="lbl-mode"
+                  value={v.mode}
+                  onChange={(mode) => set({ mode })}
+                  options={[
+                    { value: 'outbound', label: '発信' },
+                    { value: 'inbound', label: '待ち受け' },
+                    { value: 'mutual', label: '相互接続' },
+                  ]}
+                />
+                {changed('mode') && <Applied value={modeName(applied.mode)} onRevert={() => revert('mode')} />}
+              </Row>
+              {usesPeer(v.mode) && (
+                <Row label="接続先" labelFor="tr-host" hint="受信機の IP アドレスとポート" changed={changed('endpoint')} invalid={!!errFor('peer.host') || !!errFor('peer.port')}>
+                  <div className="inline">
+                    <input
+                      id="tr-host"
+                      type="text"
+                      className={changed('endpoint') ? 'input changed' : 'input'}
+                      style={{ width: 200, maxWidth: '100%' }}
+                      value={v.host}
+                      aria-invalid={!!errFor('peer.host')}
+                      onChange={(e) => set({ host: e.target.value })}
+                    />
+                    <span className="unit">:</span>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      aria-label="ポート"
+                      className={changed('endpoint') ? 'input changed' : 'input'}
+                      style={{ width: 96, textAlign: 'right' }}
+                      value={v.port}
+                      aria-invalid={!!errFor('peer.port')}
+                      onChange={(e) => set({ port: e.target.value })}
+                    />
+                  </div>
+                  {errFor('peer.host') && <FieldError text={fieldErrorText(errFor('peer.host')!)} />}
+                  {errFor('peer.port') && <FieldError text={fieldErrorText(errFor('peer.port')!)} />}
+                  {changed('endpoint') && <Applied value={`${applied.host}:${applied.port}`} onRevert={() => revert('endpoint')} />}
+                </Row>
+              )}
+              {usesListen(v.mode) && (
+                <Row label="待ち受けポート" labelFor="tr-listen" hint="この送信機が接続を待つポート" changed={changed('listen_port')} invalid={!!errFor('listen_port')}>
+                  <input
+                    id="tr-listen"
+                    type="text"
+                    inputMode="numeric"
+                    className={changed('listen_port') ? 'input changed' : 'input'}
+                    style={{ width: 96, textAlign: 'right' }}
+                    value={v.listen_port}
+                    aria-invalid={!!errFor('listen_port')}
+                    onChange={(e) => set({ listen_port: e.target.value })}
+                  />
+                  {errFor('listen_port') && <FieldError text={fieldErrorText(errFor('listen_port')!)} />}
+                  {changed('listen_port') && <Applied value={applied.listen_port} onRevert={() => revert('listen_port')} />}
+                </Row>
+              )}
+            </section>
+
+            <section aria-labelledby="sec-lat">
+              <h2 id="sec-lat" className="sec-title">
+                遅延
+              </h2>
+              <Row
+                label="伝送バッファ"
+                labelId="lbl-buf"
+                hint={
+                  <>
+                    再送のために待つ時間です。
+                    <br />
+                    実際の映像遅延とは別の値です
+                  </>
+                }
+                changed={changed('buffer')}
+                top
+              >
+                <Segmented
+                  labelledBy="lbl-buf"
+                  value={v.bufMode}
+                  onChange={(bufMode) =>
+                    set(bufMode === 'auto' ? { bufMode, bufMs: applied.bufMode === 'auto' ? applied.bufMs : String(settings.buffer.auto_ms) } : { bufMode })
+                  }
+                  options={[
+                    { value: 'auto', label: '自動' },
+                    { value: 'manual', label: '手動' },
+                  ]}
+                />
+                {v.bufMode === 'auto' ? (
+                  <>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '4px 12px', marginTop: 10 }}>
+                      <span style={{ fontSize: 16, fontWeight: 500 }}>{settings.buffer.auto_ms} ms</span>
+                      {settings.buffer.last_rtt_ms !== null && (
+                        <span style={{ fontSize: 13 }} className="muted">
+                          前回の RTT {settings.buffer.last_rtt_ms} ms から決めた値
+                        </span>
+                      )}
+                    </div>
+                    <p className="help" style={{ marginTop: 4 }}>
+                      接続のたびに RTT を測り、その 4 倍以上になるよう機器が決めます。
+                    </p>
+                  </>
+                ) : (
+                  <div style={{ marginTop: 10 }}>
+                    <select
+                      id="tr-buf"
+                      aria-labelledby="lbl-buf"
+                      aria-describedby="tr-buf-h"
+                      className={changed('buffer') ? 'select changed' : 'select'}
+                      style={{ minWidth: 160, fontSize: 16, fontWeight: 500 }}
+                      value={v.bufMs}
+                      onChange={(e) => set({ bufMs: e.target.value })}
+                    >
+                      {(options?.buffer_presets_ms ?? [80, 120, 160, 200, 300, 500, 1000]).map((ms) => (
+                        <option key={ms} value={String(ms)}>
+                          {ms} ms
+                        </option>
+                      ))}
+                    </select>
+                    {settings.buffer.last_rtt_ms !== null && guide !== null && (
+                      <p id="tr-buf-h" className="help">
+                        目安は RTT の 4 倍以上。前回の RTT {settings.buffer.last_rtt_ms} ms なら {guide} ms 以上です。
+                      </p>
+                    )}
+                    {short && (
+                      <div className="field-warn">
+                        <Glyph tone="warn" />
+                        目安より短いため、損失が増えると映像が乱れやすくなります
+                      </div>
+                    )}
+                  </div>
+                )}
+                {changed('buffer') && (
+                  <Applied value={applied.bufMode === 'auto' ? `自動（${settings.buffer.auto_ms} ms）` : `手動（${applied.bufMs} ms）`} onRevert={() => revert('buffer')} />
+                )}
+              </Row>
+            </section>
+
+            <section aria-labelledby="sec-enc">
+              <h2 id="sec-enc" className="sec-title">
+                暗号化
+              </h2>
+              <Row label="暗号化方式" labelFor="tr-ci" changed={changed('cipher')}>
+                <select
+                  id="tr-ci"
+                  className={changed('cipher') ? 'select changed' : 'select'}
+                  value={v.cipher}
+                  onChange={(e) => set({ cipher: e.target.value as Cipher })}
+                >
+                  <option value="aes-128">AES-128</option>
+                  <option value="aes-192">AES-192</option>
+                  <option value="aes-256">AES-256</option>
+                  <option value="none">なし</option>
+                </select>
+                {changed('cipher') && <Applied value={cipherName(applied.cipher)} onRevert={() => revert('cipher')} />}
+              </Row>
+              {v.cipher !== 'none' && (
+                <Row
+                  label="パスフレーズ"
+                  labelFor="tr-pw"
+                  hint={`受信機 ${peer} と同じ値にしてください`}
+                  changed={changed('passphrase')}
+                  invalid={!!errFor('encryption.passphrase')}
+                  top
+                >
+                  <div className="inline">
+                    <input
+                      ref={pwRef}
+                      id="tr-pw"
+                      type={showPw ? 'text' : 'password'}
+                      autoComplete="off"
+                      placeholder={settings.encryption.passphrase_set ? '変更するときだけ入力' : '入力してください'}
+                      className={changed('passphrase') ? 'input changed' : 'input'}
+                      style={{ width: 260, maxWidth: '100%' }}
+                      value={v.passphrase}
+                      aria-invalid={!!errFor('encryption.passphrase')}
+                      aria-describedby="tr-pw-e"
+                      onChange={(e) => set({ passphrase: e.target.value })}
+                    />
+                    <button type="button" className="btn" style={{ minHeight: 40, padding: '0 14px' }} aria-pressed={showPw} onClick={() => setShowPw(!showPw)}>
+                      {showPw ? '隠す' : '表示する'}
+                    </button>
+                  </div>
+                  {errFor('encryption.passphrase') && <FieldError id="tr-pw-e" text={fieldErrorText(errFor('encryption.passphrase')!)} />}
+                  {rejectedAt && !errFor('encryption.passphrase') && (
+                    <FieldError id="tr-pw-e" text={`適用中の値は ${timeOf(rejectedAt)} に受信機から拒否されました`} />
+                  )}
+                  {changed('passphrase') && <Applied value="設定済み（値は表示しません）" onRevert={() => revert('passphrase')} />}
+                </Row>
+              )}
+            </section>
+            {notice && (
+              <p role="alert" style={{ margin: '16px 28px 0', fontWeight: 600, color: 'var(--err-text)' }}>
+                {notice}
+              </p>
+            )}
+          </div>
+
+          <PendingPanel
+            items={pending}
+            impacts={impacts}
+            invalid={invalid}
+            onDiscard={() => n > 0 && setPhase('discard')}
+            onApply={() => !invalid && n > 0 && setPhase('confirm')}
+            doneAt={doneAt}
+            doneNote="新しい設定で接続をやり直しています。"
+            emptyNote={
+              rejectedAt
+                ? '未適用の変更はありません。適用中のパスフレーズは受信機と一致していません。'
+                : '未適用の変更はありません。表示中の値はすべて適用済みです。'
+            }
+            emptyLink={
+              rejectedAt ? (
+                <a
+                  href="#tr-pw"
+                  style={{ display: 'inline-block', marginTop: 8, fontSize: 13, fontWeight: 600 }}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    pwRef.current?.focus();
+                  }}
+                >
+                  パスフレーズを入力する
+                </a>
+              ) : undefined
+            }
+          />
+        </div>
+      </div>
+
+      {(phase === 'confirm' || phase === 'applying') && n > 0 && (
+        <ApplyDialog
+          items={pending}
+          impacts={impacts}
+          context={status.state === 'live' ? `送信機 ${device.id} は受信機 ${peer} へ伝送中です。` : `送信機 ${device.id} は${stateLabel('tx', status.state)}です。`}
+          applying={phase === 'applying'}
+          applyingText="適用しています。接続をやり直しています…"
+          onCancel={() => setPhase('edit')}
+          onApply={apply}
+        />
+      )}
+      {phase === 'discard' && n > 0 && (
+        <DiscardDialog
+          n={n}
+          onCancel={() => setPhase('edit')}
+          onConfirm={() => {
+            setStored(null);
+            setShowPw(false);
+            setPhase('edit');
+          }}
+        />
+      )}
+      {phase === 'stop' && (
+        <AlertDialog
+          title="伝送を停止しますか"
+          description={`受信機 ${peer} への再接続をやめ、送信を止めます。`}
+          onCancel={() => setPhase('edit')}
+          actions={
+            <>
+              <button type="button" className="btn" onClick={() => setPhase('edit')} data-autofocus>
+                キャンセル
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={async () => {
+                  await run(api.stop);
+                  setPhase('edit');
+                }}
+              >
+                伝送を停止する
+              </button>
+            </>
+          }
+        />
+      )}
+    </Shell>
+  );
+}

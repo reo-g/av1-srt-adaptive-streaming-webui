@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>運用 — 送信機</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#FFFFFF;text-wrap:pretty;word-break:auto-phrase;overflow-wrap:break-word}
+*{box-sizing:border-box}
+h1,h2,h3{text-wrap:balance}
+button,input,select{font:inherit;color:inherit}
+a{color:#1B1F24;text-underline-offset:3px}a:hover{color:#556174}
+:focus-visible{outline:2px solid #1B1F24;outline-offset:2px}
+</style>
+</helmet>
+<div style="min-height: 100dvh; display: flex; flex-direction: column; background: #FFFFFF; color: #1B1F24; font-family: 'Geist', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic UI', 'BIZ UDPGothic', Meiryo, sans-serif; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums">
+
+<header style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 32px; min-height: 56px; padding: 8px 24px; background: #FFFFFF; border-bottom: 1px solid #E1E6EC">
+  <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px">
+    <span style="font-size: 16px; font-weight: 600">TX-01</span>
+    <span style="color: #556174">送信機</span>
+    <span style="color: #87929F">192.168.10.21</span>
+  </div>
+  <div style="display: flex; align-items: center; gap: 8px">
+    <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true"><path d="{{ top.st.d }}" fill="{{ top.st.fill }}" stroke="{{ top.st.stroke }}" stroke-width="1.5"></path></svg>
+    <span style="font-weight: 600; color: {{ top.st.text }}">{{ top.state }}</span>
+    <span style="color: #556174">{{ top.sub }}</span>
+    <span aria-hidden="true" style="width: 1px; height: 16px; margin: 0 8px; background: #E1E6EC"></span>
+    <span style="font-size: 16px; font-weight: 500">10:42:18<span style="margin-left: 4px; font-size: 13px; font-weight: 400; color: #556174">JST</span></span>
+  </div>
+</header>
+
+<div style="flex: 1 1 auto; display: flex; align-items: stretch">
+  <nav aria-label="メニュー" style="flex: 0 0 200px; padding: 16px 12px 32px; background: #F6F8FA; border-right: 1px solid #E1E6EC">
+    <a href="R-ops-a.dc.html" aria-current="page" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 0 4px 4px 0; background: #FFFFFF; box-shadow: inset 3px 0 0 #1B1F24; color: #1B1F24; font-weight: 600; text-decoration: none">運用</a>
+    <div style="margin: 20px 12px 4px; font-size: 12px; color: #87929F">設定</div>
+    <a href="R-av.dc.html" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">映像</a>
+    <a href="R-trans.dc.html" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">伝送</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">録画</a>
+    <div style="margin: 20px 12px 4px; font-size: 12px; color: #87929F">管理</div>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">ネットワーク</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">ログ</a>
+    <a href="#" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; margin-top: 2px; padding: 0 12px; border-radius: 4px; color: #556174; text-decoration: none">機器情報</a>
+  </nav>
+
+  <div style="flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column">
+    <sc-if value="{{ al.show }}" hint-placeholder-val="{{ true }}">
+      <section role="status" aria-label="現在の状況" style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 32px; padding: 16px 32px; background: {{ al.st.tint }}; border-top: 4px solid {{ al.st.fill }}; border-bottom: 1px solid #E1E6EC">
+        <p style="display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin: 0">
+          <span style="display: inline-flex; align-items: center; gap: 8px; font-weight: 600; color: {{ al.st.text }}"><svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="{{ al.st.d }}" fill="{{ al.st.fill }}"></path></svg>{{ al.label }}</span>
+          <span style="font-size: 16px; font-weight: 600">{{ al.text }}</span>
+        </p>
+        <a href="R-trans.dc.html" style="font-weight: 600">伝送設定を開く</a>
+      </section>
+    </sc-if>
+
+    <main style="flex: 1 1 auto; padding: 24px 32px 40px">
+      <h1 style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); margin: -1px">運用</h1>
+      <div style="background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px; padding: 28px 32px 12px">
+        <div style="display: flex; flex-wrap: wrap; align-items: flex-start; gap: 32px 48px">
+          <section aria-labelledby="tx-pv" style="flex: 999 1 560px; min-width: 0">
+            <div style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 24px; margin-bottom: 12px">
+              <h2 id="tx-pv" style="margin: 0; font-size: 16px; font-weight: 600">入力映像</h2>
+              <div style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px"><span style="color: #556174">カメラ /dev/video0　1080p59.94　約 5 fps で表示</span><a href="R-fs-tx.dc.html" title="全画面で表示（F キー）" style="display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0 12px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; color: #1B1F24; font-weight: 600; text-decoration: none"><svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1.5 5V1.5H5M9 1.5h3.5V5M12.5 9v3.5H9M5 12.5H1.5V9" fill="none" stroke="#1B1F24" stroke-width="1.5"></path></svg>全画面</a></div>
+            </div>
+            <div style="aspect-ratio: 16 / 9; border-radius: 4px; background: #0F1318; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center; color: #5E6672">入力映像</div>
+            <div style="display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-top: 16px">
+              <span style="color: #556174">音声</span>
+              <span>なし</span>
+            </div>
+            <section aria-labelledby="tx-path" style="margin-top: 24px; padding-top: 16px; border-top: 1px solid #EDF1F5">
+              <h2 id="tx-path" style="margin: 0 0 6px; font-size: 13px; font-weight: 400; color: #556174">信号経路</h2>
+              <ol style="display: flex; flex-wrap: wrap; align-items: center; gap: 12px 0; margin: 0; padding: 0; list-style: none">
+                <sc-for list="{{ path }}" as="p" hint-placeholder-count="5">
+                  <li style="display: flex; align-items: center">
+                    <span style="display: inline-flex; align-items: center; gap: 6px; color: {{ p.color }}; font-weight: {{ p.weight }}"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="display: {{ p.glyphShow }}"><path d="{{ p.st.d }}" fill="{{ p.st.fill }}" stroke="{{ p.st.stroke }}" stroke-width="1.5"></path></svg>{{ p.name }}<span style="font-weight: 400; color: {{ p.noteColor }}">{{ p.note }}</span></span>
+                    <span aria-hidden="true" style="display: {{ p.connShow }}; width: 20px; margin: 0 10px; border-top: 1px {{ p.dash }} #A9B2BE"></span>
+                  </li>
+                </sc-for>
+              </ol>
+            </section>
+          </section>
+
+          <section aria-labelledby="tx-st" style="flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: 20px; padding-top: 40px">
+            <h2 id="tx-st" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); margin: -1px">伝送の状態</h2>
+            <sc-for list="{{ reads }}" as="r" hint-placeholder-count="4">
+              <div>
+                <div style="display: flex; align-items: center; gap: 8px; color: #556174">{{ r.label }}<svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="display: {{ r.glyphShow }}"><path d="{{ r.st.d }}" fill="{{ r.st.fill }}"></path></svg></div>
+                <div style="display: flex; align-items: flex-end; justify-content: space-between; gap: 16px">
+                  <div style="display: flex; align-items: baseline; gap: 6px; white-space: nowrap"><span style="font-size: 36px; font-weight: 500; line-height: 1.15; color: {{ r.color }}">{{ r.value }}</span><span style="font-size: 16px; color: #556174">{{ r.unit }}</span></div>
+                  <svg width="112" height="30" viewBox="0 0 112 30" role="img" aria-label="{{ r.spLabel }}" style="flex: 0 0 auto; margin-bottom: 6px; overflow: visible"><title>{{ r.spLabel }}</title><line x1="0" y1="{{ r.sp.refY }}" x2="112" y2="{{ r.sp.refY }}" stroke="#A9B2BE" stroke-width="1" stroke-dasharray="3 3" style="display: {{ r.sp.refShow }}"></line><path d="{{ r.sp.d }}" fill="none" stroke="#556174" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"></path><path d="{{ r.sp.ticks }}" fill="none" stroke="#8F5300" stroke-width="2" stroke-linecap="round"></path></svg>
+                </div>
+                <div style="font-size: 13px; color: #556174">{{ r.ref }}</div>
+              </div>
+            </sc-for>
+            <p style="margin: -4px 0 0; font-size: 12px; color: #87929F">線は直近 5 分の推移（破線は基準）</p>
+            <div>
+              <button type="button" aria-expanded="{{ more }}" onClick="{{ toggleMore }}" style="display: inline-flex; align-items: center; gap: 6px; min-height: 32px; padding: 0; border: 0; background: none; font-weight: 600; cursor: pointer"><svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="transform: rotate({{ moreRot }}deg)"><path d="M4 2l4 4-4 4" fill="none" stroke="#1B1F24" stroke-width="1.6"></path></svg>回線の詳細</button>
+              <sc-if value="{{ more }}" hint-placeholder-val="{{ false }}">
+                <dl style="margin: 8px 0 0">
+                  <sc-for list="{{ details }}" as="d" hint-placeholder-count="3">
+                    <div style="display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-top: 1px solid #EDF1F5"><dt style="color: #556174">{{ d.label }}</dt><dd style="margin: 0; color: {{ d.color }}">{{ d.value }}</dd></div>
+                  </sc-for>
+                </dl>
+              </sc-if>
+            </div>
+            <button type="button" onClick="{{ onStop }}" style="min-height: 44px; padding: 0 16px; border: 1px solid {{ stopBtn.bd }}; border-radius: 4px; background: {{ stopBtn.bg }}; color: {{ stopBtn.fg }}; font-weight: 600; cursor: pointer">{{ stopBtn.label }}</button>
+          </section>
+        </div>
+
+        <section aria-labelledby="tx-ev" style="margin-top: 28px; padding: 20px 0 8px; border-top: 1px solid #EDF1F5">
+          <div style="display: flex; justify-content: space-between; align-items: baseline; gap: 16px">
+            <h2 id="tx-ev" style="margin: 0; font-size: 16px; font-weight: 600">イベント</h2>
+            <a href="#" style="color: #556174">ログをすべて表示</a>
+          </div>
+          <ul style="list-style: none; margin: 10px 0 0; padding: 0">
+            <sc-for list="{{ events }}" as="e" hint-placeholder-count="4">
+              <li style="display: grid; grid-template-columns: 72px 16px minmax(0, 1fr); align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid #EDF1F5">
+                <span style="color: #556174">{{ e.time }}</span>
+                <svg width="10" height="10" viewBox="0 0 12 12" aria-hidden="true" style="display: {{ e.glyphShow }}"><path d="{{ e.st.d }}" fill="{{ e.st.fill }}"></path></svg>
+                <span style="grid-column: 3">{{ e.msg }}</span>
+              </li>
+            </sc-for>
+          </ul>
+        </section>
+      </div>
+    </main>
+  </div>
+</div>
+<sc-if value="{{ stopAsk }}" hint-placeholder-val="{{ false }}">
+  <div style="position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left)); background: rgba(27, 31, 36, 0.45)">
+    <div role="alertdialog" aria-modal="true" aria-labelledby="tx-stop-t" aria-describedby="tx-stop-d" style="width: min(480px, 100%); background: #FFFFFF; border: 1px solid #E1E6EC; border-radius: 4px">
+      <div style="padding: 24px 24px 8px">
+        <h2 id="tx-stop-t" style="margin: 0; font-size: 20px; font-weight: 600">伝送を停止しますか</h2>
+        <p id="tx-stop-d" style="margin: 8px 0 0">受信機 RX-02 への送信を止めます。受信側の映像と音声も止まります。</p>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 16px; padding: 16px 24px; border-top: 1px solid #EDF1F5">
+        <button type="button" onClick="{{ cancelStop }}" style="min-height: 44px; padding: 0 18px; border: 1px solid #BFC7D2; border-radius: 4px; background: #FFFFFF; font-weight: 600; cursor: pointer">キャンセル</button>
+        <button type="button" onClick="{{ confirmStop }}" style="min-height: 44px; padding: 0 20px; border: 1px solid #C0362C; border-radius: 4px; background: #C0362C; color: #FFFFFF; font-weight: 600; cursor: pointer">伝送を停止する</button>
+      </div>
+    </div>
+  </div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"scenario":{"editor":"enum","options":["正常","回線警告","接続エラー"],"default":"回線警告","section":"表示状態"},"$preview":{"width":1440,"height":1110}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const s = this.state || {};
+    const scen = this.props.scenario ?? '回線警告';
+    const k = scen === '正常' ? 'ok' : (scen === '接続エラー' ? 'err' : 'warn');
+    const more = !!s.more;
+    const stopAsk = !!s.stopAsk;
+    const stopped = !!s.stopped;
+    const set = (patch) => this.setState(Object.assign({ more, stopAsk, stopped }, patch));
+    const INK = '#1B1F24';
+    const SUB = '#556174';
+    const G = {
+      ok: { d: 'M1.5 6a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0Z', fill: '#1D7A4C', stroke: 'none', text: '#1D7A4C', tint: 'transparent' },
+      warn: { d: 'M6 1.2L11 10.4H1Z', fill: '#D4890F', stroke: 'none', text: '#8F5300', tint: '#FFF6E5' },
+      err: { d: 'M2 2H10V10H2Z', fill: '#C0362C', stroke: 'none', text: '#B42318', tint: '#FDEEEC' },
+      off: { d: 'M2 6a4 4 0 1 0 8 0a4 4 0 1 0 -8 0Z', fill: 'none', stroke: SUB, text: SUB, tint: 'transparent' },
+      na: { d: 'M2.5 6H9.5', fill: 'none', stroke: SUB, text: SUB, tint: 'transparent' },
+      none: { d: '', fill: 'none', stroke: 'none', text: SUB, tint: 'transparent' }
+    };
+    const pick = (o) => o[k];
+
+    let top = pick({
+      ok: { st: G.ok, state: '伝送中', sub: '00:42:13' },
+      warn: { st: G.ok, state: '伝送中', sub: '00:42:13' },
+      err: { st: G.warn, state: '再接続中', sub: '5 回目' }
+    });
+    let al = pick({
+      ok: { show: false, st: G.none, label: '', text: '' },
+      warn: { show: true, st: G.warn, label: '警告', text: '回線のパケット損失が基準を超えています（2.1%）。' },
+      err: { show: true, st: G.err, label: '接続エラー', text: '受信機 RX-02 が接続を拒否しています。パスフレーズが一致していません。' }
+    });
+
+    // 直近 5 分を 5 秒ごとに 60 点。接続エラーでは 20 秒前の切断以降が未取得。
+    const N = 60;
+    const bad = k !== 'ok';
+    const lost = k === 'err' ? 56 : N;
+    const jit = (i, a, p) => a * (0.6 * Math.sin(i * 1.7 + p) + 0.4 * Math.sin(i * 0.53 + 2 * p));
+    const ramp = (i, from, to, start) => (i < start ? from : from + (to - from) * (i - start) / (N - 1 - start));
+    const series = (f) => Array.from({ length: N }, (_, i) => (i < lost ? f(i) : null));
+    const spark = (vals, lo, hi, ref) => {
+      const y = (v) => (28 - (Math.min(Math.max(v, lo), hi) - lo) / (hi - lo) * 26).toFixed(1);
+      let d = '';
+      vals.forEach((v, i) => {
+        if (v === null) return;
+        d += (i > 0 && vals[i - 1] !== null ? 'L' : 'M') + (i / (N - 1) * 112).toFixed(1) + ' ' + y(v);
+      });
+      return { d, ticks: '', refY: ref === undefined ? '0' : y(ref), refShow: ref === undefined ? 'none' : 'inline' };
+    };
+    const spBr = spark(series((i) => 12 + jit(i, 0.16, 1) + (bad ? ramp(i, 0, 0.4, 38) : 0)), 10, 14, 12);
+    const spLoss = spark(series((i) => Math.max(0, (bad ? ramp(i, 0.15, 2.1, 38) : 0.1) + jit(i, bad ? 0.07 : 0.04, 2))), 0, 3, 1);
+    const spRtt = spark(series((i) => (bad ? 37.5 : 36) + jit(i, 1.1, 3)), 20, 60);
+    const spBw = spark(series((i) => (bad ? ramp(i, 52, 41, 36) : 52) + jit(i, 1.4, 4)), 0, 60);
+
+    const R = (label, value, unit, ref, g, sp, spLabel) => ({
+      label, value, unit, ref, sp, spLabel,
+      st: G[g || 'none'], glyphShow: g ? 'inline' : 'none',
+      color: g === 'warn' ? '#8F5300' : (value === '—' ? SUB : INK)
+    });
+    const cut = '。10:41:58 の切断以降は未取得';
+    let reads = pick({
+      ok: [
+        R('送信ビットレート', '12.1', 'Mbps', '設定 12.0 Mbps（再送分を含む）', null, spBr, '送信ビットレートの推移。12.0 Mbps 前後で安定'),
+        R('パケット損失', '0.1', '%', '基準 1.0% 以下', null, spLoss, 'パケット損失の推移。基準の 1.0% を下回ったまま'),
+        R('RTT', '36', 'ms', '往復の遅れ', null, spRtt, 'RTT の推移。36 ms 前後で安定'),
+        R('推定帯域', '52', 'Mbps', '回線から推定', null, spBw, '推定帯域の推移。52 Mbps 前後で安定')
+      ],
+      warn: [
+        R('送信ビットレート', '12.4', 'Mbps', '設定 12.0 Mbps（再送分を含む）', null, spBr, '送信ビットレートの推移。再送の増加で 12.4 Mbps に上昇'),
+        R('パケット損失', '2.1', '%', '基準 1.0% 以下', 'warn', spLoss, 'パケット損失の推移。約 2 分前から上がり 2.1% に'),
+        R('RTT', '38', 'ms', '往復の遅れ', null, spRtt, 'RTT の推移。38 ms 前後で安定'),
+        R('推定帯域', '41', 'Mbps', '回線から推定', null, spBw, '推定帯域の推移。52 Mbps から 41 Mbps に低下')
+      ],
+      err: [
+        R('送信ビットレート', '—', '', '未接続のため取得できません', null, spBr, '送信ビットレートの推移' + cut),
+        R('パケット損失', '—', '', '未取得', null, spLoss, 'パケット損失の推移' + cut),
+        R('RTT', '—', '', '未取得（前回 38 ms）', null, spRtt, 'RTT の推移' + cut),
+        R('推定帯域', '—', '', '未取得', null, spBw, '推定帯域の推移' + cut)
+      ]
+    });
+    const D = (label, value, warn) => ({ label, value, color: warn ? '#8F5300' : (value.indexOf('—') === 0 ? SUB : INK) });
+    let details = pick({
+      ok: [D('再送率', '0.3 %'), D('送信が間に合わなかったパケット（5 分）', '0'), D('伝送バッファ（自動）', '160 ms')],
+      warn: [D('再送率', '3.4 %'), D('送信が間に合わなかったパケット（5 分）', '18', true), D('伝送バッファ（自動）', '160 ms')],
+      err: [D('再送率', '— 未取得'), D('送信が間に合わなかったパケット（5 分）', '— 未取得'), D('伝送バッファ（自動）', '160 ms')]
+    });
+
+    const stages = ['入力', 'エンコード', '送出', '回線', '受信機 RX-02'];
+    const pathState = pick({
+      ok: [null, null, null, null, null],
+      warn: [null, null, null, ['warn', '損失 2.1%'], null],
+      err: [null, null, ['warn', '再接続中'], ['na', '未取得'], ['err', '接続を拒否']]
+    });
+    let path = stages.map((name, i) => {
+      const p = pathState[i];
+      return {
+        name, note: p ? p[1] : '', st: p ? G[p[0]] : G.none,
+        glyphShow: p ? 'inline' : 'none',
+        color: p ? G[p[0]].text : INK, noteColor: p ? G[p[0]].text : SUB,
+        weight: p && (p[0] === 'warn' || p[0] === 'err') ? '600' : '400',
+        connShow: i === stages.length - 1 ? 'none' : 'inline-block',
+        dash: k === 'err' && i >= 2 ? 'dashed' : 'solid'
+      };
+    });
+
+    const E = (time, g, msg) => ({ time, msg, st: G[g || 'none'], glyphShow: g ? 'inline' : 'none' });
+    let events = pick({
+      ok: [E('10:12:30', null, '映像ビットレートを 12.0 Mbps に変更しました'), E('10:00:05', null, '伝送を開始しました'), E('10:00:04', null, '受信機 RX-02 に接続しました'), E('09:58:41', null, '入力信号を検出しました（1080p59.94）')],
+      warn: [E('10:41:52', 'warn', 'パケット損失率が基準を超えました（2.1%）'), E('10:12:30', null, '映像ビットレートを 12.0 Mbps に変更しました'), E('10:00:05', null, '伝送を開始しました'), E('10:00:04', null, '受信機 RX-02 に接続しました')],
+      err: [E('10:42:16', 'err', '受信機 RX-02 が接続を拒否しました（パスフレーズの不一致）'), E('10:41:58', 'warn', '受信機 RX-02 との接続が切れました'), E('10:41:52', 'warn', 'パケット損失率が基準を超えました（2.1%）'), E('10:00:05', null, '伝送を開始しました')]
+    });
+
+    const pct = (db) => ((60 + db) / 60 * 100).toFixed(1);
+    const lv = [[-18, -14.2], [-19.5, -15.0]];
+    let meters = ['L', 'R'].map((ch, i) => ({
+      ch, fill: pct(lv[i][0]), peak: pct(lv[i][1]), peakShow: 'block', value: '−' + Math.abs(lv[i][1]).toFixed(1)
+    }));
+
+    if (stopped) {
+      top = { st: G.off, state: '停止中', sub: '10:42:20 から' };
+      al = { show: false, st: G.none, label: '', text: '' };
+      reads = reads.map((r) => Object.assign({}, r, { value: '—', unit: '', ref: '停止中', st: G.none, glyphShow: 'none', color: SUB }));
+      details = details.map((d) => (d.label === '伝送バッファ（自動）' ? d : Object.assign({}, d, { value: '— 停止中', color: SUB })));
+      const quiet = { note: '', st: G.none, glyphShow: 'none', color: SUB, noteColor: SUB, weight: '400' };
+      path = path.map((p, i) => (i < 2 ? p : Object.assign({}, p, quiet, { dash: 'dashed' },
+        i === 2 ? { note: '停止中', st: G.off, glyphShow: 'inline' } : {},
+        i === 4 ? { note: '未接続', st: G.off, glyphShow: 'inline' } : {})));
+      events = [E('10:42:20', null, '伝送を停止しました')].concat(events.slice(0, 3));
+    }
+
+    return {
+      top, al, reads, details, path, events, meters,
+      more, moreRot: more ? '90' : '0', toggleMore: () => set({ more: !more }),
+      stopAsk,
+      stopBtn: stopped ? { label: '伝送を開始', bg: '#1B1F24', bd: '#1B1F24', fg: '#FFFFFF' } : { label: '伝送を停止…', bg: '#FFFFFF', bd: '#BFC7D2', fg: INK },
+      onStop: stopped ? () => set({ stopped: false }) : () => set({ stopAsk: true }),
+      cancelStop: () => set({ stopAsk: false }),
+      confirmStop: () => set({ stopAsk: false, stopped: true })
+    };
+  }
+}
+</script>
+</body>
+</html>

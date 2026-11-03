@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>全画面表示の仕様</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&amp;display=swap">
+<style>
+body{margin:0;background:#FFFFFF;text-wrap:pretty;word-break:auto-phrase;overflow-wrap:break-word}
+*{box-sizing:border-box}
+h1,h2,h3{text-wrap:balance}
+</style>
+</helmet>
+<div style="min-height: 100dvh; padding: 40px 48px 48px; background: #FFFFFF; color: #1B1F24; font-family: 'Geist', 'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Noto Sans JP', 'Yu Gothic UI', 'BIZ UDPGothic', Meiryo, sans-serif; font-size: 14px; line-height: 1.6; font-variant-numeric: tabular-nums">
+  <div style="max-width: 1040px">
+    <h1 style="margin: 0; font-size: 20px; font-weight: 600">全画面表示の仕様</h1>
+    <p style="margin: 4px 0 0; color: #556174">送信機の入力映像と受信機の受信映像を、ボタン一つで画面いっぱいに表示します。全画面の間も、警告とエラーは隠しません。</p>
+
+    <div role="table" aria-label="全画面表示の仕様" style="margin-top: 24px">
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 8px 0; border-bottom: 2px solid #1B1F24">
+        <span role="columnheader" style="font-size: 13px; color: #556174">項目</span>
+        <span role="columnheader" style="font-size: 13px; color: #556174">決めたこと</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">開く</span>
+        <span role="cell">映像の右上の「全画面」ボタン、映像のダブルクリック、F キー。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">閉じる</span>
+        <span role="cell">「全画面を終了」、Esc、もう一度 F。閉じたら「全画面」ボタンにフォーカスを戻します。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">上の帯</span>
+        <span role="cell">機器名、映像の種類（入力映像／受信映像）、形式、機器の状態、時刻、セーフエリア（93%・90%）の表示切り替え、「全画面を終了」。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">帯を隠す</span>
+        <span role="cell">3 秒操作がないと、上の帯とマウスカーソルを隠します。マウスを動かす、画面をタップする、キーを押すと戻ります。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">警告・エラー</span>
+        <span role="cell">警告とエラーの帯は隠しません。全画面の間に起きた異常も上に出します。正常に戻ったら「回復しました」を 10 秒出してから消します。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">置かないもの</span>
+        <span role="cell">伝送の停止や設定の変更。全画面は映像を見るためだけの画面にします。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">映像がないとき</span>
+        <span role="cell">中央に「受信映像なし」と理由（例：送信機からの接続を待っています）を出します。ボタンは押せます。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">全画面にできないとき</span>
+        <span role="cell">ブラウザが全画面を許可しない場合（一部のタブレットや埋め込み表示）は、ページの中で映像を最大化して同じ表示にします。</span>
+      </div>
+      <div role="row" style="display: grid; grid-template-columns: minmax(0, 200px) minmax(0, 1fr); gap: 24px; padding: 12px 0; border-bottom: 1px solid #EDF1F5">
+        <span role="cell" style="font-weight: 600">機器の負荷</span>
+        <span role="cell">タブが裏に回ったら、プレビュー映像の取得を止めます。</span>
+      </div>
+    </div>
+
+    <section aria-labelledby="fs-q" style="margin-top: 28px; padding: 16px 20px; border-radius: 4px; background: #F2F4F7">
+      <h2 id="fs-q" style="margin: 0; font-size: 16px; font-weight: 600">決める必要があること：全画面での画質</h2>
+      <p style="margin: 4px 0 0">いまのプレビューは約 5 fps の縮小映像で、全画面では粗さが目立ちます。全画面の間だけ品質を上げる（例：720p・30 fps）か、5 fps のまま「約 5 fps」と示すかを、機器の負荷と LAN の帯域を見て決めます。</p>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

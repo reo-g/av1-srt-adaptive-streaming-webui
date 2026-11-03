@@ -1,0 +1,486 @@
+openapi: 3.1.0
+info:
+  title: Device API
+  version: 1.0.0
+  description: |
+    API served by each device (transmitter or receiver) on the LAN, under /api/v1.
+    The web UI is the only client. Names follow docs/terms.md: never expose
+    implementation terms in paths, fields or codes.
+    Times are ISO 8601 with offset (+09:00). Settings use optimistic locking with `version`.
+    The WebSocket /api/v1/live (not describable in OpenAPI) is documented in docs/api.md and
+    typed as `LiveMessage` in web/src/api/types.ts.
+servers:
+  - url: /api/v1
+tags:
+  - name: device
+  - name: transport control
+  - name: video settings
+    description: Transmitter only. A receiver answers 409 unsupported_role.
+  - name: transport settings
+    description: Transmitter only. A receiver answers 409 unsupported_role.
+  - name: network test
+paths:
+  /device:
+    get:
+      tags: [device]
+      summary: Identity of this device
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Device' } } } }
+  /status:
+    get:
+      tags: [device]
+      summary: Link state, alerts and what the preview shows
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }
+  /stats:
+    get:
+      tags: [device]
+      summary: Latest measurements (also pushed every second on /live)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/Stats' } } } }
+  /stats/history:
+    get:
+      tags: [device]
+      summary: Sparkline data, oldest first, one point per interval
+      parameters:
+        - { name: window_s, in: query, schema: { type: integer, default: 300 } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/StatsHistory' } } } }
+  /events:
+    get:
+      tags: [device]
+      summary: Event log, newest first
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, default: 20, maximum: 500 } }
+      responses:
+        '200':
+          description: OK
+          content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DeviceEvent' } } } }
+  /preview.mjpeg:
+    get:
+      tags: [device]
+      summary: Preview frames (multipart/x-mixed-replace, JPEG, ≈5 fps, 640×360)
+      description: tx streams its input, rx what it outputs. Clients stop reading when hidden.
+      responses:
+        '200': { description: Stream, content: { multipart/x-mixed-replace: { schema: { type: string, format: binary } } } }
+  /transport/start:
+    post:
+      tags: [transport control]
+      summary: Start sending (tx) or receiving (rx)
+      responses:
+        '200': { description: New status, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }
+  /transport/stop:
+    post:
+      tags: [transport control]
+      summary: Stop; no automatic reconnection until started again
+      responses:
+        '200': { description: New status, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }
+  /transport/retry:
+    post:
+      tags: [transport control]
+      summary: Try to connect now instead of waiting for the next attempt
+      responses:
+        '200': { description: New status, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }
+  /transport/compare:
+    get:
+      tags: [transport settings]
+      summary: Local settings next to what the peer reported when the link was negotiated
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CompareResult' } } } }
+  /settings/video:
+    get:
+      tags: [video settings]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/VideoSettings' } } } }
+    put:
+      tags: [video settings]
+      summary: Apply. Returns after the encoder has been re-initialised.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/VideoSettingsInput' } } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/ApplyVideoResult' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /settings/video/options:
+    get:
+      tags: [video settings]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/VideoOptions' } } } }
+  /settings/video/check:
+    post:
+      tags: [video settings]
+      summary: Validate a draft and describe the impact of applying it. Changes nothing.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/VideoSettingsInput' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CheckResult' } } } }
+  /settings/transport:
+    get:
+      tags: [transport settings]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TransportSettings' } } } }
+    put:
+      tags: [transport settings]
+      summary: Apply. The link is re-established with the new settings.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TransportSettingsInput' } } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/ApplyTransportResult' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /settings/transport/options:
+    get:
+      tags: [transport settings]
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/TransportOptions' } } } }
+  /settings/transport/check:
+    post:
+      tags: [transport settings]
+      summary: Validate a draft and describe the impact of applying it. Changes nothing.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TransportSettingsInput' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CheckResult' } } } }
+  /network-tests:
+    post:
+      tags: [network test]
+      summary: Start a bandwidth test to the peer (tx only)
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTestRequest' } } } }
+      responses:
+        '202': { description: Started, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTest' } } } }
+        '409': { $ref: '#/components/responses/Conflict' }
+  /network-tests/{id}:
+    get:
+      tags: [network test]
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTest' } } } }
+        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+
+components:
+  responses:
+    Invalid:
+      description: The input has errors (same codes as /check)
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Conflict:
+      description: version_conflict (settings changed since they were read), busy, or unsupported_role
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+  schemas:
+    Role: { type: string, enum: [tx, rx] }
+    Level: { type: string, enum: [info, warn, error] }
+    Params:
+      type: object
+      additionalProperties: { oneOf: [{ type: number }, { type: string }] }
+    Device:
+      type: object
+      required: [id, role, address, firmware, serial, timezone]
+      properties:
+        id: { type: string, examples: [TX-01] }
+        role: { $ref: '#/components/schemas/Role' }
+        address: { type: string, examples: [192.168.10.21] }
+        firmware: { type: string }
+        serial: { type: string }
+        timezone: { type: string, examples: [Asia/Tokyo] }
+    LinkState:
+      type: string
+      enum: [live, connecting, reconnecting, listening, stopped]
+      description: 伝送中/受信中, 接続中, 再接続中, 待ち受け中, 停止中
+    Peer:
+      type: object
+      required: [id, address, port]
+      properties:
+        id: { type: [string, 'null'] }
+        address: { type: string }
+        port: { type: integer }
+    Alert:
+      type: object
+      required: [level, code, since]
+      properties:
+        level: { type: string, enum: [warn, error] }
+        code: { type: string, enum: [loss_high, frames_dropped, peer_rejected_passphrase, peer_unreachable, input_lost] }
+        since: { type: string, format: date-time }
+        params: { $ref: '#/components/schemas/Params' }
+    Media:
+      type: object
+      required: [kind, label, format, preview_fps, audio, black]
+      properties:
+        kind: { type: string, enum: [camera, file, output] }
+        label: { type: string, examples: [/dev/video0, SDI OUT 1] }
+        format: { type: [string, 'null'], examples: [1080p59.94] }
+        preview_fps: { type: number }
+        audio: { type: string, enum: [none] }
+        black: { type: boolean }
+    Status:
+      type: object
+      required: [server_time, state, since, live_s, attempt, next_retry_s, last_live_until, peer, listen_port, alerts, media]
+      properties:
+        server_time: { type: string, format: date-time }
+        state: { $ref: '#/components/schemas/LinkState' }
+        since: { type: string, format: date-time }
+        live_s: { type: [integer, 'null'] }
+        attempt: { type: [integer, 'null'] }
+        next_retry_s: { type: [integer, 'null'] }
+        last_live_until: { type: [string, 'null'], format: date-time }
+        peer: { $ref: '#/components/schemas/Peer' }
+        listen_port: { type: [integer, 'null'] }
+        alerts: { type: array, items: { $ref: '#/components/schemas/Alert' } }
+        media: { $ref: '#/components/schemas/Media' }
+    Stats:
+      type: object
+      description: Fields that do not apply to the role, or cannot be measured now, are null.
+      required: [at, loss_pct, loss_threshold_pct, rtt_ms, last_rtt_ms, retrans_pct, buffer_ms, buffer_mode, send_mbps, target_mbps, bandwidth_mbps, send_late_5m, recv_mbps, frames_dropped_5m, video_latency_ms, unrecovered_5m]
+      properties:
+        at: { type: string, format: date-time }
+        loss_pct: { type: [number, 'null'] }
+        loss_threshold_pct: { type: number }
+        rtt_ms: { type: [number, 'null'] }
+        last_rtt_ms: { type: [number, 'null'] }
+        retrans_pct: { type: [number, 'null'] }
+        buffer_ms: { type: number }
+        buffer_mode: { type: string, enum: [auto, manual] }
+        send_mbps: { type: [number, 'null'] }
+        target_mbps: { type: [number, 'null'] }
+        bandwidth_mbps: { type: [number, 'null'] }
+        send_late_5m: { type: [integer, 'null'] }
+        recv_mbps: { type: [number, 'null'] }
+        frames_dropped_5m: { type: [integer, 'null'] }
+        video_latency_ms: { type: [number, 'null'] }
+        unrecovered_5m: { type: [integer, 'null'] }
+    StatsHistory:
+      type: object
+      required: [interval_s, end, series]
+      properties:
+        interval_s: { type: integer, examples: [5] }
+        end: { type: string, format: date-time }
+        series:
+          type: object
+          description: send_mbps, recv_mbps, loss_pct, rtt_ms, bandwidth_mbps, video_latency_ms, frames_dropped
+          additionalProperties: { type: array, items: { type: [number, 'null'] } }
+    DeviceEvent:
+      type: object
+      required: [id, at, level, code]
+      properties:
+        id: { type: string }
+        at: { type: string, format: date-time }
+        level: { $ref: '#/components/schemas/Level' }
+        code:
+          type: string
+          enum: [loss_high, frames_dropped, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done]
+        params: { $ref: '#/components/schemas/Params' }
+    FieldError:
+      type: object
+      required: [field, code]
+      properties:
+        field: { type: string, examples: [encode.manual.bitrate_mbps] }
+        code: { type: string, enum: [out_of_range, required, too_short, too_long, invalid] }
+        params: { $ref: '#/components/schemas/Params' }
+    Impact:
+      type: object
+      required: [level, code]
+      properties:
+        level: { type: string, enum: [warn, ok, info] }
+        code:
+          type: string
+          enum: [input_switch_gap, encoder_restart_gap, connection_kept, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, buffer_below_guide]
+        params: { $ref: '#/components/schemas/Params' }
+    CheckResult:
+      type: object
+      required: [ok, errors, impacts]
+      properties:
+        ok: { type: boolean }
+        errors: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
+        impacts: { type: array, items: { $ref: '#/components/schemas/Impact' } }
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code]
+          properties:
+            code: { type: string, enum: [version_conflict, invalid, busy, not_found, unsupported_role] }
+            errors: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
+    EncodeParams:
+      type: object
+      required: [resolution, framerate, bitrate_mbps, rate_control, codec, profile, keyframe_s, bframes, encoder]
+      properties:
+        resolution: { type: string, enum: [source, 1280x720] }
+        framerate: { type: string, enum: [source, '29.97'] }
+        bitrate_mbps: { type: number, minimum: 1, maximum: 40 }
+        rate_control: { type: string, enum: [cbr, vbr] }
+        codec: { type: string, enum: [h264, h265] }
+        profile: { type: string, enum: [high, main, baseline] }
+        keyframe_s: { type: number, minimum: 0.5, maximum: 10 }
+        bframes: { type: integer, enum: [0, 1, 2] }
+        encoder: { type: string, enum: [hardware, software] }
+    VideoInput:
+      type: object
+      required: [kind, camera, file, loop]
+      properties:
+        kind: { type: string, enum: [camera, file] }
+        camera: { type: string, examples: [/dev/video0] }
+        file: { type: string }
+        loop: { type: boolean }
+    VideoSettings:
+      type: object
+      required: [version, input, encode, audio]
+      properties:
+        version: { type: integer }
+        input: { $ref: '#/components/schemas/VideoInput' }
+        encode:
+          type: object
+          required: [mode, manual, auto]
+          properties:
+            mode: { type: string, enum: [auto, manual] }
+            manual: { $ref: '#/components/schemas/EncodeParams' }
+            auto: { $ref: '#/components/schemas/EncodeParams', description: read only — what auto mode uses now }
+        audio:
+          type: object
+          properties: { enabled: { type: boolean, const: false } }
+    VideoSettingsInput:
+      type: object
+      required: [version, input, encode]
+      properties:
+        version: { type: integer }
+        input: { $ref: '#/components/schemas/VideoInput' }
+        encode:
+          type: object
+          required: [mode, manual]
+          properties:
+            mode: { type: string, enum: [auto, manual] }
+            manual: { $ref: '#/components/schemas/EncodeParams' }
+    VideoOptions:
+      type: object
+      required: [cameras, files, bitrate_range_mbps, keyframe_range_s, bandwidth_mbps]
+      properties:
+        cameras:
+          type: array
+          items:
+            type: object
+            required: [device, label, signal]
+            properties:
+              device: { type: string }
+              label: { type: string }
+              signal: { type: [string, 'null'], examples: ['1920×1080　59.94p'] }
+        files:
+          type: array
+          items:
+            type: object
+            required: [path, format, duration_s]
+            properties:
+              path: { type: string }
+              format: { type: string }
+              duration_s: { type: integer }
+        bitrate_range_mbps: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+        keyframe_range_s: { type: array, items: { type: number }, minItems: 2, maxItems: 2 }
+        bandwidth_mbps: { type: [number, 'null'] }
+    ApplyVideoResult:
+      type: object
+      required: [settings, applied_at, impacts]
+      properties:
+        settings: { $ref: '#/components/schemas/VideoSettings' }
+        applied_at: { type: string, format: date-time }
+        impacts: { type: array, items: { $ref: '#/components/schemas/Impact' } }
+    TransportMode: { type: string, enum: [outbound, inbound, mutual], description: 発信 / 待ち受け / 相互接続 }
+    Cipher: { type: string, enum: [aes-128, aes-192, aes-256, none] }
+    TransportSettings:
+      type: object
+      required: [version, mode, peer, listen_port, buffer, encryption]
+      properties:
+        version: { type: integer }
+        mode: { $ref: '#/components/schemas/TransportMode' }
+        peer:
+          type: object
+          required: [host, port]
+          properties: { host: { type: string }, port: { type: integer } }
+        listen_port: { type: integer }
+        buffer:
+          type: object
+          required: [mode, manual_ms, auto_ms, last_rtt_ms, guide_min_ms]
+          properties:
+            mode: { type: string, enum: [auto, manual] }
+            manual_ms: { type: integer }
+            auto_ms: { type: integer, description: value auto mode uses now (≥ 4 × RTT, rounded up to 20 ms) }
+            last_rtt_ms: { type: [number, 'null'] }
+            guide_min_ms: { type: [integer, 'null'], description: 4 × last RTT }
+        encryption:
+          type: object
+          required: [cipher, passphrase_set, passphrase_rejected_at]
+          properties:
+            cipher: { $ref: '#/components/schemas/Cipher' }
+            passphrase_set: { type: boolean, description: the passphrase itself is never returned }
+            passphrase_rejected_at: { type: [string, 'null'], format: date-time }
+    TransportSettingsInput:
+      type: object
+      required: [version, mode, peer, listen_port, buffer, encryption]
+      properties:
+        version: { type: integer }
+        mode: { $ref: '#/components/schemas/TransportMode' }
+        peer:
+          type: object
+          required: [host, port]
+          properties: { host: { type: string }, port: { type: integer } }
+        listen_port: { type: integer }
+        buffer:
+          type: object
+          required: [mode, manual_ms]
+          properties:
+            mode: { type: string, enum: [auto, manual] }
+            manual_ms: { type: integer, description: one of TransportOptions.buffer_presets_ms }
+        encryption:
+          type: object
+          required: [cipher]
+          properties:
+            cipher: { $ref: '#/components/schemas/Cipher' }
+            passphrase: { type: string, writeOnly: true, description: omit to keep the current value }
+    TransportOptions:
+      type: object
+      required: [buffer_presets_ms]
+      properties:
+        buffer_presets_ms: { type: array, items: { type: integer }, examples: [[80, 120, 160, 200, 300, 500, 1000]] }
+    ApplyTransportResult:
+      type: object
+      required: [settings, applied_at, impacts]
+      properties:
+        settings: { $ref: '#/components/schemas/TransportSettings' }
+        applied_at: { type: string, format: date-time }
+        impacts: { type: array, items: { $ref: '#/components/schemas/Impact' } }
+    CompareRow:
+      type: object
+      description: |
+        One row per key. key=mode: local, peer (TransportMode), verdict compatible|incompatible|unknown.
+        key=endpoint: local {host, port}, peer {listen_port}, verdict match|mismatch|unknown.
+        key=buffer: local_ms, local_mode, peer_ms, effective_ms (the larger one is used), verdict effective|unknown.
+        key=cipher: local, peer (Cipher), verdict match|mismatch|unknown.
+        key=passphrase: local_set, verdict match|mismatch|unknown, reason peer_rejected|null.
+      required: [key, verdict]
+      properties:
+        key: { type: string, enum: [mode, endpoint, buffer, cipher, passphrase] }
+        verdict: { type: string }
+      additionalProperties: true
+    CompareResult:
+      type: object
+      required: [received_at, peer_id, rows]
+      properties:
+        received_at: { type: [string, 'null'], format: date-time }
+        peer_id: { type: [string, 'null'] }
+        rows: { type: array, items: { $ref: '#/components/schemas/CompareRow' } }
+    NetworkTestRequest:
+      type: object
+      required: [direction, duration_s]
+      properties:
+        direction: { type: string, enum: [to_peer, from_peer] }
+        duration_s: { type: integer, minimum: 5, maximum: 30 }
+    NetworkTest:
+      type: object
+      required: [id, state, direction, started_at, progress, result, error]
+      properties:
+        id: { type: string }
+        state: { type: string, enum: [running, done, failed] }
+        direction: { type: string, enum: [to_peer, from_peer] }
+        started_at: { type: string, format: date-time }
+        progress: { type: number, minimum: 0, maximum: 1 }
+        result:
+          type: [object, 'null']
+          properties:
+            throughput_mbps: { type: number }
+            loss_pct: { type: number }
+            jitter_ms: { type: number }
+        error: { type: [string, 'null'], enum: [peer_unreachable, busy, null] }
