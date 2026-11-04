@@ -195,14 +195,17 @@ impl Preview {
 #[serde(deny_unknown_fields, default)]
 pub struct NetworkTest {
     pub enabled: bool,
-    /// The bandwidth tool's port on the receiver (TCP and UDP).
+    /// The bandwidth tool's port on the receiver (UDP for the test, TCP for its control connection).
     pub port: u16,
     /// Run the bandwidth tool's server as a child (default: true on rx, false on tx).
     pub server: Option<bool>,
     pub iperf: PathBuf,
     pub ping: PathBuf,
-    /// The steady mode's rate when a request names none.
-    pub steady_rate_mbps: f64,
+    /// What 回線の速さ sends, Mbps: more than the line carries, so what arrives is its speed.
+    pub saturate_mbps: f64,
+    /// The rate of the steady mode that is gone (read so that an older device.toml still loads; not used).
+    #[serde(rename = "steady_rate_mbps")]
+    pub old_steady_rate_mbps: Option<toml::Value>,
     /// Devices on the way to the peer (e.g. the radios), checked after the peer in this order.
     pub hops: Vec<Hop>,
 }
@@ -223,7 +226,8 @@ impl Default for NetworkTest {
             server: None,
             iperf: "iperf3".into(),
             ping: "ping".into(),
-            steady_rate_mbps: 6.0,
+            saturate_mbps: 6.0,
+            old_steady_rate_mbps: None,
             hops: Vec::new(),
         }
     }
@@ -255,7 +259,8 @@ pub struct ProfileConfig {
     /// Added to the bridge's environment when the video mode is "fixed bitrate".
     pub bridge_manual_env: BTreeMap<String, toml::Value>,
     pub receiver_env: BTreeMap<String, toml::Value>,
-    /// Placeholders: {peer_host} {peer_port}
+    /// Placeholders: {peer_host} {peer_port} {maxbw_kbps} (the send cap of the transport
+    /// settings, kbps; a literal number there fixes the cap instead)
     pub sender_args: Option<Vec<String>>,
     /// Placeholders: {out} {listen_port}
     pub receiver_args: Option<Vec<String>>,
@@ -289,9 +294,9 @@ impl Config {
         if n.port == 0 {
             return Err("network_test.port must not be 0".into());
         }
-        let (lo, hi) = crate::nettest::RATE_RANGE;
-        if !(lo..=hi).contains(&n.steady_rate_mbps) {
-            return Err(format!("network_test.steady_rate_mbps must be {lo}–{hi}"));
+        let (lo, hi) = crate::nettest::SATURATE_RANGE;
+        if !(lo..=hi).contains(&n.saturate_mbps) {
+            return Err(format!("network_test.saturate_mbps must be {lo}–{hi}"));
         }
         for h in &n.hops {
             if h.label.trim().is_empty() || !address_ok(&h.address) {
@@ -404,7 +409,7 @@ mod tests {
         let c = Config::parse(rx).unwrap();
         let n = &c.network_test;
         assert!(n.enabled && n.runs_server(Role::Rx), "the receiver answers by default");
-        assert_eq!((n.port, n.steady_rate_mbps), (60022, 6.0));
+        assert_eq!((n.port, n.saturate_mbps), (60022, 6.0));
         assert_eq!((n.iperf.as_path(), n.ping.as_path()), (Path::new("iperf3"), Path::new("ping")));
         assert!(n.hops.is_empty() && c.rx.peer_host.is_none());
         assert_eq!(c.nettest_server_log(), PathBuf::from("/run/c/nettest-server.log"));
@@ -417,9 +422,12 @@ mod tests {
 
         let hops = "[[network_test.hops]]\nlabel = \"無線機（送信機側）\"\naddress = \"192.168.0.65\"\n\
                     [[network_test.hops]]\nlabel = \"無線機（受信機側）\"\naddress = \"192.168.0.56\"\n";
-        let c = Config::parse(&format!("{rx}[rx]\npeer_host = \" 192.168.0.220 \"\n[network_test]\nport = 5201\nsteady_rate_mbps = 4\n{hops}")).unwrap();
+        let c = Config::parse(&format!("{rx}[rx]\npeer_host = \" 192.168.0.220 \"\n[network_test]\nport = 5201\nsaturate_mbps = 8.5\n{hops}")).unwrap();
         assert_eq!(c.rx.peer_host.as_deref(), Some("192.168.0.220"));
-        assert_eq!((c.network_test.port, c.network_test.steady_rate_mbps), (5201, 4.0));
+        assert_eq!((c.network_test.port, c.network_test.saturate_mbps), (5201, 8.5));
+        for ok in ["saturate_mbps = 2", "saturate_mbps = 50.0", "steady_rate_mbps = 4", "steady_rate_mbps = 99"] {
+            assert!(Config::parse(&format!("{rx}[network_test]\n{ok}\n")).is_ok(), "{ok}");
+        }
         let labels: Vec<_> = c.network_test.hops.iter().map(|h| (h.label.as_str(), h.address.as_str())).collect();
         assert_eq!(labels, [("無線機（送信機側）", "192.168.0.65"), ("無線機（受信機側）", "192.168.0.56")]);
         assert!(Config::parse(&format!("{rx}[rx]\npeer_host = \"\"\n")).unwrap().rx.peer_host.is_none());
@@ -427,8 +435,10 @@ mod tests {
         for bad in [
             "[rx]\npeer_host = \"-f\"\n",
             "[network_test]\nport = 0\n",
-            "[network_test]\nsteady_rate_mbps = 25\n",
-            "[network_test]\nsteady_rate_mbps = 0.5\n",
+            "[network_test]\nsaturate_mbps = 1.5\n",
+            "[network_test]\nsaturate_mbps = 51\n",
+            "[network_test]\nsaturate_mbps = \"6\"\n",
+            "[network_test]\nmode = \"max\"\n",
             "[[network_test.hops]]\nlabel = \"\"\naddress = \"192.168.0.65\"\n",
             "[[network_test.hops]]\nlabel = \"x\"\naddress = \"-c 5\"\n",
             "[[network_test.hops]]\nlabel = \"x\"\n",

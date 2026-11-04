@@ -16,14 +16,17 @@ import type {
   LinkState,
   NetworkTestDirection,
   NetworkTestError,
-  NetworkTestMode,
   ReachabilityTarget,
   Role,
+  SendLimit,
   TransportMode,
   VideoEncoding,
 } from '../api/types';
+import { dateTimeOf } from '../lib/format';
 
 const n1 = (v: number | string | undefined) => (typeof v === 'number' ? v.toFixed(1) : String(v ?? ''));
+/** Speeds of the line and the send cap: two decimals ("5.26"). */
+const n2 = (v: number | string | undefined) => (typeof v === 'number' ? v.toFixed(2) : String(v ?? ''));
 const peerOf = (role: Role, id: string | null | undefined) =>
   role === 'tx' ? `受信機 ${id ?? ''}`.trim() : `送信機 ${id ?? ''}`.trim();
 
@@ -133,7 +136,13 @@ export const eventText = (role: Role, e: DeviceEvent, peerId: string | null): st
       return 'パスフレーズを変更しました';
     case 'network_test_done': {
       const d = p.direction === 'to_peer' || p.direction === 'from_peer' ? `${directionText(role, p.direction)}、` : '';
-      return `回線テストが終わりました（${d}${n1(p.mbps)} Mbps）`;
+      return `回線テストが終わりました（${d}届いた速さ ${n2(p.mbps)} Mbps）`;
+    }
+    case 'send_limit_changed': {
+      const step = p.from_mbps !== undefined ? `${n2(p.from_mbps)} → ${n2(p.mbps)}` : n2(p.mbps);
+      return p.source === 'measured'
+        ? `送り出しの上限を ${step} Mbps にしました（回線の速さを測った値）`
+        : `送り出しの上限を ${step} Mbps に変更しました`;
     }
   }
 };
@@ -171,6 +180,8 @@ export const impactText = (i: Impact): string => {
       return 'いまは未接続のため、受信側への追加の影響はありません';
     case 'saved_while_stopped':
       return '設定を保存します。伝送は停止したままです';
+    case 'takes_effect_next_start':
+      return '送り出しの上限は、次に伝送を始めたときから使います。いまの伝送は、これまでの上限のまま続けます';
   }
 };
 
@@ -191,8 +202,8 @@ export const fieldErrorText = (e: FieldError): string => {
       return 'この遅延はまだ選べません';
     case 'input.loop':
       return '繰り返し再生はまだ使えません';
-    case 'rate_mbps':
-      return `送る速さは ${p.min}〜${p.max} Mbps で選んでください`;
+    case 'send_limit.mbps':
+      return `${n1(p.min)}〜${n1(p.max)} の数値を入力してください`;
     case 'duration_s':
       return `時間は ${p.min}〜${p.max} 秒で選んでください`;
     default:
@@ -293,12 +304,64 @@ export const directionText = (role: Role, d: NetworkTestDirection) =>
 export const directionChoice = (role: Role, d: NetworkTestDirection) =>
   role === 'tx' && d === 'to_peer' ? `${directionText(role, d)}（映像の向き）` : directionText(role, d);
 
-export const testModeName = (m: NetworkTestMode) =>
-  m === 'max' ? 'いちばん速く送れる速さを測る' : '決めた速さで送って、損失と揺らぎを見る';
+/** A rate without trailing zeros: 6 → "6", 6.5 → "6.5". */
+const plainMbps = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/0$/, ''));
 
-/** Short form for the list of results. */
-export const testModeShort = (m: NetworkTestMode, rateMbps: number | null) =>
-  m === 'max' ? 'いちばん速く送れる速さ' : `${rateMbps ?? ''} Mbps で送る`.trim();
+/**
+ * The line-speed test sends more than the line can carry (`saturateMbps`, set on the device) and
+ * measures what arrives. Shown on the transmitter only.
+ */
+export const throughputHelp = (d: NetworkTestDirection, saturateMbps: number) =>
+  d === 'to_peer'
+    ? `受信機に向けて、回線が受け止められる以上の量（${plainMbps(saturateMbps)} Mbps）を送り、実際に届いた量を測ります。測っている間は映像を送れないので、伝送を止めてから測ってください。`
+    : `受信機から、回線が受け止められる以上の量（${plainMbps(saturateMbps)} Mbps）を送ってもらい、実際に届いた量を測ります。測っている間は映像を送れないので、伝送を止めてから測ってください。`;
+
+/** The result when the line took everything the test sent: it is faster than the test. */
+export const fasterThan = (saturateMbps: number) => `${plainMbps(saturateMbps)} Mbps 以上`;
+
+/** One line under the result, so that what did not arrive does not read as a fault. */
+export const throughputNote = (saturated: boolean, sentMbps: number) =>
+  saturated
+    ? '回線が受け止められる以上の量を送ったので、あふれた分は届きません。届いた速さが、この回線の速さです。'
+    : `送った ${n2(sentMbps)} Mbps がほぼすべて届きました。回線にはまだ余裕があります。`;
+
+// ---------------------------------------------------------------- send cap (送り出しの上限)
+
+/** Where the cap came from, written right after the value: "5.26 Mbps（11/04 14:50 JST に測った値）". */
+export const sendLimitSource = (l: SendLimit, short = false): string => {
+  switch (l.source) {
+    case 'default':
+      return '（初期値）';
+    case 'manual':
+      return '（手で決めた値）';
+    case 'measured':
+      return short || !l.measured_at ? '（測った値）' : `（${dateTimeOf(l.measured_at)} JST に測った値）`;
+  }
+};
+export const sendLimitText = (l: SendLimit, short = false) => `${n2(l.mbps)} Mbps${sendLimitSource(l, short)}`;
+
+export const sendLimitHelp =
+  '映像を送る速さの上限です。回線の速さを測って決めるのがおすすめです。伝送中に回線が混むと、この値から自動で下げます。';
+
+/** The box under a result towards the receiver: the offer, then the cap now. */
+export const capOffer = 'この速さを、映像を送るときの上限にできます。';
+export const capCurrent = (current: SendLimit) => `いまの上限 ${sendLimitText(current)}`;
+export const capButton = 'この速さを上限にする';
+export const capConfirmTitle = '送り出しの上限を変えますか';
+/** `running`: the link is not stopped (live, or trying to connect with the cap it started with). */
+export const capConfirmText = (fromMbps: number, toMbps: number, running: boolean) =>
+  `送り出しの上限を ${n2(fromMbps)} → ${n2(toMbps)} Mbps にします。次に伝送を始めたときから使います。` +
+  (running ? 'いまの伝送は、これまでの上限のまま続けます。' : '');
+/** After the result became the cap (also when the screen is opened again later). */
+export const capDone = (l: SendLimit) => `上限を ${n2(l.mbps)} Mbps にしました${sendLimitSource(l)}`;
+/** The mark in the list of results. */
+export const capUsedMark = '上限に使用';
+export const capProblem = (code: string | undefined) =>
+  code === 'not_found'
+    ? 'この結果はもう残っていません。もう一度測ってください。'
+    : code === 'not_applicable'
+      ? 'この結果は上限に使えません。送信機 → 受信機の向きで測った結果を使ってください。'
+      : '上限を変えられませんでした。もう一度お試しください。';
 
 /** ● 届く ▲ 一部届かない ■ 届かない (with the shape, never by colour alone). */
 export type ReachLevel = 'ok' | 'partial' | 'none';
@@ -349,7 +412,7 @@ export const testStartProblem = (kind: 'reachability' | 'throughput', code: stri
 };
 
 /**
- * What the measured rate (this device → the peer, upper limit) means for the video. The video needs
+ * What the measured rate (this device → the peer, what arrived) means for the video. The video needs
  * about its bitrate × 1.25 on the line (resends and the device's headroom); `range` is
  * VideoOptions.bitrate_range_mbps, the automatic steps are 0.5 Mbps apart.
  */

@@ -83,7 +83,8 @@ impl Profile {
                 ("SRT_RCV_STATS_MS", "1000"),
                 ("SRT_RCV_CLOSE_LISTEN", "1"),
             ]),
-            sender_args: args(&["-", "{peer_host}", "{peer_port}", "8000", "live", "10000", "5000"]),
+            // the 7th argument is the sender's MAXBW (kbps): the send cap of the transport settings
+            sender_args: args(&["-", "{peer_host}", "{peer_port}", "8000", "live", "10000", "{maxbw_kbps}"]),
             receiver_args: args(&["{out}", "{listen_port}", "8000"]),
             player_args: args(&[
                 "--out",
@@ -171,6 +172,13 @@ pub struct Plan {
     pub input: Input,
     /// Some(kbps) when the video mode is "fixed bitrate".
     pub manual_kbps: Option<u32>,
+    /// The send cap (送り出しの上限) in kbps: `{maxbw_kbps}` in the sender's arguments.
+    pub maxbw_kbps: u32,
+}
+
+/// Whether the sender's arguments take the send cap (a profile may fix it with a literal instead).
+pub fn takes_send_cap(p: &Profile) -> bool {
+    p.sender_args.iter().any(|a| a.contains("{maxbw_kbps}"))
 }
 
 #[derive(Debug, Clone)]
@@ -231,7 +239,11 @@ fn tx_shared(p: &Profile, plan: &Plan, dir: &Path) -> Env {
 pub fn sender(cfg: &Config, p: &Profile, plan: &Plan, dir: &Path) -> Spec {
     let mut env = p.sender_env.clone();
     env.extend(tx_shared(p, plan, dir));
-    let vars = [("peer_host", plan.peer_host.clone()), ("peer_port", plan.peer_port.to_string())];
+    let vars = [
+        ("peer_host", plan.peer_host.clone()),
+        ("peer_port", plan.peer_port.to_string()),
+        ("maxbw_kbps", plan.maxbw_kbps.to_string()),
+    ];
     Spec { program: cfg.media.path(&cfg.media.sender), args: subst(&p.sender_args, &vars), env, cwd: dir.into() }
 }
 
@@ -328,6 +340,7 @@ mod tests {
             listen_port: 60021,
             input: Input::Camera("/dev/video0".into()),
             manual_kbps: None,
+            maxbw_kbps: 5000,
         }
     }
 
@@ -352,6 +365,7 @@ mod tests {
         let s = sender(&c, &p, &plan(), dir);
         assert_eq!(s.program, PathBuf::from("/opt/media/sender/scripts/srt_proper_sender"));
         assert_eq!(s.args, ["-", "10.0.0.2", "60021", "8000", "live", "10000", "5000"]);
+        assert!(takes_send_cap(&p));
         assert_eq!(s.env["SRT_FAST_STATS_JSONL"], "/run/s1/fast.jsonl");
         assert_eq!(s.env["SRT_MAXBW_CTL"], "/run/s1/maxbw_ctl");
         assert_eq!(s.env["SRT_CLEAN_SIGTERM"], "1");
@@ -375,6 +389,27 @@ mod tests {
         assert_eq!(b.env["INITIAL_TARGET"], "2500");
         assert_eq!(b.env["BUF_NODROP"], "0");
         assert!(!sender(&c, &p, &fixed, dir).env.contains_key("SRT_MAXBW_CTL"));
+    }
+
+    #[test]
+    fn send_cap_in_the_sender_arguments() {
+        let (c, dir) = (cfg(), Path::new("/run/s1"));
+        let mut measured = plan();
+        measured.maxbw_kbps = 5260;
+        let p = Profile::standard();
+        assert_eq!(sender(&c, &p, &measured, dir).args, ["-", "10.0.0.2", "60021", "8000", "live", "10000", "5260"]);
+        // a device.toml that names the arguments itself: a literal keeps working, the placeholder anywhere
+        let lit: ProfileConfig =
+            toml::from_str("sender_args = [\"-\", \"{peer_host}\", \"{peer_port}\", \"8000\", \"live\", \"10000\", \"5000\"]\n").unwrap();
+        let p = Profile::resolve(&lit).unwrap();
+        assert!(!takes_send_cap(&p));
+        assert_eq!(sender(&c, &p, &measured, dir).args, ["-", "10.0.0.2", "60021", "8000", "live", "10000", "5000"]);
+        let own: ProfileConfig =
+            toml::from_str("sender_args = [\"-\", \"{peer_host}\", \"{peer_port}\", \"6000\", \"live\", \"{maxbw_kbps}\"]\n").unwrap();
+        let p = Profile::resolve(&own).unwrap();
+        assert_eq!(sender(&c, &p, &measured, dir).args, ["-", "10.0.0.2", "60021", "6000", "live", "5260"]);
+        // the receiver's arguments have no such placeholder
+        assert_eq!(receiver(&c, &Profile::standard(), &measured, dir).args, ["/dev/null", "60021", "8000"]);
     }
 
     #[test]

@@ -87,6 +87,8 @@ export const api = {
     list: () => req<NetworkTestList>('GET', '/network-tests'),
     get: (id: string) => req<NetworkTest>('GET', `/network-tests/${encodeURIComponent(id)}`),
     options: () => req<NetworkTestOptions>('GET', '/network-tests/options'),
+    /** Make a finished line-speed test (towards the peer) the send cap; answers the new transport settings. */
+    use: (id: string) => req<TransportSettings>('POST', `/network-tests/${encodeURIComponent(id)}/use`),
   },
 
   /** Open a preview session: send the browser's offer, get the device's answer. */

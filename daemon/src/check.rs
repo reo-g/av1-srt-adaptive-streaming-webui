@@ -4,9 +4,10 @@
 //! value becomes a FieldError, never a 422.
 
 use crate::model::{
-    params, CheckResult, DelayProfile, FieldError, Impact, InputKind, LinkState, Mode, TransportStored, VideoInput,
-    VideoStored,
+    params, CheckResult, DelayProfile, FieldError, Impact, InputKind, LinkState, Mode, SendLimit, TransportStored,
+    VideoInput, VideoStored, SEND_LIMIT_RANGE,
 };
+use crate::util::round;
 use serde_json::{json, Value};
 
 pub const BITRATE_RANGE: (f64, f64) = (1.5, 4.0);
@@ -193,6 +194,16 @@ pub fn apply_video(d: &VideoDraft, a: &VideoStored) -> VideoStored {
 
 // ------------------------------------------------------------------ transport
 
+/// The draft's send_limit: left out (or null) keeps the applied value.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub enum LimitDraft {
+    #[default]
+    Keep,
+    Mbps(f64),
+    /// send_limit given without a number in mbps
+    Bad,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct TransportDraft {
     pub version: Option<f64>,
@@ -203,6 +214,7 @@ pub struct TransportDraft {
     pub profile: Option<String>,
     pub cipher: Option<String>,
     pub passphrase: Option<String>,
+    pub send_limit: LimitDraft,
 }
 
 impl TransportDraft {
@@ -216,7 +228,54 @@ impl TransportDraft {
             profile: text(v, "delay.profile"),
             cipher: text(v, "encryption.cipher"),
             passphrase: text(v, "encryption.passphrase"),
+            // left out keeps the applied value; anything else must be a number (null too, as the mock)
+            send_limit: match v.get("send_limit") {
+                None => LimitDraft::Keep,
+                Some(_) => num(v, "send_limit.mbps").map_or(LimitDraft::Bad, LimitDraft::Mbps),
+            },
         }
+    }
+
+    /// The valid new send cap (two decimals), if the draft gives one.
+    fn limit(&self) -> Option<f64> {
+        let (lo, hi) = SEND_LIMIT_RANGE;
+        match self.send_limit {
+            LimitDraft::Mbps(x) if (lo..=hi).contains(&x) => Some(round(x, 2)),
+            _ => None,
+        }
+    }
+
+    /// A valid send cap that differs from the applied one.
+    fn limit_changed(&self, a: &TransportStored) -> Option<f64> {
+        self.limit().filter(|x| *x != a.send_limit.mbps)
+    }
+
+    /// Anything but the send cap differs from the applied settings.
+    fn others_changed(&self, a: &TransportStored) -> bool {
+        self.mode.as_deref() != Some(a.mode.as_str())
+            || self.host.as_deref() != Some(a.peer_host.as_str())
+            || self.port != Some(f64::from(a.peer_port))
+            || self.listen_port != Some(f64::from(a.listen_port))
+            || self.profile.as_deref() != Some(a.delay.name())
+            || self.cipher.as_deref() != Some(a.cipher.as_str())
+            || (self.passphrase.is_some() && self.cipher.as_deref() != Some("none"))
+    }
+
+    /// A valid new send cap and nothing else changed.
+    fn just_the_limit(&self, a: &TransportStored) -> bool {
+        self.limit_changed(a).is_some() && !self.others_changed(a)
+    }
+
+    /// The draft changes the send cap and nothing else (valid or not): that may be applied while
+    /// the link runs (an invalid value is then refused by the check), the running transmission
+    /// keeps its cap.
+    pub fn only_send_limit(&self, a: &TransportStored) -> bool {
+        let differs = match self.send_limit {
+            LimitDraft::Keep => false,
+            LimitDraft::Mbps(x) => round(x, 2) != a.send_limit.mbps,
+            LimitDraft::Bad => true,
+        };
+        differs && !self.others_changed(a)
     }
 }
 
@@ -239,6 +298,10 @@ fn ipv4_ok(s: &str) -> bool {
 pub fn check_transport(d: &TransportDraft, c: &TransportCtx) -> CheckResult {
     let mut errors = Vec::new();
     let mut impacts = Vec::new();
+    if d.send_limit != LimitDraft::Keep && d.limit().is_none() {
+        let (lo, hi) = SEND_LIMIT_RANGE;
+        errors.push(fe("send_limit.mbps", "out_of_range", json!({ "min": lo, "max": hi })));
+    }
     let mode = d.mode.as_deref();
     if !mode.is_some_and(|m| MODES.contains(&m)) {
         errors.push(fe("mode", "invalid", json!({})));
@@ -272,6 +335,11 @@ pub fn check_transport(d: &TransportDraft, c: &TransportCtx) -> CheckResult {
     }
 
     match c.state {
+        LinkState::Stopped => impacts.push(im("info", "saved_while_stopped", json!({}))),
+        // Only the send cap: nothing is set up again. It is read at the start of a transmission
+        // (app.rs plan; retries and reconnects keep it): stored now, used from the next start,
+        // in every state but stopped (live, connecting, reconnecting), as the mock.
+        _ if d.just_the_limit(c.applied) => impacts.push(im("info", "takes_effect_next_start", json!({}))),
         LinkState::Live => {
             // After the reconnect the picture comes back after about the delay of the new profile.
             let target = match dp {
@@ -280,7 +348,6 @@ pub fn check_transport(d: &TransportDraft, c: &TransportCtx) -> CheckResult {
             };
             impacts.push(im("warn", "reconnect_gap", json!({ "gap_s": gap_s(target) })));
         }
-        LinkState::Stopped => impacts.push(im("info", "saved_while_stopped", json!({}))),
         _ => {
             impacts.push(im("info", "reconnect", json!({})));
             impacts.push(im("ok", "no_peer_effect", json!({})));
@@ -304,6 +371,8 @@ pub fn apply_transport(d: &TransportDraft, a: &TransportStored) -> TransportStor
             _ => a.delay,
         },
         cipher: d.cipher.clone().unwrap_or_else(|| a.cipher.clone()),
+        // a new value is the operator's; the same value keeps where it came from
+        send_limit: d.limit_changed(a).map_or_else(|| a.send_limit.clone(), SendLimit::manual),
     }
 }
 
@@ -538,6 +607,7 @@ mod tests {
             listen_port: 60021,
             delay: DelayProfile::Standard,
             cipher: "none".into(),
+            send_limit: SendLimit::default(),
         }
     }
 
@@ -610,5 +680,91 @@ mod tests {
         let d = TransportDraft::parse(&tdraft("outbound", "10.0.0.5", json!(60030), "standard", "none"));
         let next = apply_transport(&d, &applied);
         assert_eq!((next.version, next.peer_host.as_str(), next.peer_port, next.listen_port), (4, "10.0.0.5", 60030, 9000));
+        assert_eq!(next.send_limit, applied.send_limit, "no send_limit in the draft: kept");
+    }
+
+    /// The applied settings as the screen sends them back, with a send_limit.
+    fn same_as_applied(limit: Value) -> Value {
+        let mut v = json!({ "version": 3, "mode": "outbound", "peer": { "host": "192.168.0.88", "port": 60021 },
+                            "listen_port": 60021, "delay": { "profile": "standard" }, "encryption": { "cipher": "none" } });
+        if !limit.is_null() {
+            v["send_limit"] = limit;
+        }
+        v
+    }
+
+    #[test]
+    fn send_limit_rules() {
+        let profiles = [(DelayProfile::Standard, 9500, true)];
+        let only = |mbps: Value| same_as_applied(json!({ "mbps": mbps }));
+        let mut other = only(json!(5.26));
+        other["peer"]["host"] = json!("192.168.0.89");
+        let cases: Vec<(&str, LinkState, Value, &[&str], &[&str])> = vec![
+            ("left out, live", Live, same_as_applied(Value::Null), &[], &["warn:reconnect_gap"]),
+            ("the same value, live", Live, only(json!(5.0)), &[], &["warn:reconnect_gap"]),
+            ("new value, stopped", Stopped, only(json!(5.26)), &[], &["info:saved_while_stopped"]),
+            ("only the cap, live", Live, only(json!(5.26)), &[], &["info:takes_effect_next_start"]),
+            ("only the cap, reconnecting", Reconnecting, only(json!(5.26)), &[], &["info:takes_effect_next_start"]),
+            ("only the cap, connecting", Connecting, only(json!(1)), &[], &["info:takes_effect_next_start"]),
+            ("the cap and the peer, live", Live, other, &[], &["warn:reconnect_gap"]),
+            ("edges", Stopped, only(json!(20)), &[], &["info:saved_while_stopped"]),
+            ("too low, live", Live, only(json!(0.99)), &["send_limit.mbps:out_of_range"], &["warn:reconnect_gap"]),
+            ("too high, stopped", Stopped, only(json!(20.01)), &["send_limit.mbps:out_of_range"], &["info:saved_while_stopped"]),
+            ("text", Live, only(json!("5.26")), &["send_limit.mbps:out_of_range"], &["warn:reconnect_gap"]),
+            ("null mbps", Live, only(Value::Null), &["send_limit.mbps:out_of_range"], &["warn:reconnect_gap"]),
+            ("no mbps", Live, same_as_applied(json!({})), &["send_limit.mbps:out_of_range"], &["warn:reconnect_gap"]),
+            ("null", Stopped, same_as_applied(json!({ "x": 1 })), &["send_limit.mbps:out_of_range"], &["info:saved_while_stopped"]),
+        ];
+        for (name, state, body, errs, imps) in cases {
+            let applied = transport_applied();
+            let ctx = TransportCtx { applied: &applied, state, profiles: &profiles };
+            let r = check_transport(&TransportDraft::parse(&body), &ctx);
+            let (e, i) = codes(&r);
+            assert_eq!(e, errs, "{name}: errors");
+            assert_eq!(i, imps, "{name}: impacts");
+        }
+        let applied = transport_applied();
+        let ctx = TransportCtx { applied: &applied, state: Stopped, profiles: &profiles };
+        let r = check_transport(&TransportDraft::parse(&only(json!(25))), &ctx);
+        assert_eq!(serde_json::to_value(&r.errors).unwrap()[0]["params"], json!({ "min": 1.0, "max": 20.0 }));
+        // send_limit: null is not "left out"; the cap's error comes first (as the mock)
+        let mut null = same_as_applied(Value::Null);
+        null["send_limit"] = Value::Null;
+        null["peer"]["host"] = json!("x");
+        assert_eq!(codes(&check_transport(&TransportDraft::parse(&null), &ctx)).0, ["send_limit.mbps:out_of_range", "peer.host:invalid"]);
+
+        // what may be applied while the link runs: a change of the cap alone (valid or not)
+        let a = transport_applied();
+        let d = |v: Value| TransportDraft::parse(&v);
+        assert!(d(only(json!(5.26))).only_send_limit(&a));
+        assert!(d(only(json!(30))).only_send_limit(&a), "refused by the check, not as busy");
+        assert!(!d(only(json!(5.0))).only_send_limit(&a), "nothing changes");
+        assert!(!d(only(json!(5.001))).only_send_limit(&a), "the same at two decimals");
+        assert!(!d(same_as_applied(Value::Null)).only_send_limit(&a));
+        let mut pw = only(json!(5.26));
+        pw["encryption"] = json!({ "cipher": "aes-128", "passphrase": "0123456789" });
+        assert!(!d(pw).only_send_limit(&a));
+        let mut port = only(json!(5.26));
+        port["listen_port"] = json!(9000);
+        assert!(!d(port).only_send_limit(&a));
+    }
+
+    #[test]
+    fn send_limit_apply() {
+        let mut applied = transport_applied();
+        applied.send_limit = SendLimit {
+            mbps: 5.26,
+            source: crate::model::LimitSource::Measured,
+            measured_at: Some("2026-11-04T14:50:12+09:00".into()),
+            test_id: Some("1-2".into()),
+        };
+        // the same value keeps its source; a new one is the operator's, two decimals
+        let next = apply_transport(&TransportDraft::parse(&same_as_applied(json!({ "mbps": 5.26 }))), &applied);
+        assert_eq!((next.version, &next.send_limit), (4, &applied.send_limit));
+        let next = apply_transport(&TransportDraft::parse(&same_as_applied(json!({ "mbps": 4.567 }))), &applied);
+        assert_eq!(next.send_limit, SendLimit::manual(4.57));
+        assert_eq!(serde_json::to_value(&next.send_limit).unwrap(), json!({ "mbps": 4.57, "source": "manual", "measured_at": null, "test_id": null }));
+        let next = apply_transport(&TransportDraft::parse(&same_as_applied(Value::Null)), &applied);
+        assert_eq!(next.send_limit, applied.send_limit);
     }
 }

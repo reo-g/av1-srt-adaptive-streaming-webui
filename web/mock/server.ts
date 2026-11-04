@@ -8,6 +8,7 @@
  *   MOCK_ROLE=tx|rx            which device to imitate (default tx)
  *   MOCK_SCENARIO=normal|warn|error   (default warn)
  *   MOCK_PORT=8787
+ *   MOCK_LINE_FAST=1           the line is faster than the line-speed test sends (result 「6 Mbps 以上」)
  *
  * Scenarios (they imitate the real system: automatic bitrate between 1.5 and 4.0 Mbps,
  * standard delay profile of about 10 s, losses recovered by resending):
@@ -47,7 +48,6 @@ import type {
   NetworkTest,
   NetworkTestDirection,
   NetworkTestList,
-  NetworkTestMode,
   NetworkTestOptions,
   NetworkTestParams,
   NetworkTestRequest,
@@ -121,6 +121,10 @@ const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 
 const PEER_DELAY: DelayProfile = 'standard';
 const PEER_CIPHER = 'none';
+
+/** 送り出しの上限: the device's initial value and the range it accepts (Mbps, two decimals). */
+const SEND_LIMIT_DEFAULT = 5.0;
+const SEND_LIMIT_RANGE: [number, number] = [1, 20];
 
 // ------------------------------------------------------------------ state
 
@@ -290,6 +294,7 @@ function reset() {
     listen_port: 9000,
     delay: { profile: 'standard' },
     encryption: { cipher: 'none', passphrase_set: false, passphrase_rejected_at: null },
+    send_limit: { mbps: SEND_LIMIT_DEFAULT, source: 'default', measured_at: null, test_id: null },
   };
   lastAutoTarget = autoTarget(0);
   wasMarginLow = scenario === 'warn' && marginLowSince(0) !== null;
@@ -552,9 +557,32 @@ function checkVideo(input: VideoSettingsInput): CheckResult {
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const portOk = (p: number) => Number.isInteger(p) && p >= 1 && p <= 65535;
 
+/** A field other than the send cap differs from the applied settings (applying would set the link up again). */
+const linkFieldsChanged = (input: TransportSettingsInput) =>
+  input.mode !== transport.mode ||
+  input.peer?.host !== transport.peer.host ||
+  input.peer?.port !== transport.peer.port ||
+  input.listen_port !== transport.listen_port ||
+  input.delay?.profile !== transport.delay.profile ||
+  input.encryption?.cipher !== transport.encryption.cipher ||
+  (input.encryption?.passphrase !== undefined && input.encryption.cipher !== 'none');
+
+/** The cap a draft asks for: null when it is left out (kept) or not a number in range. */
+function draftLimit(input: TransportSettingsInput): { given: boolean; mbps: number | null } {
+  if (input.send_limit === undefined) return { given: false, mbps: null };
+  const x = input.send_limit?.mbps;
+  const [lo, hi] = SEND_LIMIT_RANGE;
+  return { given: true, mbps: typeof x === 'number' && Number.isFinite(x) && x >= lo && x <= hi ? r2(x) : null };
+}
+
 function checkTransport(input: TransportSettingsInput): CheckResult {
   const errors: FieldError[] = [];
   const impacts: Impact[] = [];
+  const limit = draftLimit(input);
+  if (limit.given && limit.mbps === null)
+    errors.push({ field: 'send_limit.mbps', code: 'out_of_range', params: { min: SEND_LIMIT_RANGE[0], max: SEND_LIMIT_RANGE[1] } });
+  const limitChanged = limit.mbps !== null && limit.mbps !== transport.send_limit.mbps;
+  const linkChanged = linkFieldsChanged(input);
   if (!TRANSPORT_OPTIONS.modes.includes(input.mode)) errors.push({ field: 'mode', code: 'invalid' });
   if (input.mode !== 'inbound') {
     if (!IPV4.test(input.peer.host)) errors.push({ field: 'peer.host', code: 'invalid' });
@@ -570,10 +598,13 @@ function checkTransport(input: TransportSettingsInput): CheckResult {
   if (!dp || !dp.available) errors.push({ field: 'delay.profile', code: 'invalid' });
 
   const st = status().state;
-  // After the reconnect the receiver's picture comes back after about the delay of the new profile.
-  if (st === 'live')
+  if (st === 'stopped') impacts.push({ level: 'info', code: 'saved_while_stopped' });
+  // The cap alone sets nothing up again: it is read when a transmission starts (retries and
+  // reconnects keep the cap they started with), so it is stored now and used from the next start.
+  else if (limitChanged && !linkChanged) impacts.push({ level: 'info', code: 'takes_effect_next_start' });
+  else if (st === 'live')
+    // After the reconnect the receiver's picture comes back after about the delay of the new profile.
     impacts.push({ level: 'warn', code: 'reconnect_gap', params: { gap_s: reconnectGapS(dp?.available ? dp.profile : transport.delay.profile) } });
-  else if (st === 'stopped') impacts.push({ level: 'info', code: 'saved_while_stopped' });
   else {
     impacts.push({ level: 'info', code: 'reconnect' });
     impacts.push({ level: 'ok', code: 'no_peer_effect' });
@@ -610,16 +641,20 @@ function compare(): CompareResult {
 // ------------------------------------------------------------------ network test
 
 /**
- * The line of the real installation: a radio link of about 5 Mbps with a round trip of about 75 ms,
- * a radio next to each device. tx: the near radio is on the transmitter side, rx the other way round.
- *   normal  everything answers; about 5.3 Mbps towards the receiver, 3 Mbps back; sending at a fixed
- *           rate, what is above about 5.4 (3.1) Mbps is lost (6 Mbps → about 10 % loss, 3 ms jitter)
- *   warn    the radio link is worse: an answer lost now and then, 3.2 Mbps towards the receiver, 2 back
+ * The line of the real installation: a radio link with a round trip of about 75 ms, a radio next
+ * to each device. tx: the near radio is on the transmitter side, rx the other way round.
+ * The line-speed test sends saturate_mbps (6) and measures what arrives, as on the device:
+ *   normal  everything answers; towards the receiver 5.26 Mbps arrive (5.8 % lost, the line is
+ *           full), back 1.15 Mbps
+ *   warn    the radio link is worse: an answer lost now and then, 3.18 and 0.86 Mbps
  *   error   the radio link is down: the near radio answers, the far one and the peer do not;
- *           throughput tests fail after the 3 s connection timeout with peer_unreachable
- * Throughput tests run only while stopped (409 busy otherwise) and block /transport/start, as on the device.
+ *           line-speed tests fail after the 3 s connection timeout with peer_unreachable
+ *   MOCK_LINE_FAST=1  the line takes everything the test sends (not saturated: 「6 Mbps 以上」)
+ * Line-speed tests run only while stopped (409 busy otherwise) and block /transport/start, as on
+ * the device. While one runs only `progress` moves; the result comes at the end.
  */
-const NETWORK_TEST_OPTIONS: NetworkTestOptions = { steady_rate_mbps: 6, rate_range_mbps: [1, 20], duration_range_s: [5, 30] };
+const NETWORK_TEST_OPTIONS: NetworkTestOptions = { duration_range_s: [5, 30], saturate_mbps: 6 };
+const LINE_FAST = process.env.MOCK_LINE_FAST === '1';
 const REACH_MS = 2400; // 10 answers 0.2 s apart, the last one waited for up to 1 s
 const CONNECT_TIMEOUT_MS = 3000;
 const HISTORY_MAX = 20;
@@ -630,8 +665,6 @@ interface MockTest {
   test: NetworkTest;
   startMs: number;
   durMs: number;
-  /** throughput: the per-second values the test will report */
-  seconds: number[];
   finish: () => Pick<NetworkTest, 'result' | 'error'>;
 }
 let tests: MockTest[] = [];
@@ -671,53 +704,30 @@ function reachTargets(): ReachabilityTarget[] {
   ];
 }
 
-/** Line capacity in Mbps: [max, steady] for each direction (tx view: to_peer = towards the receiver). */
-function capacity(direction: NetworkTestDirection): { max: number; steady: number } {
+/** What arrives when the test sends saturate_mbps (tx view: to_peer = towards the receiver). */
+function arrival(direction: NetworkTestDirection): { mbps: number; loss: number; jitter: number } {
   const toRx = direction === 'to_peer';
-  if (scenario === 'warn') return toRx ? { max: 3.2, steady: 3.3 } : { max: 2.0, steady: 2.1 };
-  return toRx ? { max: 5.3, steady: 5.4 } : { max: 3.0, steady: 3.1 };
+  if (LINE_FAST) return toRx ? { mbps: 5.98, loss: 0.1, jitter: 0.8 } : { mbps: 5.97, loss: 0.2, jitter: 1.1 };
+  if (scenario === 'warn') return toRx ? { mbps: 3.18, loss: 46.8, jitter: 6.2 } : { mbps: 0.86, loss: 85.6, jitter: 12.5 };
+  return toRx ? { mbps: 5.26, loss: 5.8, jitter: 3.1 } : { mbps: 1.15, loss: 80.8, jitter: 9.4 };
 }
 
-function planThroughput(p: NetworkTestParams): Pick<MockTest, 'durMs' | 'seconds' | 'finish'> {
+function planThroughput(p: NetworkTestParams): Pick<MockTest, 'durMs' | 'finish'> {
   const dur = p.duration_s ?? 10;
-  if (scenario === 'error')
-    return { durMs: CONNECT_TIMEOUT_MS, seconds: [], finish: () => ({ result: null, error: 'peer_unreachable' }) };
-  const cap = capacity(p.direction ?? 'to_peer');
-  if (p.mode === 'steady') {
-    const rate = p.rate_mbps ?? NETWORK_TEST_OPTIONS.steady_rate_mbps;
-    const over = rate > cap.steady;
-    const through = over ? cap.steady : rate;
-    const seconds = Array.from({ length: dur }, (_, i) => r2(through * (1 + wave(i, over ? 0.02 : 0.004))));
-    return {
-      durMs: dur * 1000,
-      seconds,
-      finish: () => ({
-        result: {
-          throughput_mbps: r2(mean(seconds)),
-          loss_pct: r2(over ? (1 - cap.steady / rate) * 100 + 0.2 : 0.1),
-          jitter_ms: r2(over ? 3.0 : 1.6),
-          retransmits: null,
-          rtt_ms: null,
-          per_second_mbps: seconds,
-        },
-        error: null,
-      }),
-    };
-  }
-  // Upper limit: the first second is slower (the sender works up to the line's pace over a 75 ms
-  // round trip); the seconds are scaled so that their mean is the capacity.
-  const raw = Array.from({ length: dur }, (_, i) => (i === 0 ? 0.62 : 1 + wave(i, 0.03)));
-  const seconds = raw.map((v) => r2((v * cap.max) / mean(raw)));
+  if (scenario === 'error') return { durMs: CONNECT_TIMEOUT_MS, finish: () => ({ result: null, error: 'peer_unreachable' }) };
+  const a = arrival(p.direction ?? 'to_peer');
+  // What arrives in each second wobbles around the line's pace; scaled so that the mean is the result.
+  const raw = Array.from({ length: dur }, (_, i) => 1 + wave(i, a.loss >= 1 ? 0.04 : 0.003));
+  const seconds = raw.map((v) => r2((v * a.mbps) / mean(raw)));
   return {
     durMs: dur * 1000,
-    seconds,
     finish: () => ({
       result: {
-        throughput_mbps: r2(mean(seconds)),
-        loss_pct: null,
-        jitter_ms: null,
-        retransmits: scenario === 'warn' ? 61 : 14,
-        rtt_ms: scenario === 'warn' ? 142.6 : 118.3,
+        throughput_mbps: a.mbps,
+        sent_mbps: r2(NETWORK_TEST_OPTIONS.saturate_mbps * 1.0004),
+        loss_pct: a.loss,
+        jitter_ms: a.jitter,
+        saturated: a.loss >= 1,
         per_second_mbps: seconds,
       },
       error: null,
@@ -725,58 +735,46 @@ function planThroughput(p: NetworkTestParams): Pick<MockTest, 'durMs' | 'seconds
   };
 }
 
-/** Bring a test up to now: progress, the seconds measured so far, the end. */
+/** Bring a test up to now: progress, the end. */
 function advance(m: MockTest) {
   const t = m.test;
   if (t.state !== 'running') return;
   const elapsed = now() - m.startMs;
   if (elapsed < m.durMs) {
-    if (t.kind === 'throughput' && m.seconds.length > 0) {
-      t.progress = r2(elapsed / m.durMs);
-      const sofar = m.seconds.slice(0, Math.floor(elapsed / 1000));
-      t.result = sofar.length
-        ? { throughput_mbps: r2(mean(sofar)), loss_pct: null, jitter_ms: null, retransmits: null, rtt_ms: null, per_second_mbps: sofar }
-        : null;
-    } else if (t.kind === 'reachability') t.progress = r2(elapsed / m.durMs);
+    // A line-speed test that cannot reach the peer has nothing to show until it gives up.
+    if (t.kind === 'reachability' || scenario !== 'error') t.progress = r2(elapsed / m.durMs);
     return;
   }
   const { result, error } = m.finish();
   Object.assign(t, { state: error ? 'failed' : 'done', finished_at: iso(m.startMs + m.durMs), result, error });
   if (!error) t.progress = 1;
   if (t.kind === 'throughput' && t.result)
-    addEvent('info', 'network_test_done', { mbps: r1(t.result.throughput_mbps), direction: t.request.direction ?? 'to_peer' });
+    addEvent('info', 'network_test_done', { mbps: r2(t.result.throughput_mbps), direction: t.request.direction ?? 'to_peer' });
 }
 const advanceTests = () => tests.forEach(advance);
 const throughputRunning = () => tests.some((m) => m.test.kind === 'throughput' && m.test.state === 'running');
 
 const DIRECTIONS: NetworkTestDirection[] = ['to_peer', 'from_peer'];
-const MODES: NetworkTestMode[] = ['max', 'steady'];
 
-/** POST /network-tests, with the device's order of checks. */
+/** POST /network-tests, with the device's order of checks. mode and rate_mbps of older clients are ignored. */
 function startNetworkTest(b: Partial<NetworkTestRequest>): { code: number; body: NetworkTest | ApiError } {
   const invalid = (errors: FieldError[]) => ({ code: 400, body: { error: { code: 'invalid' as const, errors } } });
   if (b.kind !== 'reachability' && b.kind !== 'throughput')
     return invalid([{ field: 'kind', code: b.kind === undefined ? 'required' : 'invalid' }]);
   if (b.kind === 'throughput' && role !== 'tx') return { code: 409, body: { error: { code: 'unsupported_role' } } };
 
-  let params: NetworkTestParams = { kind: 'reachability', direction: null, mode: null, rate_mbps: null, duration_s: null };
+  let params: NetworkTestParams = { kind: 'reachability', direction: null, duration_s: null };
   if (b.kind === 'throughput') {
     const errors: FieldError[] = [];
     const direction = b.direction ?? 'to_peer';
-    const mode = b.mode ?? 'max';
     const [dMin, dMax] = NETWORK_TEST_OPTIONS.duration_range_s;
-    const [rMin, rMax] = NETWORK_TEST_OPTIONS.rate_range_mbps;
     const duration = b.duration_s ?? 10;
-    const rate = mode === 'steady' ? (b.rate_mbps ?? NETWORK_TEST_OPTIONS.steady_rate_mbps) : null;
     if (!DIRECTIONS.includes(direction)) errors.push({ field: 'direction', code: 'invalid' });
-    if (!MODES.includes(mode)) errors.push({ field: 'mode', code: 'invalid' });
-    if (rate !== null && !(typeof rate === 'number' && rate >= rMin && rate <= rMax))
-      errors.push({ field: 'rate_mbps', code: 'out_of_range', params: { min: rMin, max: rMax } });
     if (!(Number.isInteger(duration) && duration >= dMin && duration <= dMax))
       errors.push({ field: 'duration_s', code: 'out_of_range', params: { min: dMin, max: dMax } });
     if (errors.length) return invalid(errors);
     if (status().state !== 'stopped' || throughputRunning()) return { code: 409, body: { error: { code: 'busy' } } };
-    params = { kind: 'throughput', direction, mode, rate_mbps: rate, duration_s: duration };
+    params = { kind: 'throughput', direction, duration_s: duration };
   } else if (tests.some((m) => m.test.kind === 'reachability' && m.test.state === 'running')) {
     return { code: 409, body: { error: { code: 'busy' } } };
   }
@@ -790,7 +788,6 @@ function startNetworkTest(b: Partial<NetworkTestRequest>): { code: number; body:
       test: { ...base, kind: 'reachability', request: params, result: null },
       startMs,
       durMs: REACH_MS,
-      seconds: [],
       finish: () => ({ result: { targets }, error: null }),
     };
   } else {
@@ -798,6 +795,31 @@ function startNetworkTest(b: Partial<NetworkTestRequest>): { code: number; body:
   }
   tests = [entry, ...tests].slice(0, HISTORY_MAX);
   return { code: 202, body: entry.test };
+}
+
+/**
+ * POST /network-tests/{id}/use: a finished line-speed test towards the receiver becomes the send
+ * cap (what arrived, or saturate_mbps when the line took everything; kept within the range).
+ * The next start uses it, also when used while live.
+ */
+function useNetworkTest(id: string): { code: number; body: TransportSettings | ApiError } {
+  if (role !== 'tx') return { code: 409, body: { error: { code: 'unsupported_role' } } };
+  const t = testById(id);
+  if (!t) return { code: 404, body: { error: { code: 'not_found' } } };
+  if (t.kind !== 'throughput' || t.state !== 'done' || !t.result || t.request.direction !== 'to_peer')
+    return { code: 409, body: { error: { code: 'not_applicable' } } };
+  const [lo, hi] = SEND_LIMIT_RANGE;
+  const measured = t.result.saturated ? t.result.throughput_mbps : NETWORK_TEST_OPTIONS.saturate_mbps;
+  const mbps = r2(Math.min(hi, Math.max(lo, measured)));
+  const from = transport.send_limit.mbps;
+  transport = {
+    ...transport,
+    version: transport.version + 1,
+    send_limit: { mbps, source: 'measured', measured_at: t.finished_at, test_id: t.id },
+  };
+  addEvent('info', 'send_limit_changed', { mbps, from_mbps: from, source: 'measured' });
+  broadcast({ type: 'settings', section: 'transport', version: transport.version });
+  return { code: 200, body: transport };
 }
 
 const testList = (): NetworkTestList => {
@@ -964,7 +986,12 @@ const server = http.createServer(async (req, res) => {
       if (input.version !== transport.version) return send(res, 409, { error: { code: 'version_conflict' } });
       const c = checkTransport(input);
       if (!c.ok) return send(res, 400, { error: { code: 'invalid', errors: c.errors } });
-      await sleep(1000);
+      const prevLimit = transport.send_limit;
+      const nextMbps = draftLimit(input).mbps ?? prevLimit.mbps;
+      const limitChanged = nextMbps !== prevLimit.mbps;
+      const linkChanged = linkFieldsChanged(input);
+      // Setting the link up again takes a moment; storing the cap alone does not.
+      await sleep(linkChanged || !limitChanged ? 1000 : 300);
       const newPass = input.encryption.passphrase !== undefined && input.encryption.cipher !== 'none';
       transport = {
         ...transport,
@@ -978,9 +1005,12 @@ const server = http.createServer(async (req, res) => {
           passphrase_set: input.encryption.cipher === 'none' ? transport.encryption.passphrase_set : transport.encryption.passphrase_set || newPass,
           passphrase_rejected_at: newPass ? null : transport.encryption.passphrase_rejected_at,
         },
+        // A new value is the operator's; the same value keeps where it came from.
+        send_limit: limitChanged ? { mbps: nextMbps, source: 'manual', measured_at: null, test_id: null } : prevLimit,
       };
-      addEvent('info', 'transport_settings_applied');
+      if (linkChanged || !limitChanged) addEvent('info', 'transport_settings_applied');
       if (newPass) addEvent('info', 'passphrase_changed');
+      if (limitChanged) addEvent('info', 'send_limit_changed', { mbps: nextMbps, from_mbps: prevLimit.mbps, source: 'manual' });
       broadcast({ type: 'settings', section: 'transport', version: transport.version });
       broadcast({ type: 'status', status: status() });
       const out: ApplyResult<TransportSettings> = { settings: transport, applied_at: iso(now()), impacts: c.impacts };
@@ -1000,6 +1030,11 @@ const server = http.createServer(async (req, res) => {
     }
     if (m === 'GET' && path === '/network-tests') return send(res, 200, testList());
     if (m === 'GET' && path === '/network-tests/options') return send(res, 200, NETWORK_TEST_OPTIONS);
+    const use = path.match(/^\/network-tests\/([\w-]+)\/use$/);
+    if (m === 'POST' && use) {
+      const out = useNetworkTest(use[1]);
+      return send(res, out.code, out.body);
+    }
     const nt = path.match(/^\/network-tests\/([\w-]+)$/);
     if (m === 'GET' && nt) {
       const t = testById(nt[1]);

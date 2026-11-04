@@ -2,10 +2,13 @@
 """Stand-in for the bandwidth tool (client and server) in the daemon's tests (src/nettest.rs).
 
 Client: takes exactly the arguments the daemon gives the real client
-  -c HOST -p PORT -t SECS -i 1 --json-stream --forceflush --connect-timeout 3000 [-R] [-u -b RATEM]
+  -c HOST -p PORT -u -b RATEM -l 1316 -t SECS -i 1 --json-stream --forceflush --get-server-output
+  --connect-timeout 3000 [-R]
 (anything else: exit 1 with a usage line on stderr) and replays the JSON-stream output captured
-from iperf3 3.18 on localhost (iperf3_*.jsonl next to this file): iperf3_tcp / iperf3_udp, with
--R the *_reverse captures. HOST picks a case:
+from iperf3 3.18 on localhost (iperf3_*.jsonl next to this file): iperf3_udp, with -R
+iperf3_udp_reverse. HOST picks a case:
+  lossy-*           the line was full: iperf3_udp_saturated.jsonl (the to_peer capture with the
+                    radio link's numbers, 5.26 Mbps arrived, 5.8 % lost; without -R only)
   refused.example   the captured "Connection refused" error (iperf3_refused.jsonl), exit 1
   busy.example      the captured "server is busy" error (iperf3_busy.jsonl), exit 1
   hang.example      the start line, then nothing more (SIGTERM ends it)
@@ -68,23 +71,20 @@ def server(args):
 
 
 def client(args):
-    # the fixed part, then the optional flags in the daemon's order
-    if len(args) < 12:
+    # the daemon's order: the fixed part, then -R or nothing
+    fixed = ["-c", None, "-p", None, "-u", "-b", None, "-l", "1316", "-t", None, "-i", "1", "--json-stream",
+             "--forceflush", "--get-server-output", "--connect-timeout", "3000"]
+    if len(args) not in (len(fixed), len(fixed) + 1):
         usage()
-    fixed = [args[0], args[2], args[4], args[6], args[7], args[8], args[9], args[10], args[11]]
-    if fixed != ["-c", "-p", "-t", "-i", "1", "--json-stream", "--forceflush", "--connect-timeout", "3000"]:
+    if any(want is not None and got != want for want, got in zip(fixed, args)):
         usage()
-    host, rest = args[1], args[12:]
-    if not args[3].isdigit() or not args[5].isdigit():
+    host, rest = args[1], args[len(fixed):]
+    if not args[3].isdigit() or not args[10].isdigit() or not args[6].endswith("M"):
         usage()
-    reverse = rest[:1] == ["-R"]
-    rest = rest[1:] if reverse else rest
-    udp = False
-    if rest:
-        if len(rest) != 3 or rest[0] != "-u" or rest[1] != "-b" or not rest[2].endswith("M"):
-            usage()
-        float(rest[2][:-1])
-        udp = True
+    float(args[6][:-1])
+    if rest not in ([], ["-R"]):
+        usage()
+    reverse = rest == ["-R"]
     log("stub_iperf3.jsonl", {"args": args})
     if host == "crash.example":
         print("iperf3: stub crash", file=sys.stderr)
@@ -95,7 +95,7 @@ def client(args):
         wait_forever()
     name = {"refused.example": "refused", "busy.example": "busy"}.get(host)
     if name is None:
-        name = ("udp" if udp else "tcp") + ("_reverse" if reverse else "")
+        name = "udp_reverse" if reverse else "udp_saturated" if host.startswith("lossy-") else "udp"
     with open(os.path.join(HERE, f"iperf3_{name}.jsonl")) as f:
         lines = f.read().splitlines()
     pace = 0.25 if host.startswith("slow-") else 0.02

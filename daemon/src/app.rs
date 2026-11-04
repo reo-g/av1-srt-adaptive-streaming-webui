@@ -193,7 +193,8 @@ impl App {
         }
     }
 
-    fn plan(&self, i: &Inner) -> Plan {
+    /// What the next transmission uses (fixed at its start: retries and reconnects keep it).
+    pub(crate) fn plan(&self, i: &Inner) -> Plan {
         let (v, t) = (&i.settings.video, &i.settings.transport);
         Plan {
             peer_host: t.peer_host.clone(),
@@ -204,6 +205,22 @@ impl App {
                 InputKind::File => Input::File(v.input.file.clone()),
             },
             manual_kbps: (v.mode == Mode::Manual).then(|| (v.manual_mbps * 1000.0).round() as u32),
+            maxbw_kbps: t.send_limit.kbps(),
+        }
+    }
+
+    /// The developer log line at each start: the send cap the sender gets.
+    fn log_send_cap(&self, i: &Inner, plan: &Plan) {
+        if self.cfg.role != Role::Tx {
+            return;
+        }
+        let l = &i.settings.transport.send_limit;
+        if crate::profile::takes_send_cap(&self.prof) {
+            let at = l.measured_at.as_deref().map(|t| format!(", measured {t}")).unwrap_or_default();
+            dlog!("start: send cap {} kbps ({}{at})", plan.maxbw_kbps, l.source.name());
+        } else {
+            let args = self.prof.sender_args.join(" ");
+            dlog!("start: the profile's sender_args fix the send cap ({args}); the setting {} Mbps is not used", l.mbps);
         }
     }
 }
@@ -316,6 +333,7 @@ fn placeholder_plan(cfg: &Config) -> Plan {
         listen_port: cfg.rx.listen_port,
         input: Input::Camera(cfg.tx.camera.clone()),
         manual_kbps: None,
+        maxbw_kbps: crate::model::SendLimit::default().kbps(),
     }
 }
 
@@ -357,7 +375,10 @@ async fn supervise<B: MediaBackend>(
                     }
                     CmdKind::Start => {
                         if m.link.state == LinkState::Stopped {
-                            m.plan = app.plan(&app.lock());
+                            let i = app.lock();
+                            m.plan = app.plan(&i);
+                            app.log_send_cap(&i, &m.plan);
+                            drop(i);
                             sampler.reset_run();
                         }
                         m.start(now);
@@ -475,7 +496,8 @@ pub fn test_app(cfg: Config, preview: Preview, state: LinkState) -> Arc<App> {
     test_app_with(cfg, preview, state, nettest)
 }
 
-/// test_app with the network tests given (stub programs, short waits; nettest.rs).
+/// test_app with the network tests given (stub programs, short waits; nettest.rs). The settings
+/// are read from the configured state_dir as at a start (the defaults when there is no file yet).
 #[cfg(test)]
 pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: NetTests) -> Arc<App> {
     use crate::supervisor::Link;
@@ -491,7 +513,9 @@ pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: N
         rx_black: false,
         rev: 0,
     };
-    let settings = store::defaults(&cfg);
+    // only from a state_dir the test chose (never the developer's own)
+    let stored = cfg.state_dir.as_ref().and_then(|d| store::load(&d.join("settings.json")));
+    let settings = stored.unwrap_or_else(|| store::defaults(&cfg));
     let inner = Inner { link, stats: Stats::default(), history: History::default(), events: EventRing::new(0), settings };
     let (cmd, _) = mpsc::channel(1);
     let (live, _) = broadcast::channel(16);

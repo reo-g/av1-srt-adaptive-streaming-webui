@@ -22,8 +22,11 @@ tags:
     description: |
       Checks of the line to the peer, started from the UI. reachability (つながりの確認): both roles,
       any time, also while live. throughput (回線の速さ): transmitter only (a receiver answers
-      409 unsupported_role), only while the link is stopped, one at a time. The receiver answers
-      throughput tests by itself whenever the device is running. Tests are kept in memory only.
+      409 unsupported_role), only while the link is stopped, one at a time. It sends more than the
+      line can carry (NetworkTestOptions.saturate_mbps) and measures what arrives (届いた速さ); a
+      result towards the receiver can become the send cap (TransportSettings.send_limit) with
+      POST /network-tests/{id}/use. The receiver answers throughput tests by itself whenever the
+      device is running. Tests are kept in memory only.
   - name: preview
     description: |
       Live picture in the browser, only while the link is live. tx shows what it sends (after
@@ -157,6 +160,11 @@ paths:
     put:
       tags: [transport settings]
       summary: Apply. The link is re-established with the new settings.
+      description: |
+        A change of send_limit alone is stored and used from the next start of the transmission; it
+        is accepted while the link runs too (impact takes_effect_next_start; the running transmission,
+        its retries included, keeps its cap). The other fields keep their rules (the device may answer 409 busy while live). A new
+        send_limit value becomes source "manual" and adds the event send_limit_changed.
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TransportSettingsInput' } } } }
       responses:
         '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/ApplyTransportResult' } } } }
@@ -182,8 +190,9 @@ paths:
         Answers at once with the running test; read GET /network-tests/{id} (or the list) until
         `state` is no longer `running`.
         Checks, in this order: 400 invalid (kind missing or unknown) → 409 unsupported_role
-        (throughput on a receiver) → 400 invalid with field errors (direction, mode: invalid;
-        rate_mbps 1–20 in steady, duration_s integer 5–30: out_of_range with min and max) → 409 busy.
+        (throughput on a receiver) → 400 invalid with field errors (direction: invalid; duration_s
+        integer 5–30: out_of_range with min and max) → 409 busy. mode and rate_mbps (fields of an
+        earlier version) are ignored.
         busy: throughput while the link is not `stopped` or while another throughput test runs;
         reachability while another reachability test runs.
         While a throughput test runs, POST /transport/start answers 409 busy.
@@ -201,7 +210,7 @@ paths:
   /network-tests/options:
     get:
       tags: [network test]
-      summary: Limits and defaults of the throughput test
+      summary: Limits of the throughput test and the rate it sends at
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTestOptions' } } } }
   /network-tests/{id}:
@@ -212,6 +221,25 @@ paths:
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTest' } } } }
         '404': { description: not_found (unknown, or no longer among the last 20), content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+  /network-tests/{id}/use:
+    post:
+      tags: [network test]
+      summary: Make a finished throughput test towards the peer the send cap (transmitter only)
+      description: |
+        Sets TransportSettings.send_limit to {mbps: throughput_mbps rounded to two decimals (the
+        test's saturate_mbps when the result is not saturated; kept within 1.0–20.0), source:
+        measured, measured_at: the test's finished_at, test_id: id}, bumps the transport settings
+        version, adds the event send_limit_changed (mbps, from_mbps, source) and pushes a `settings`
+        message. The next start of the transmission uses it; while live it is stored now and the
+        running transmission keeps its cap. No body.
+        Checks, in this order: 409 unsupported_role (receiver) → 404 not_found → 409 not_applicable
+        (not a throughput test, not done, or direction not to_peer).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: The new transport settings, content: { application/json: { schema: { $ref: '#/components/schemas/TransportSettings' } } } }
+        '404': { description: not_found (unknown, or no longer among the last 20), content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '409': { description: not_applicable or unsupported_role, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
 
 components:
   responses:
@@ -338,14 +366,15 @@ components:
         level: { $ref: '#/components/schemas/Level' }
         code:
           type: string
-          enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done]
+          enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done, send_limit_changed]
         params:
           $ref: '#/components/schemas/Params'
           description: |
             delay_margin_low: margin_s. video_stalled: seconds. loss_high: loss_pct.
             bitrate_changed: mbps, from_mbps, reason (BitrateReason). transport_started (rx): format.
             listening_started: port. input_detected: format.
-            network_test_done: mbps, direction (to_peer | from_peer); only after a throughput test that finished.
+            network_test_done: mbps (what arrived, ThroughputResult.throughput_mbps with two decimals), direction (to_peer | from_peer); only after a throughput test that finished.
+            send_limit_changed (tx): mbps, from_mbps, source (measured: POST /network-tests/{id}/use; manual: PUT /settings/transport).
     BitrateReason:
       type: string
       enum: [loss, delay, recovered, manual]
@@ -357,7 +386,7 @@ components:
       type: object
       required: [field, code]
       properties:
-        field: { type: string, examples: [encode.manual.bitrate_mbps, delay.profile] }
+        field: { type: string, examples: [encode.manual.bitrate_mbps, delay.profile, send_limit.mbps] }
         code: { type: string, enum: [out_of_range, required, too_short, too_long, invalid] }
         params: { $ref: '#/components/schemas/Params' }
     Impact:
@@ -367,7 +396,7 @@ components:
         level: { type: string, enum: [warn, ok, info] }
         code:
           type: string
-          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped]
+          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, takes_effect_next_start]
         params:
           $ref: '#/components/schemas/Params'
           description: |
@@ -375,6 +404,7 @@ components:
             reconnect_gap: gap_s (seconds the receiver's picture is gone while the link is set up again; about the delay of the profile).
             switch_no_gap: a new bitrate or mode is taken over without a gap.
             bitrate_near_bandwidth: bandwidth_mbps (the fixed bitrate is above 0.8 × the estimated capacity).
+            takes_effect_next_start (info): send_limit changes and nothing else does, while the link is not stopped (live, connecting, reconnecting); it is stored and used from the next start (retries keep the cap they started with).
     CheckResult:
       type: object
       required: [ok, errors, impacts]
@@ -392,7 +422,7 @@ components:
           properties:
             code:
               type: string
-              enum: [version_conflict, invalid, busy, not_found, unsupported_role, not_live, too_many_viewers, bad_offer, no_common_codec, preview_unavailable]
+              enum: [version_conflict, invalid, busy, not_found, unsupported_role, not_applicable, not_live, too_many_viewers, bad_offer, no_common_codec, preview_unavailable]
             errors: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
     PreviewOffer:
       type: object
@@ -494,9 +524,25 @@ components:
         impacts: { type: array, items: { $ref: '#/components/schemas/Impact' } }
     TransportMode: { type: string, enum: [outbound, inbound, mutual], description: 送信機から接続 / 接続を待つ / 互いに接続 }
     Cipher: { type: string, enum: [aes-128, aes-192, aes-256, none] }
+    SendLimitSource:
+      type: string
+      enum: [default, measured, manual]
+      description: 'default: the initial value (5.0). measured: from a line-speed test (POST /network-tests/{id}/use). manual: entered in the transport settings.'
+    SendLimit:
+      type: object
+      description: |
+        送り出しの上限: the most the transmitter puts on the line. Each transmission starts with it;
+        while the line is crowded the device paces below it on its own and comes back up to it.
+        Kept across restarts.
+      required: [mbps, source, measured_at, test_id]
+      properties:
+        mbps: { type: number, minimum: 1.0, maximum: 20.0, description: two decimals, examples: [5.26] }
+        source: { $ref: '#/components/schemas/SendLimitSource' }
+        measured_at: { type: [string, 'null'], format: date-time, description: 'measured: when the test finished; otherwise null' }
+        test_id: { type: [string, 'null'], description: 'measured: the test it came from; otherwise null' }
     TransportSettings:
       type: object
-      required: [version, mode, peer, listen_port, delay, encryption]
+      required: [version, mode, peer, listen_port, delay, encryption, send_limit]
       properties:
         version: { type: integer }
         mode: { $ref: '#/components/schemas/TransportMode' }
@@ -517,6 +563,7 @@ components:
             cipher: { $ref: '#/components/schemas/Cipher' }
             passphrase_set: { type: boolean, description: the passphrase itself is never returned }
             passphrase_rejected_at: { type: [string, 'null'], format: date-time }
+        send_limit: { $ref: '#/components/schemas/SendLimit' }
     TransportSettingsInput:
       type: object
       required: [version, mode, peer, listen_port, delay, encryption]
@@ -539,6 +586,16 @@ components:
           properties:
             cipher: { $ref: '#/components/schemas/Cipher', description: one of TransportOptions.ciphers }
             passphrase: { type: string, writeOnly: true, description: omit to keep the current value; ignored while cipher is none }
+        send_limit:
+          type: object
+          description: |
+            Omit to keep the current value. 1.0–20.0 (out_of_range with min and max, field
+            send_limit.mbps), two decimals. A new value becomes source manual (measured_at and
+            test_id null); the same value keeps its source. While live, a change of this field
+            alone is accepted (impact takes_effect_next_start).
+          required: [mbps]
+          properties:
+            mbps: { type: number, minimum: 1.0, maximum: 20.0 }
     TransportOptions:
       type: object
       description: What can be chosen. The UI shows a control with a single choice as plain text.
@@ -593,39 +650,30 @@ components:
       type: string
       enum: [to_peer, from_peer]
       description: to_peer = this device → the peer (on tx the video's direction); from_peer = the peer → this device
-    NetworkTestMode:
-      type: string
-      enum: [max, steady]
-      description: |
-        max: the upper limit of the line (いちばん速く送れる速さ).
-        steady: send at rate_mbps and see whether it gets through, with loss and jitter.
     NetworkTestRequest:
       type: object
-      description: Fields other than kind apply to throughput only and are ignored for reachability. Omitted fields take the defaults.
+      description: |
+        Fields other than kind apply to throughput only and are ignored for reachability. Omitted fields
+        take the defaults. mode and rate_mbps (fields of an earlier version) are ignored if sent.
       required: [kind]
       properties:
         kind: { $ref: '#/components/schemas/NetworkTestKind' }
         direction: { $ref: '#/components/schemas/NetworkTestDirection', description: default to_peer }
-        mode: { $ref: '#/components/schemas/NetworkTestMode', description: default max }
-        rate_mbps: { type: number, minimum: 1, maximum: 20, description: 'steady only (ignored, not checked, in max); default NetworkTestOptions.steady_rate_mbps' }
         duration_s: { type: integer, minimum: 5, maximum: 30, default: 10 }
     NetworkTestParams:
       type: object
       description: The request as the device runs it, defaults filled in; null where a field does not apply.
-      required: [kind, direction, mode, rate_mbps, duration_s]
+      required: [kind, direction, duration_s]
       properties:
         kind: { $ref: '#/components/schemas/NetworkTestKind' }
         direction: { oneOf: [{ $ref: '#/components/schemas/NetworkTestDirection' }, { type: 'null' }], description: null for reachability }
-        mode: { oneOf: [{ $ref: '#/components/schemas/NetworkTestMode' }, { type: 'null' }], description: null for reachability }
-        rate_mbps: { type: [number, 'null'], description: steady only; null otherwise }
         duration_s: { type: [integer, 'null'], description: null for reachability }
     NetworkTestOptions:
       type: object
-      required: [steady_rate_mbps, rate_range_mbps, duration_range_s]
+      required: [duration_range_s, saturate_mbps]
       properties:
-        steady_rate_mbps: { type: number, description: default rate of the steady mode, examples: [6] }
-        rate_range_mbps: { type: array, items: { type: number }, minItems: 2, maxItems: 2, examples: [[1, 20]] }
         duration_range_s: { type: array, items: { type: integer }, minItems: 2, maxItems: 2, examples: [[5, 30]] }
+        saturate_mbps: { type: number, description: 'what the throughput test sends (Mbps), more than the line is expected to carry; set on the device (2–50), not from the UI', examples: [6] }
     ReachabilityTarget:
       type: object
       required: [kind, label, address, sent, received, rtt_min_ms, rtt_avg_ms, rtt_max_ms]
@@ -649,14 +697,18 @@ components:
         targets: { type: array, items: { $ref: '#/components/schemas/ReachabilityTarget' } }
     ThroughputResult:
       type: object
-      required: [throughput_mbps, loss_pct, jitter_ms, retransmits, rtt_ms, per_second_mbps]
+      description: |
+        The test sends at about saturate_mbps, more than the line can carry; what arrives is the
+        line's speed and losses are expected (not a fault). saturated=false: the line took (nearly)
+        everything, it is faster than the test; the UI shows "at least saturate_mbps".
+      required: [throughput_mbps, sent_mbps, loss_pct, jitter_ms, saturated, per_second_mbps]
       properties:
-        throughput_mbps: { type: number, description: 'what got through, as received (Mbps); while running, the mean of the seconds so far' }
-        loss_pct: { type: [number, 'null'], description: steady only }
-        jitter_ms: { type: [number, 'null'], description: steady only (variation of the delay) }
-        retransmits: { type: [integer, 'null'], description: max only (data sent again) }
-        rtt_ms: { type: [number, 'null'], description: max only, when it could be measured (mean round-trip time during the test) }
-        per_second_mbps: { type: array, items: { type: number }, description: one value per second, oldest first }
+        throughput_mbps: { type: number, description: '届いた速さ: what arrived at the receiving side (Mbps)', examples: [5.26] }
+        sent_mbps: { type: number, description: what was sent (Mbps), examples: [6.0] }
+        loss_pct: { type: number, description: share of what was sent that did not arrive, examples: [5.8] }
+        jitter_ms: { type: number, description: variation of the delay }
+        saturated: { type: boolean, description: 'loss_pct ≥ 1: the line was full, throughput_mbps is its speed' }
+        per_second_mbps: { type: array, items: { type: number }, description: what arrived in each second, oldest first }
     NetworkTestError:
       type: string
       enum: [peer_unreachable, peer_busy, failed]
@@ -666,10 +718,8 @@ components:
     NetworkTest:
       type: object
       description: |
-        result is null while running and when failed, except that a running throughput test fills it in
-        from its first measured second on (per_second_mbps so far, throughput_mbps their mean; loss_pct,
-        jitter_ms, retransmits and rtt_ms stay null until done). kind=reachability → ReachabilityResult,
-        kind=throughput → ThroughputResult.
+        result is null while running (follow progress) and when failed. kind=reachability →
+        ReachabilityResult, kind=throughput → ThroughputResult.
       required: [id, kind, state, started_at, finished_at, progress, request, result, error]
       properties:
         id: { type: string, description: opaque }

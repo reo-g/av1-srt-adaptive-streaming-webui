@@ -7,6 +7,7 @@ import type {
   CompareResult,
   CompareRow,
   DelayProfile,
+  FieldError as FieldErr,
   Status,
   TransportMode,
   TransportOptions,
@@ -18,8 +19,20 @@ import { Glyph, type Tone } from '../components/Glyph';
 import { Segmented } from '../components/Segmented';
 import { Applied, ApplyDialog, DiscardDialog, FieldError, PendingPanel, Row, type PendingItem } from '../components/Settings';
 import { AlertStrip, Shell } from '../components/Shell';
-import { cipherName, delayDesc, delayName, fieldErrorText, modeName, modeSentence, stateLabel } from '../i18n/ja';
-import { timeOf } from '../lib/format';
+import {
+  cipherName,
+  delayDesc,
+  delayName,
+  fieldErrorText,
+  modeName,
+  modeSentence,
+  sendLimitHelp,
+  sendLimitSource,
+  sendLimitText,
+  stateLabel,
+} from '../i18n/ja';
+import { fixed2, timeOf } from '../lib/format';
+import { href } from '../lib/router';
 import { NotDesigned } from './Placeholders';
 
 interface TDraft {
@@ -31,9 +44,19 @@ interface TDraft {
   cipher: Cipher;
   /** '' = keep the current passphrase */
   passphrase: string;
+  /**
+   * 送り出しの上限 as typed, Mbps. null = not edited: the applied value is shown and sent, so a cap
+   * set on the network screen meanwhile is not undone by applying another change.
+   */
+  send_limit: string | null;
 }
 
-type Key = 'mode' | 'endpoint' | 'listen_port' | 'delay' | 'cipher' | 'passphrase';
+type Key = 'mode' | 'endpoint' | 'listen_port' | 'delay' | 'cipher' | 'passphrase' | 'send_limit';
+
+/** Range of the send cap; the device reports the same as out_of_range min and max. */
+const LIMIT_RANGE: [number, number] = [1, 20];
+const round2 = (v: number) => Math.round(v * 100) / 100;
+const num = (t: string) => (/^\d+(\.\d+)?$/.test(t.trim()) ? parseFloat(t) : NaN);
 
 const fromSettings = (s: TransportSettings): TDraft => ({
   mode: s.mode,
@@ -43,6 +66,7 @@ const fromSettings = (s: TransportSettings): TDraft => ({
   delay: s.delay.profile,
   cipher: s.encryption.cipher,
   passphrase: '',
+  send_limit: null,
 });
 
 const toInput = (d: TDraft, s: TransportSettings): TransportSettingsInput => ({
@@ -52,7 +76,17 @@ const toInput = (d: TDraft, s: TransportSettings): TransportSettingsInput => ({
   listen_port: Number(d.listen_port),
   delay: { profile: d.delay },
   encryption: { cipher: d.cipher, ...(d.passphrase && d.cipher !== 'none' ? { passphrase: d.passphrase } : {}) },
+  ...limitInput(d, s),
 });
+
+/** The cap as sent: the applied value when not edited, two decimals, an unparsable value as null (the device reports it). */
+function limitInput(d: TDraft, s: TransportSettings): Pick<TransportSettingsInput, 'send_limit'> {
+  if (!s.send_limit) return {};
+  const typed = d.send_limit ?? null;
+  if (typed === null) return { send_limit: { mbps: s.send_limit.mbps } };
+  const x = num(typed);
+  return { send_limit: { mbps: Number.isFinite(x) ? round2(x) : (null as unknown as number) } };
+}
 
 const usesPeer = (m: TransportMode) => m !== 'inbound';
 const usesListen = (m: TransportMode) => m !== 'outbound';
@@ -277,6 +311,7 @@ function TransportSettingsTx() {
   const [check, setCheck] = useState<CheckResult | null>(null);
   const [phase, setPhase] = useState<'edit' | 'confirm' | 'applying' | 'discard' | 'stop'>('edit');
   const [doneAt, setDoneAt] = useState<string | null>(null);
+  const [doneNote, setDoneNote] = useState('');
   const [showPw, setShowPw] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   /** Bumped when the confirmation opens, so its impacts match the link state at that moment. */
@@ -340,6 +375,18 @@ function TransportSettingsTx() {
         to: '新しい値（非表示）',
       },
     ];
+    const limit = settings.send_limit ?? null;
+    const typed = v.send_limit ?? null;
+    if (limit && typed !== null) {
+      const x = num(typed);
+      items.push({
+        key: 'send_limit',
+        label: '送り出しの上限',
+        changed: !(Number.isFinite(x) && round2(x) === round2(limit.mbps)),
+        from: sendLimitText(limit, true),
+        to: Number.isFinite(x) ? `${fixed2(round2(x))} Mbps` : `${typed} Mbps`,
+      });
+    }
     return items.filter((i) => i.changed).map((i) => ({ key: i.key, label: i.label, from: i.from, to: i.to, revert: () => revert(i.key) }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings, applied, v, options, cipherLabel]);
@@ -380,14 +427,26 @@ function TransportSettingsTx() {
         ? { host: a.host, port: a.port }
         : k === 'passphrase'
             ? { passphrase: '' }
-            : { [k]: (a as unknown as Record<string, string>)[k] };
+            : k === 'send_limit'
+              ? { send_limit: null }
+              : { [k]: (a as unknown as Record<string, string>)[k] };
     setStored({ ...cur, ...back });
   }
   const changed = (k: Key) => pending.some((p) => p.key === k);
   const errors = check?.errors ?? [];
   const errFor = (field: string) => errors.find((e) => e.field === field);
   const impacts = check?.impacts ?? [];
-  const invalid = errors.length > 0;
+  const limit = settings.send_limit ?? null;
+  const limitTyped = v.send_limit ?? null;
+  // An unparsable or out-of-range cap is flagged at once, before the device answers.
+  const limitErr: FieldErr | undefined =
+    errFor('send_limit.mbps') ??
+    (limitTyped !== null && !(num(limitTyped) >= LIMIT_RANGE[0] && num(limitTyped) <= LIMIT_RANGE[1])
+      ? { field: 'send_limit.mbps', code: 'out_of_range', params: { min: LIMIT_RANGE[0], max: LIMIT_RANGE[1] } }
+      : undefined);
+  const invalid = errors.length > 0 || !!limitErr;
+  // Only the cap changes: nothing is set up again, the next start uses it (allowed while live).
+  const capOnly = n > 0 && pending.every((p) => p.key === 'send_limit');
 
   const erroring = (status.state === 'reconnecting' || status.state === 'connecting') && status.alerts.some((a) => a.level === 'error');
   const stopped = status.state === 'stopped';
@@ -406,13 +465,17 @@ function TransportSettingsTx() {
       setStored(null);
       setShowPw(false);
       setDoneAt(timeOf(res.applied_at));
+      setDoneNote(capOnly ? '送り出しの上限は、次に伝送を始めたときから使います。' : '新しい設定で接続をやり直しています。');
       setPhase('edit');
       api.transport.compare().then(setCompare).catch(() => undefined);
     } catch (e) {
       setPhase('edit');
       if (e instanceof ApiFailure && e.body?.error.code === 'busy') {
-        // The device applies settings only while the transmission is stopped (for now).
-        setNotice('伝送中は設定を適用できません。運用画面で伝送を停止してから、もう一度適用してください。');
+        // The device applies settings only while the transmission is stopped (for now); the cap alone is the exception.
+        setNotice(
+          '伝送中は設定を適用できません。運用画面で伝送を停止してから、もう一度適用してください。' +
+            (changed('send_limit') ? '送り出しの上限だけなら、伝送中でも適用できます。' : ''),
+        );
       } else if (e instanceof ApiFailure && e.status === 409) {
         setNotice('ほかの画面で設定が変わったため、適用しませんでした。最新の値を読み込みました。');
         reload();
@@ -553,6 +616,48 @@ function TransportSettingsTx() {
               </Row>
             </section>
 
+            {limit && (
+              <section aria-labelledby="sec-limit">
+                <h2 id="sec-limit" className="sec-title">
+                  送り出し
+                </h2>
+                <Row
+                  label="送り出しの上限"
+                  labelFor="tr-limit"
+                  hint={sendLimitHelp}
+                  changed={changed('send_limit')}
+                  invalid={!!limitErr}
+                  top
+                >
+                  <div className="inline">
+                    <input
+                      id="tr-limit"
+                      type="text"
+                      inputMode="decimal"
+                      className={changed('send_limit') ? 'input num changed' : 'input num'}
+                      value={limitTyped ?? fixed2(limit.mbps)}
+                      aria-invalid={!!limitErr}
+                      aria-describedby={limitErr ? 'tr-limit-e' : changed('send_limit') ? undefined : 'tr-limit-src'}
+                      onChange={(e) => set({ send_limit: e.target.value })}
+                    />
+                    <span className="unit">Mbps</span>
+                    {!changed('send_limit') && (
+                      <span id="tr-limit-src" className="muted">
+                        {sendLimitSource(limit)}
+                      </span>
+                    )}
+                  </div>
+                  {limitErr && <FieldError id="tr-limit-e" text={fieldErrorText(limitErr)} />}
+                  {changed('send_limit') && <Applied value={sendLimitText(limit)} onRevert={() => revert('send_limit')} />}
+                  <p className="help">
+                    <a href={href('network')} style={{ fontWeight: 600 }}>
+                      回線の速さを測る
+                    </a>
+                  </p>
+                </Row>
+              </section>
+            )}
+
             <section aria-labelledby="sec-enc">
               <h2 id="sec-enc" className="sec-title">
                 暗号化
@@ -633,7 +738,7 @@ function TransportSettingsTx() {
               setPhase('confirm');
             }}
             doneAt={doneAt}
-            doneNote="新しい設定で接続をやり直しています。"
+            doneNote={doneNote}
             emptyNote={
               rejectedAt
                 ? '未適用の変更はありません。適用中のパスフレーズは受信機と一致していません。'
@@ -663,7 +768,7 @@ function TransportSettingsTx() {
           impacts={impacts}
           context={status.state === 'live' ? `送信機 ${device.id} は受信機 ${peer} へ伝送中です。` : `送信機 ${device.id} は${stateLabel('tx', status.state)}です。`}
           applying={phase === 'applying'}
-          applyingText="適用しています。接続をやり直しています…"
+          applyingText={capOnly ? '適用しています…' : '適用しています。接続をやり直しています…'}
           onCancel={() => setPhase('edit')}
           onApply={apply}
         />

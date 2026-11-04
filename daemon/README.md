@@ -31,6 +31,19 @@ daemon. The daemon adds the per-session file paths itself.
 `tx.peer_host` / `tx.peer_port` are only the initial transport settings; after the first apply
 the settings screen's values (in `state_dir/settings.json`) are used.
 
+**Send cap** (送り出しの上限, `TransportSettings.send_limit`, tx): the sender's MAXBW at the start of
+each transmission, the `{maxbw_kbps}` placeholder of `profile.sender_args` (its 7th argument;
+`round(mbps × 1000)`). The controller's pacing (`BUF_ND_PACE`) takes its nominal MAXBW from the
+sender's fast stats (`mbpsMaxBW`), goes below it while the line limits and probes back up to it,
+so this is the only knob (`BUF_ND_MAXBW_KBPS` is not set). Default 5.0 Mbps (`source: default`),
+1.0–20.0 with two decimals; set from a line-speed test (`POST /network-tests/{id}/use`, `measured`)
+or in the transport settings (`manual`). It is fixed when a transmission starts (retries and
+reconnects keep it): a change while live is stored and used from the next start. The developer
+log has a line with the cap at each start. A `sender_args` in device.toml with a number in place
+of the placeholder keeps working: that number is the cap and the setting is not used (the log
+line says so). A `settings.json` from before the cap existed loads with the default; a value
+outside the range (edited by hand) is replaced by the default.
+
 **Environment of the children.** A child does not inherit the daemon's whole environment: only
 `PATH`, `HOME`, `USER`, `LOGNAME`, the locale (`LANG`, `LANGUAGE`, `LC_*`, `TZ`), `TMPDIR`, the
 `XDG_*` directories, `DBUS_SESSION_BUS_ADDRESS`, `LD_LIBRARY_PATH`, `PYTHONPATH`, the plugin
@@ -58,7 +71,7 @@ None of these logs is shown in the UI.
   `input_detected`) only once the bridge reports frames (`@evt {"input":"ok"}`; after 10 s live
   when the bridge reports no input events at all), and the backoff starts from 5 s again only
   after 10 s of frames, so a camera that opens but fails once it streams waits longer each
-  time. Then the sender (`- <peer> <port> 8000 live 10000 5000`);
+  time. Then the sender (`- <peer> <port> 8000 live 10000 <send cap, kbps>`);
   when it reports the connection, the bridge (stdout → sender stdin, stdin = control input,
   cwd `<repo>/sender`). Stop: `{"cmd":"stop"}` to the bridge, the sender drains its input
   (≤ `SRT_DRAIN_MAX_MS`), SIGTERM to the process groups after 6 s, SIGKILL after 8 s.
@@ -99,22 +112,34 @@ None of these logs is shown in the UI.
     received`, `rtt min/avg/max/mdev`) give `sent`, `received` and the times; a run without a
     summary (unknown host, no route) or not done in 10 s counts as 10 sent, 0 back. Times in ms
     with two decimals.
-  - *throughput* (tx only): `iperf3 -c <peer> -p <port> -t <dur> -i 1 --json-stream --forceflush
-    --connect-timeout 3000 [-R] [-u -b <rate>M]` (`network_test.iperf`), `max` = TCP, `steady` =
-    UDP at the rate. SIGTERM `duration + 10 s` after the start (the client then tells the server
-    it leaves), SIGKILL 2 s later. Field mapping, checked against iperf3 3.18 on localhost
-    (`tests/fixtures/iperf3_*.jsonl`): per-second values are the client's `interval` lines (the
-    sending side without `-R`, the receiving side with it); TCP `throughput_mbps` =
-    `end.sum_received.bits_per_second`, `retransmits` = `end.sum_sent.retransmits`, `rtt_ms` = the
-    streams' `sender.mean_rtt` (µs; only without `-R`, where the client sends); UDP
-    `throughput_mbps`, `loss_pct`, `jitter_ms` = `end.sum_received` (the receiver's numbers in both
-    directions; `end.sum.bits_per_second` is the *sending* rate, so it is only the fallback for a
-    tool without `sum_received`). Errors: the tool's `error` line "the server is busy" →
+  - *throughput* (tx only): one saturation test. The video travels in UDP, so the test does too:
+    `iperf3 -c <peer> -p <port> -u -b <saturate>M -l 1316 -t <dur> -i 1 --json-stream
+    --forceflush --get-server-output --connect-timeout 3000 [-R]` (`network_test.iperf`; the
+    tool's control connection is TCP on the same port). It sends more than the line carries
+    (`network_test.saturate_mbps`, default 6, 2–50) in datagrams of the video's payload (1316
+    bytes), so what arrives is the line's speed; a test that lost 1 % or more (`loss_pct` with two
+    decimals) filled the line (`saturated: true`), otherwise the line is faster than the test.
+    SIGTERM `duration + 10 s` after the start (the client then tells the server it leaves),
+    SIGKILL 2 s later. Field mapping, checked against iperf3 3.18 on localhost
+    (`tests/fixtures/iperf3_udp*.jsonl`): `throughput_mbps`, `loss_pct`, `jitter_ms` =
+    `end.sum_received` (the receiver's numbers in both directions), `sent_mbps` =
+    `end.sum_sent.bits_per_second` (`end.sum` mixes the sending rate with the receiver's loss
+    and jitter: only a fallback). `per_second_mbps` is what arrived in each second: without `-R`
+    the server's own report that `--get-server-output` adds before `end` (`server_output_text`
+    from a server in text mode, as rx runs it: the `[  5]   0.00-1.00   sec   734 KBytes  6.01
+    Mbits/sec …` lines before the `- - -` line, `[SUM]` lines when there are several streams;
+    `server_output_json` from a server started with `-J`), with `-R` the client's own `interval`
+    lines (without `-R` those are the rate sent). A last sliver of an interval (< 0.25 s) is
+    left out. While the test runs only `progress` moves (`result` stays null). Errors: the
+    tool's `error` line "the server is busy" →
     `peer_busy`; "unable to connect" / refused / timed out / no route / unreachable / unknown host
     → `peer_unreachable`; stopped at the deadline before the test began (no `start` line, e.g.
     UDP dropped on the way) → `peer_unreachable`; everything else (crash, missing program, cut off
     after the start) → `failed`. The tool's messages go to the developer log only. A finished
-    test adds `network_test_done {mbps, direction}` (mbps with one decimal, as the mock).
+    test adds `network_test_done {mbps, direction}` (mbps = `throughput_mbps`, two decimals, as
+    the mock).
+    `network_test.steady_rate_mbps` of the old steady mode is still read (and ignored), so an
+    older device.toml loads.
   - *server* (rx by default, `network_test.server`): `iperf3 -s -p <port>` started with the
     daemon, restarted 1/2/5/10/30 s after each exit (from 1 s again after it ran 60 s), stopped
     on shutdown with the preview (SIGTERM, SIGKILL after 2 s). It never looks at the link, and
@@ -126,24 +151,41 @@ None of these logs is shown in the UI.
 Phase 1 API: everything in the contract is answered. Settings can be applied while stopped
 (the next start uses them); while running a `PUT` answers `409 busy` (the settings screens
 then tell the operator to stop first; the check endpoint still shows the live impacts phase 2
-will have). An input must be chosen: an empty camera or file is a field error, and with no
+will have), except a transport `PUT` that changes only `send_limit`: it is stored while the
+link runs (the running transmission keeps its cap). `send_limit` may be left out of the input
+(the applied value is kept); a value outside 1.0–20.0 or not a number (`null` too) →
+`send_limit.mbps: out_of_range {min, max}`, listed first; a new value becomes `source: manual`
+(two decimals), the same value keeps its source. Impacts: a new cap alone while the link runs →
+`info takes_effect_next_start` only (also while connecting or reconnecting: a reconnect keeps
+the cap the transmission started with); with other fields
+changed, the existing ones (`reconnect_gap` while live). Events: a new cap alone →
+`send_limit_changed {mbps, from_mbps, source}` only; with other fields,
+`transport_settings_applied` then `send_limit_changed`. An input must be chosen: an empty camera or file is a field error, and with no
 file chosen yet the first file offered is the default. `/transport/compare` has no peer data
 yet (`verdict: unknown`).
 
-Network tests (phase 4): `POST /network-tests {kind, direction?, mode?, rate_mbps?, duration_s?}`
-→ `202` with the running test. Checks in order: not JSON → `400 invalid` (no errors); `kind`
-missing → `400 invalid` (`kind: required`), unknown → (`kind: invalid`); throughput on rx, or `[network_test]
-enabled = false` → `409 unsupported_role`; `direction` / `mode` not in the enum → `invalid`,
-steady `rate_mbps` outside 1–20 or `duration_s` not an integer 5–30 → `out_of_range {min, max}`
-(`400 invalid`; reachability ignores these fields); then `409 busy`: throughput while the link is
+Network tests (phase 4): `POST /network-tests {kind, direction?, duration_s?}` → `202` with the
+running test (`mode` and `rate_mbps` of the old modes are ignored). Checks in order: not JSON →
+`400 invalid` (no errors); `kind` missing → `400 invalid` (`kind: required`), unknown → (`kind:
+invalid`); throughput on rx, or `[network_test] enabled = false` → `409 unsupported_role`;
+`direction` not in the enum → `invalid`, `duration_s` not an integer 5–30 → `out_of_range {min,
+max}` (`400 invalid`; reachability ignores these fields); then `409 busy`: throughput while the link is
 not stopped, while a start is on its way or while another throughput test runs, reachability
 while another reachability test runs. While a throughput test runs `POST /transport/start`
 answers `409 busy` (stop and retry are never refused). `GET /network-tests` → the last 20 (memory
 only, newest first; a running test is never dropped), `GET /network-tests/{id}` → one or `404
-not_found`, `GET /network-tests/options` → `{steady_rate_mbps, rate_range_mbps: [1, 20],
-duration_range_s: [5, 30]}`. While running, `progress` is the measured seconds / duration
-(throughput; `result` then holds `per_second_mbps` so far and their mean, the rest null) or an
-estimate from the time (reachability, `result` null).
+not_found`, `GET /network-tests/options` → `{duration_range_s: [5, 30], saturate_mbps}`. The
+request is echoed as `{kind, direction, duration_s}` (null for reachability); a throughput result
+is `{throughput_mbps, sent_mbps, loss_pct, jitter_ms, saturated, per_second_mbps}`. While running,
+`progress` is the measured seconds / duration (throughput) or an estimate from the time
+(reachability), and `result` is null. `POST /network-tests/{id}/use` (tx) makes a finished test
+towards the peer the send cap: `send_limit = {mbps: throughput_mbps (saturate_mbps when not
+saturated), kept within 1.0–20.0, two decimals; source: measured, measured_at: finished_at,
+test_id}`, the transport settings version + 1, `send_limit_changed {mbps, from_mbps, source}`, a
+`settings` message on the live channel, `200` with the new `TransportSettings`; allowed while live
+(the next start uses it). Errors in order: rx → `409 unsupported_role`, unknown id → `404
+not_found`, not a finished throughput test towards the peer (running, failed, reachability,
+`from_peer`) → `409 not_applicable`.
 
 Preview (phase 3): `POST /preview/sessions {"offer": "<sdp>"}` (offer ≤ 64 KB) → `201 {id, answer}`.
 The checks in order: a body that is not JSON, has no or an empty `offer`, does not start with
@@ -200,11 +242,22 @@ the settings store and the preview (with the stub program, below).
 
 `src/nettest.rs` and `src/api.rs` run `tests/fixtures/stub_iperf3.py` and `stub_ping.py` (the
 real programs' arguments only; they replay output captured from iperf3 3.18 and iputils ping
-on the dev machine: `iperf3_{tcp,udp}[_reverse].jsonl`, `iperf3_refused.jsonl`,
-`iperf3_busy.jsonl`, `ping_ok.txt`, `ping_lost.txt` (100 % loss); `ping_partial.txt` is the ok
-capture with its counts edited; the peer or hop address picks the case, see the docstrings) for
-the parsers, the field mapping, the busy rules (live, running, a start during a test), rx
-`unsupported_role`, the timeouts, the server's restarts and stop, and the history cap.
+on the dev machine: `iperf3_udp.jsonl` / `iperf3_udp_reverse.jsonl` (`-u -b 6M -l 1316
+--get-server-output`, both directions, against a text-mode server), `iperf3_udp_server_json.jsonl`
+(the same against a server started with `-J`), `iperf3_udp_lossy.jsonl` /
+`iperf3_udp_lossy_reverse.jsonl` (6 s, real loss of about 8 %: the same command with `-w 2K`
+while the receiving side was paused 12 ms in every 100 ms; parser tests only),
+`iperf3_refused.jsonl`, `iperf3_busy.jsonl`, `ping_ok.txt`, `ping_lost.txt` (100 % loss);
+edited captures, as the dev machine has no slow path without root:
+`iperf3_udp_saturated.jsonl` is the to_peer capture with the radio link's
+numbers in the server's report and `end` (6 Mbps sent, 5.26 Mbps arrived, 5.8 % lost) and
+`ping_partial.txt` the ok capture with its counts edited; the peer or hop address picks the
+case, see the docstrings) for the parsers, the field mapping, the busy rules (live, running, a
+start during a test), rx `unsupported_role`, the timeouts, the server's restarts and stop, the
+history cap, and `/use` (its rules, the settings version, the event, persistence across a
+restart and the sender's argument at the next start). The send cap's check rules and the live
+`PUT` rule are table-tested in `src/check.rs` and over HTTP in `src/api.rs`; `{maxbw_kbps}`
+(and a literal in an overriding `sender_args`) in `src/profile.rs`.
 
 `src/preview.rs` and `src/api.rs` run `tests/fixtures/stub_preview.py` (canned answers, the
 real program's arguments only, markers in an offer make it fail, stay silent, answer late, hang or

@@ -197,6 +197,75 @@ pub struct TransportStored {
     pub listen_port: u16,
     pub delay: DelayProfile,
     pub cipher: String,
+    /// Absent in a settings.json written before it existed: the default.
+    #[serde(default)]
+    pub send_limit: SendLimit,
+}
+
+/// 送り出しの上限 (the contract's SendLimit, Mbps with two decimals).
+pub const SEND_LIMIT_RANGE: (f64, f64) = (1.0, 20.0);
+pub const SEND_LIMIT_DEFAULT_MBPS: f64 = 5.0;
+
+/// Where the send cap came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LimitSource {
+    Default,
+    /// POST /network-tests/{id}/use
+    Measured,
+    /// The transport settings screen.
+    Manual,
+}
+
+impl LimitSource {
+    pub fn name(self) -> &'static str {
+        match self {
+            LimitSource::Default => "default",
+            LimitSource::Measured => "measured",
+            LimitSource::Manual => "manual",
+        }
+    }
+}
+
+/// The send cap: the sender's MAXBW at the start of each transmission (the profile's
+/// `{maxbw_kbps}`). The controller's pacing (BUF_ND_PACE) reads it back from the sender's stats as
+/// its nominal MAXBW, goes below it while the line limits and probes back up to it, so this is
+/// the only knob. A running transmission keeps the value it started with.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SendLimit {
+    pub mbps: f64,
+    pub source: LimitSource,
+    /// measured: when the test finished (ISO 8601 +09:00)
+    pub measured_at: Option<String>,
+    /// measured: the test it came from
+    pub test_id: Option<String>,
+}
+
+impl Default for SendLimit {
+    fn default() -> Self {
+        SendLimit { mbps: SEND_LIMIT_DEFAULT_MBPS, source: LimitSource::Default, measured_at: None, test_id: None }
+    }
+}
+
+impl SendLimit {
+    pub fn manual(mbps: f64) -> SendLimit {
+        SendLimit { mbps, source: LimitSource::Manual, measured_at: None, test_id: None }
+    }
+
+    /// The value the sender gets ({maxbw_kbps}).
+    pub fn kbps(&self) -> u32 {
+        (self.mbps * 1000.0).round() as u32
+    }
+
+    /// A value read from disk that is outside the range (edited by hand): the default instead.
+    pub fn sane(self) -> SendLimit {
+        let (lo, hi) = SEND_LIMIT_RANGE;
+        if (lo..=hi).contains(&self.mbps) {
+            self
+        } else {
+            SendLimit::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

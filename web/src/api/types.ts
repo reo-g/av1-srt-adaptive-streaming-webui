@@ -150,7 +150,8 @@ export type EventCode =
   | 'video_settings_applied'
   | 'transport_settings_applied'
   | 'passphrase_changed'
-  | 'network_test_done'; // params: mbps, direction (NetworkTestDirection). Only after a throughput test that finished
+  | 'network_test_done' // params: mbps (throughput_mbps, two decimals), direction (NetworkTestDirection). Only after a throughput test that finished
+  | 'send_limit_changed'; // tx; params: mbps, from_mbps, source (SendLimitSource: measured or manual)
 
 /**
  * Why the video bitrate changed (bitrate_changed.reason).
@@ -200,7 +201,10 @@ export type ImpactCode =
   | 'reconnect'
   | 'reconnect_gap' // params: gap_s
   | 'no_peer_effect'
-  | 'saved_while_stopped';
+  | 'saved_while_stopped'
+  // transport: only send_limit changes while the link is not stopped. Stored now, used from the next
+  // start (the running transmission and its retries keep their cap)
+  | 'takes_effect_next_start';
 
 export interface Impact {
   level: 'warn' | 'ok' | 'info';
@@ -227,6 +231,8 @@ export type ApiErrorCode =
   | 'busy'
   | 'not_found'
   | 'unsupported_role'
+  // POST /network-tests/{id}/use
+  | 'not_applicable' // 409: the test is not a finished throughput test towards the peer
   // POST /preview/sessions
   | 'not_live' // 409: the preview exists only while the link is live
   | 'too_many_viewers' // 429: other screens are already watching (the device limits the number)
@@ -309,6 +315,25 @@ export interface VideoOptions {
 export type TransportMode = 'outbound' | 'inbound' | 'mutual'; // 送信機から接続 / 接続を待つ / 互いに接続
 export type Cipher = 'aes-128' | 'aes-192' | 'aes-256' | 'none';
 
+/**
+ * Where the send cap comes from.
+ * default   the device's initial value (5.0 Mbps)
+ * measured  a line-speed test (POST /network-tests/{id}/use)
+ * manual    entered in the transport settings
+ */
+export type SendLimitSource = 'default' | 'measured' | 'manual';
+
+/**
+ * 送り出しの上限: the most the transmitter puts on the line. The device starts each transmission
+ * with it and lowers its pace below it on its own while the line is crowded.
+ */
+export interface SendLimit {
+  mbps: number; // 1.0–20.0, two decimals
+  source: SendLimitSource;
+  measured_at: string | null; // measured: when the test finished; otherwise null
+  test_id: string | null; // measured: the test it came from; otherwise null
+}
+
 export interface TransportSettings {
   version: number;
   mode: TransportMode;
@@ -320,6 +345,7 @@ export interface TransportSettings {
     passphrase_set: boolean; // the value itself is never returned
     passphrase_rejected_at: string | null; // the peer rejected the current value
   };
+  send_limit: SendLimit;
 }
 
 export interface TransportSettingsInput {
@@ -333,6 +359,11 @@ export interface TransportSettingsInput {
     /** Write only. Omit to keep the current value. */
     passphrase?: string;
   };
+  /**
+   * Omit to keep the current value. A new value becomes source "manual"; the same value keeps its source.
+   * Can be applied while live on its own (impact takes_effect_next_start): the next start uses it.
+   */
+  send_limit?: { mbps: number };
 }
 
 /** What can be chosen. A control with a single choice is shown as text. */
@@ -376,17 +407,13 @@ export type NetworkTestKind = 'reachability' | 'throughput';
 export type NetworkTestDirection = 'to_peer' | 'from_peer';
 
 /**
- * max     いちばん速く送れる速さを測る: the upper limit of the line
- * steady  決めた速さで送って、損失と揺らぎを見る: send at rate_mbps and see whether it gets through
+ * POST /network-tests. Fields other than kind apply to throughput only; omitted ones take the defaults.
+ * The throughput test sends more than the line can carry (NetworkTestOptions.saturate_mbps) and
+ * measures what arrives.
  */
-export type NetworkTestMode = 'max' | 'steady';
-
-/** POST /network-tests. Fields other than kind apply to throughput only; omitted ones take the defaults. */
 export interface NetworkTestRequest {
   kind: NetworkTestKind;
   direction?: NetworkTestDirection; // default to_peer
-  mode?: NetworkTestMode; // default max
-  rate_mbps?: number; // steady only; NetworkTestOptions.rate_range_mbps (1–20), default NetworkTestOptions.steady_rate_mbps
   duration_s?: number; // integer, NetworkTestOptions.duration_range_s (5–30), default 10
 }
 
@@ -394,16 +421,14 @@ export interface NetworkTestRequest {
 export interface NetworkTestParams {
   kind: NetworkTestKind;
   direction: NetworkTestDirection | null; // null for reachability
-  mode: NetworkTestMode | null; // null for reachability
-  rate_mbps: number | null; // steady only
   duration_s: number | null; // null for reachability
 }
 
-/** GET /network-tests/options: limits and defaults of the throughput test. */
+/** GET /network-tests/options: limits of the throughput test. */
 export interface NetworkTestOptions {
-  steady_rate_mbps: number; // default rate of the steady mode, e.g. 6
-  rate_range_mbps: [number, number]; // [1, 20]
   duration_range_s: [number, number]; // [5, 30]
+  /** What the throughput test sends, Mbps, e.g. 6 (set on the device, not from the UI). */
+  saturate_mbps: number;
 }
 
 export interface ReachabilityTarget {
@@ -427,14 +452,22 @@ export interface ReachabilityResult {
   targets: ReachabilityTarget[];
 }
 
+/**
+ * The test sends at about NetworkTestOptions.saturate_mbps, more than the line can carry: what
+ * arrives is the line's speed. Losses are expected and not a fault.
+ */
 export interface ThroughputResult {
-  /** What got through, Mbps (as received). While running: the mean of the seconds so far. */
+  /** 届いた速さ: what arrived at the receiving side, Mbps. */
   throughput_mbps: number;
-  loss_pct: number | null; // steady only
-  jitter_ms: number | null; // steady only: variation of the delay
-  retransmits: number | null; // max only: data sent again
-  rtt_ms: number | null; // max only, when the device could measure it
-  per_second_mbps: number[]; // one value per second, oldest first
+  sent_mbps: number; // what was sent, Mbps
+  loss_pct: number; // share of what was sent that did not arrive
+  jitter_ms: number; // variation of the delay
+  /**
+   * true (loss_pct ≥ 1): the line was full and throughput_mbps is its speed. false: the line is
+   * faster than the test; the UI says "at least saturate_mbps".
+   */
+  saturated: boolean;
+  per_second_mbps: number[]; // what arrived in each second, oldest first
 }
 
 /**
@@ -455,9 +488,7 @@ interface NetworkTestBase {
 
 /**
  * One test (POST /network-tests, GET /network-tests[/{id}]).
- * result: null while running and when failed, except that a running throughput test fills it in
- * from its first measured second on (per_second_mbps so far; loss, jitter, retransmits and rtt
- * stay null until it is done).
+ * result: null while running (follow `progress`) and when failed.
  */
 export type NetworkTest =
   | (NetworkTestBase & { kind: 'reachability'; request: NetworkTestParams; result: ReachabilityResult | null })
@@ -467,3 +498,11 @@ export type NetworkTest =
 export interface NetworkTestList {
   items: NetworkTest[];
 }
+
+/*
+ * POST /network-tests/{id}/use (tx): makes a finished throughput test towards the peer the send cap
+ * (TransportSettings.send_limit = its throughput_mbps, or saturate_mbps when not saturated, with
+ * source "measured"), bumps the transport settings version and answers the new TransportSettings.
+ * The next start uses it (also when used while live). Errors: 409 unsupported_role (rx),
+ * 404 not_found, 409 not_applicable (not done, not throughput, or not to_peer).
+ */

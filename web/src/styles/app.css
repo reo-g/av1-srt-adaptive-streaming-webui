@@ -1183,14 +1183,6 @@ a:hover {
   align-self: flex-start;
   margin-top: 6px;
 }
-.nt-choice-hint {
-  display: block;
-  font-size: 13px;
-  color: var(--sub);
-}
-.nt-select {
-  min-width: 120px;
-}
 .nt-result {
   margin-top: 20px;
 }
@@ -1211,6 +1203,46 @@ a:hover {
 .nt-verdict {
   font-size: 16px;
   font-weight: 600;
+}
+/* "6 Mbps 以上": the line took everything the test sent */
+.readout-value b.nt-atleast {
+  font-size: 30px;
+}
+.nt-note {
+  max-width: 640px;
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: var(--sub);
+}
+/* make a result the send cap */
+.nt-use {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 24px;
+  max-width: 720px;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--accent-tint);
+}
+.nt-use p {
+  flex: 1 1 280px;
+  margin: 0;
+}
+.nt-used {
+  font-weight: 600;
+  color: var(--ok);
+}
+.nt-sum {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+.nt-sum .chip-outline {
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------ full screen */

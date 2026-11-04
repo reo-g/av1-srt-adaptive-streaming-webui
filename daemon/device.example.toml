@@ -54,16 +54,17 @@ enabled = true
 # answer_timeout_s = 10
 
 # Network tests from the UI: つながりの確認 (echo to the peer and the hops below, both roles, also
-# while live) and 回線の速さ (tx only, while stopped: the bandwidth tool's client on tx to its server
-# on rx). The receiver runs the server on `port`, TCP and UDP: allow both between the two devices.
-# See src/nettest.rs.
+# while live) and 回線の速さ (tx only, while stopped: the bandwidth tool's client on tx sends UDP to
+# its server on rx at saturate_mbps, more than the line carries, and what arrives is the line's
+# speed; the UI can make it the send cap). The receiver runs the server on `port`: allow UDP (the
+# test) and TCP (the tool's control connection) on it between the two devices. See src/nettest.rs.
 [network_test]
 enabled = true
 port = 60022
 # server = false               # run the bandwidth tool's server here (default: true on rx, false on tx)
 # iperf = "iperf3"             # program paths (a bare name is looked up in PATH)
 # ping = "ping"
-# steady_rate_mbps = 6         # the steady mode's rate when the request names none (1–20)
+# saturate_mbps = 6            # what 回線の速さ sends, Mbps (2–50): set it above the line's speed
 
 # Devices on the way to the peer (e.g. the radios of a wireless link), checked after the peer in
 # this order; the label is shown in the UI as it is.
@@ -88,7 +89,9 @@ address = "192.168.0.56"
 [profile.receiver_env]
 
 # [profile]
-# sender_args = ["-", "{peer_host}", "{peer_port}", "8000", "live", "10000", "5000"]
+# {maxbw_kbps} is the send cap of the transport settings (送り出しの上限, default 5.0 Mbps); a number
+# there instead fixes the cap and the setting is not used.
+# sender_args = ["-", "{peer_host}", "{peer_port}", "8000", "live", "10000", "{maxbw_kbps}"]
 # receiver_args = ["{out}", "{listen_port}", "8000"]
 # player_args = ["--out", "/dev/null", "--dec", "vaav1dec", "--ts-offset-ms", "7000", "--no-record", "--stats-fd", "4"]
 # delay_target_ms = 9500

@@ -10,7 +10,7 @@ use crate::config::Role;
 use crate::events::Ev;
 use crate::history::INTERVAL_S;
 use crate::media;
-use crate::model::{DelayProfile, LinkState, TransportStored, SIGNAL_FORMAT};
+use crate::model::{DelayProfile, LimitSource, LinkState, SendLimit, TransportStored, SIGNAL_FORMAT};
 use crate::nettest;
 use crate::preview::{Refusal, OFFER_LIMIT};
 use crate::util::{iso_jst, now_ms};
@@ -129,6 +129,13 @@ async fn api(State(app): State<Arc<App>>, method: Method, uri: Uri, body: Result
 
 /// The network tests (nettest.rs). POST answers at once with the running test.
 fn network_tests(app: &Arc<App>, method: &str, path: &str, body: &Bytes) -> Response {
+    let use_id = path
+        .strip_prefix("/network-tests/")
+        .and_then(|p| p.strip_suffix("/use"))
+        .filter(|id| !id.is_empty() && !id.contains('/'));
+    if let (Some(id), "POST") = (use_id, method) {
+        return use_test(app, id);
+    }
     match (method, path) {
         ("POST", "/network-tests") => {
             let Some(v) = body_json(body) else { return bad_body() };
@@ -149,6 +156,39 @@ fn network_tests(app: &Arc<App>, method: &str, path: &str, body: &Bytes) -> Resp
         },
         _ => not_found(),
     }
+}
+
+/// POST /network-tests/{id}/use (tx): a finished test towards the peer becomes the send cap. Stored
+/// now, also while live: the next transmission starts with it (the running one keeps its cap).
+fn use_test(app: &App, id: &str) -> Response {
+    if app.cfg.role != Role::Tx {
+        return error(StatusCode::CONFLICT, "unsupported_role");
+    }
+    // the book's lock is released before the settings' (never both at once)
+    let (mbps, at) = match app.nettest.send_limit_from(id) {
+        Ok(v) => v,
+        Err(nettest::UseRefusal::NotFound) => return not_found(),
+        Err(nettest::UseRefusal::NotApplicable) => return error(StatusCode::CONFLICT, "not_applicable"),
+    };
+    let limit = SendLimit { mbps, source: LimitSource::Measured, measured_at: Some(at), test_id: Some(id.to_string()) };
+    let mut i = app.lock();
+    let mut next = i.settings.clone();
+    let from = std::mem::replace(&mut next.transport.send_limit, limit);
+    next.transport.version += 1;
+    if let Err(e) = app.save_settings(&next) {
+        dlog!("settings: cannot save: {e}");
+    }
+    i.settings = next;
+    dlog!("send cap {mbps} Mbps from network test {id} (was {} Mbps, {})", from.mbps, from.source.name());
+    send_limit_changed(app, &mut i, &from);
+    app.send(&json!({ "type": "settings", "section": "transport", "version": i.settings.transport.version }));
+    ok(&transport_view(&i.settings.transport))
+}
+
+fn send_limit_changed(app: &App, i: &mut Inner, from: &SendLimit) {
+    let l = &i.settings.transport.send_limit;
+    let ev = Ev::info("send_limit_changed").with(json!({ "mbps": l.mbps, "from_mbps": from.mbps, "source": l.source }));
+    app.emit(i, ev);
 }
 
 /// Everything except the commands: answered from the current snapshot, without waiting.
@@ -307,6 +347,7 @@ fn transport_view(t: &TransportStored) -> Value {
         "listen_port": t.listen_port,
         "delay": { "profile": t.delay },
         "encryption": { "cipher": t.cipher, "passphrase_set": false, "passphrase_rejected_at": null },
+        "send_limit": t.send_limit,
     })
 }
 
@@ -362,6 +403,8 @@ fn put_video(app: &App, body: &Bytes) -> Response {
     ok(&json!({ "settings": video_view(app, &i), "applied_at": iso_jst(now_ms()), "impacts": result.impacts }))
 }
 
+/// As put_video, except that a change of the send cap alone is also applied while the link runs
+/// (stored now; the running transmission keeps the cap it started with).
 fn put_transport(app: &App, body: &Bytes) -> Response {
     let Some(v) = body_json(body) else { return bad_body() };
     let d = TransportDraft::parse(&v);
@@ -370,7 +413,8 @@ fn put_transport(app: &App, body: &Bytes) -> Response {
     if d.version != Some(i.settings.transport.version as f64) {
         return error(StatusCode::CONFLICT, "version_conflict");
     }
-    if i.link.state != LinkState::Stopped {
+    // while running, a change of the send cap alone is stored (the next start uses it)
+    if i.link.state != LinkState::Stopped && !d.only_send_limit(&i.settings.transport) {
         return error(StatusCode::CONFLICT, "busy");
     }
     let result = check_transport(&d, &transport_ctx(&i, &profiles));
@@ -382,9 +426,16 @@ fn put_transport(app: &App, body: &Bytes) -> Response {
     if let Err(e) = app.save_settings(&next) {
         dlog!("settings: cannot save: {e}");
     }
-    i.settings = next;
+    let only_limit = d.only_send_limit(&i.settings.transport);
+    let from = std::mem::replace(&mut i.settings, next).transport.send_limit;
     dlog!("transport settings {:?}", i.settings.transport);
-    app.emit(&mut i, Ev::info("transport_settings_applied"));
+    // a change of the cap alone has its own event only (as the mock)
+    if !only_limit {
+        app.emit(&mut i, Ev::info("transport_settings_applied"));
+    }
+    if i.settings.transport.send_limit != from {
+        send_limit_changed(app, &mut i, &from);
+    }
     app.send(&json!({ "type": "settings", "section": "transport", "version": i.settings.transport.version }));
     app.push_status(&i);
     ok(&json!({ "settings": transport_view(&i.settings.transport), "applied_at": iso_jst(now_ms()), "impacts": result.impacts }))
@@ -564,15 +615,10 @@ mod tests {
         assert_eq!(h[CACHE_CONTROL], "no-store");
         let (s, _, v) = call(&app, Method::POST, "/api/v1/network-tests", "").await;
         assert_eq!((s, &v["error"]["errors"]), (StatusCode::BAD_REQUEST, &json!([{ "field": "kind", "code": "required" }])));
+        // the old modes' fields are ignored
         let (s, _, v) = post(json!({ "kind": "throughput", "mode": "steady", "rate_mbps": 0, "duration_s": 3 })).await;
         assert_eq!(s, StatusCode::BAD_REQUEST);
-        assert_eq!(
-            v["error"]["errors"],
-            json!([
-                { "field": "rate_mbps", "code": "out_of_range", "params": { "min": 1.0, "max": 20.0 } },
-                { "field": "duration_s", "code": "out_of_range", "params": { "min": 5, "max": 30 } },
-            ])
-        );
+        assert_eq!(v["error"]["errors"], json!([{ "field": "duration_s", "code": "out_of_range", "params": { "min": 5, "max": 30 } }]));
         let (s, _, v) = post(json!({ "kind": "throughput" })).await;
         assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "busy"), "the link is live");
 
@@ -598,7 +644,8 @@ mod tests {
         app.lock().settings.transport.peer_host = "slow-10.0.0.2".into();
         let (s, _, v) = post(json!({ "kind": "throughput", "direction": "from_peer", "duration_s": 5 })).await;
         assert_eq!(s, StatusCode::ACCEPTED, "{v}");
-        assert_eq!(v["request"], json!({ "kind": "throughput", "direction": "from_peer", "mode": "max", "rate_mbps": null, "duration_s": 5 }));
+        assert_eq!(v["request"], json!({ "kind": "throughput", "direction": "from_peer", "duration_s": 5 }));
+        assert_eq!(v["result"], Value::Null);
         let id = v["id"].as_str().unwrap().to_string();
         let (s, _, v) = post(json!({ "kind": "throughput" })).await;
         assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "busy"));
@@ -618,16 +665,168 @@ mod tests {
         assert_eq!((s, kinds), (StatusCode::OK, vec!["reachability", "throughput", "reachability"]));
         assert_eq!(v["items"][1]["id"], id.as_str());
         let r = &v["items"][1]["result"];
-        assert_eq!((r["rtt_ms"].clone(), r["retransmits"].clone()), (Value::Null, json!(0)), "{r}");
-        assert_eq!(r["per_second_mbps"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            r,
+            &json!({ "throughput_mbps": 6.0, "sent_mbps": 6.0, "loss_pct": 0.0, "jitter_ms": 0.0, "saturated": false, "per_second_mbps": [6.01, 6.0, 6.0] })
+        );
         assert_eq!(app.lock().events.latest(1)[0].params["direction"], "from_peer");
         let (s, _, v) = call(&app, Method::GET, "/api/v1/network-tests/options", "").await;
-        assert_eq!((s, v), (StatusCode::OK, json!({ "steady_rate_mbps": 6.0, "rate_range_mbps": [1.0, 20.0], "duration_range_s": [5, 30] })));
+        assert_eq!((s, v), (StatusCode::OK, json!({ "duration_range_s": [5, 30], "saturate_mbps": 6.0 })));
         for p in ["/api/v1/network-tests/nope", "/api/v1/network-tests/"] {
             let (s, _, v) = call(&app, Method::GET, p, "").await;
             assert_eq!((s, code(&v)), (StatusCode::NOT_FOUND, "not_found"), "{p}");
         }
         assert_eq!(call(&app, Method::DELETE, &format!("/api/v1/network-tests/{id}"), "").await.0, StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_measured_speed_becomes_the_send_cap() {
+        use crate::config::Role;
+        use crate::nettest::{stub_app, wait_done};
+        let (app, dir) = stub_app("http-use", Role::Tx, LinkState::Stopped, "");
+        let post = |path: String| {
+            let app = app.clone();
+            async move { call(&app, Method::POST, &path, "").await }
+        };
+        let test = |body: Value| {
+            let app = app.clone();
+            async move {
+                let (s, _, v) = call(&app, Method::POST, "/api/v1/network-tests", body.to_string()).await;
+                assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+                wait_done(&app, v["id"].as_str().unwrap()).await.id
+            }
+        };
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        assert_eq!((s, &v["send_limit"]), (StatusCode::OK, &json!({ "mbps": 5.0, "source": "default", "measured_at": null, "test_id": null })));
+        assert_eq!(v["version"], 1);
+
+        // what cannot be used
+        let (s, _, v) = post("/api/v1/network-tests/nope/use".into()).await;
+        assert_eq!((s, code(&v)), (StatusCode::NOT_FOUND, "not_found"));
+        let reach = test(json!({ "kind": "reachability" })).await;
+        let back = test(json!({ "kind": "throughput", "direction": "from_peer" })).await;
+        app.lock().settings.transport.peer_host = "refused.example".into();
+        let failed = test(json!({ "kind": "throughput" })).await;
+        for id in [&reach, &back, &failed] {
+            let (s, _, v) = post(format!("/api/v1/network-tests/{id}/use")).await;
+            assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "not_applicable"), "{id}");
+        }
+        assert_eq!(call(&app, Method::GET, &format!("/api/v1/network-tests/{back}/use"), "").await.0, StatusCode::NOT_FOUND);
+
+        // a full line towards the receiver, used while live: stored now, for the next start
+        app.lock().settings.transport.peer_host = "lossy-10.0.0.2".into();
+        let full = test(json!({ "kind": "throughput" })).await;
+        let finished_at = app.nettest.get(&full).unwrap().finished_at.unwrap();
+        app.lock().link.state = LinkState::Live;
+        let (s, h, v) = post(format!("/api/v1/network-tests/{full}/use")).await;
+        assert_eq!((s, &h[CACHE_CONTROL]), (StatusCode::OK, &"no-store".parse::<axum::http::HeaderValue>().unwrap()));
+        assert_eq!(v["send_limit"], json!({ "mbps": 5.26, "source": "measured", "measured_at": finished_at, "test_id": full }));
+        assert_eq!((v["version"].clone(), v["peer"]["host"].clone()), (json!(2), json!("lossy-10.0.0.2")), "the rest as it was");
+        let ev = app.lock().events.latest(1);
+        assert_eq!((ev[0].code, Value::Object(ev[0].params.clone())), ("send_limit_changed", json!({ "mbps": 5.26, "from_mbps": 5.0, "source": "measured" })));
+        let (_, _, now) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        assert_eq!(now, v);
+        // the next start's sender gets it
+        let plan = app.plan(&app.lock());
+        assert_eq!(plan.maxbw_kbps, 5260);
+        let spec = crate::profile::sender(&app.cfg, &app.prof, &plan, &dir);
+        assert_eq!(spec.args.last().map(String::as_str), Some("5260"));
+
+        // kept across a restart
+        let saved = crate::store::load(&dir.join("settings.json")).unwrap();
+        assert_eq!(serde_json::to_value(&saved.transport.send_limit).unwrap(), v["send_limit"]);
+        let again = crate::app::test_app_with(
+            app.cfg.clone(),
+            Preview::start(None),
+            LinkState::Stopped,
+            crate::nettest::NetTests::new(&app.cfg, crate::nettest::Server::start(None)),
+        );
+        let (_, _, after) = call(&again, Method::GET, "/api/v1/settings/transport", "").await;
+        assert_eq!(after, v);
+        assert_eq!(again.plan(&again.lock()).maxbw_kbps, 5260);
+
+        // a line faster than the test: the test's rate
+        app.lock().link.state = LinkState::Stopped;
+        app.lock().settings.transport.peer_host = "10.0.0.2".into();
+        let free = test(json!({ "kind": "throughput" })).await;
+        let (s, _, v) = post(format!("/api/v1/network-tests/{free}/use")).await;
+        assert_eq!((s, &v["send_limit"]["mbps"], &v["version"]), (StatusCode::OK, &json!(6.0), &json!(3)));
+        assert_eq!(app.lock().events.latest(1)[0].params["from_mbps"], 5.26);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // the receiver has no send cap
+        let (app, dir) = stub_app("http-use-rx", Role::Rx, LinkState::Listening, "");
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/network-tests/nope/use", "").await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "unsupported_role"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_send_cap_in_the_transport_settings() {
+        use crate::config::Role;
+        let (app, dir) = crate::nettest::stub_app("http-limit", Role::Tx, LinkState::Live, "");
+        let (_, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        // the screen sends the applied values back
+        let draft = |limit: Option<f64>| {
+            let mut v = json!({ "version": view["version"], "mode": view["mode"], "peer": view["peer"], "listen_port": view["listen_port"],
+                                "delay": view["delay"], "encryption": { "cipher": view["encryption"]["cipher"] } });
+            if let Some(m) = limit {
+                v["send_limit"] = json!({ "mbps": m });
+            }
+            v
+        };
+        let check = |body: Value| call(&app, Method::POST, "/api/v1/settings/transport/check", body.to_string());
+        let put = |body: Value| call(&app, Method::PUT, "/api/v1/settings/transport", body.to_string());
+        let (_, _, v) = check(draft(Some(5.6))).await;
+        assert_eq!(v, json!({ "ok": true, "errors": [], "impacts": [{ "level": "info", "code": "takes_effect_next_start" }] }));
+        let (_, _, v) = check(draft(Some(25.0))).await;
+        assert_eq!(v["errors"], json!([{ "field": "send_limit.mbps", "code": "out_of_range", "params": { "min": 1.0, "max": 20.0 } }]));
+
+        // while live: the cap alone is applied, anything else waits for a stop
+        let mut other = draft(Some(5.6));
+        other["peer"]["host"] = json!("10.0.0.3");
+        let (s, _, v) = put(other).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "busy"));
+        let (s, _, v) = put(draft(None)).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "busy"), "nothing to apply while live");
+        let (s, _, v) = put(draft(Some(25.0))).await;
+        assert_eq!((s, code(&v)), (StatusCode::BAD_REQUEST, "invalid"));
+        let (s, _, v) = put(draft(Some(5.555))).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["settings"]["send_limit"], json!({ "mbps": 5.56, "source": "manual", "measured_at": null, "test_id": null }));
+        assert_eq!((v["settings"]["version"].clone(), v["impacts"].clone()), (json!(2), json!([{ "level": "info", "code": "takes_effect_next_start" }])));
+        let codes: Vec<&str> = app.lock().events.latest(5).iter().map(|e| e.code).collect();
+        assert_eq!(codes, ["send_limit_changed"], "only its own event");
+        assert_eq!(
+            Value::Object(app.lock().events.latest(1)[0].params.clone()),
+            json!({ "mbps": 5.56, "from_mbps": 5.0, "source": "manual" })
+        );
+        assert_eq!(crate::store::load(&dir.join("settings.json")).unwrap().transport.send_limit.mbps, 5.56);
+        let (s, _, v) = put(draft(Some(5.6))).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "version_conflict"));
+
+        // stopped: everything, and the same cap keeps where it came from
+        app.lock().link.state = LinkState::Stopped;
+        let (_, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        let mut body = json!({ "version": view["version"], "mode": "outbound", "peer": { "host": "10.0.0.3", "port": 60021 },
+                               "listen_port": view["listen_port"], "delay": { "profile": "standard" }, "encryption": { "cipher": "none" },
+                               "send_limit": { "mbps": 5.56 } });
+        let (s, _, v) = put(body.clone()).await;
+        assert_eq!((s, &v["settings"]["send_limit"]["source"], &v["settings"]["peer"]["host"]), (StatusCode::OK, &json!("manual"), &json!("10.0.0.3")));
+        assert_eq!(app.lock().events.latest(1)[0].code, "transport_settings_applied");
+        // the peer and the cap together: both events
+        body["version"] = v["settings"]["version"].clone();
+        body["peer"]["host"] = json!("10.0.0.4");
+        body["send_limit"]["mbps"] = json!(4.0);
+        let (s, _, v) = put(body.clone()).await;
+        assert_eq!((s, &v["settings"]["send_limit"]["mbps"]), (StatusCode::OK, &json!(4.0)));
+        let codes: Vec<&str> = app.lock().events.latest(2).iter().map(|e| e.code).collect();
+        assert_eq!(codes, ["send_limit_changed", "transport_settings_applied"]);
+        body["version"] = v["settings"]["version"].clone();
+        body.as_object_mut().unwrap().remove("send_limit");
+        let (s, _, v) = put(body).await;
+        assert_eq!((s, &v["settings"]["send_limit"]["mbps"]), (StatusCode::OK, &json!(4.0)), "left out: kept");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

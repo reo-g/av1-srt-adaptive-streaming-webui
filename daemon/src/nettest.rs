@@ -7,31 +7,41 @@
 //!   with LC_ALL=C (about 3 s). Its summary lines give the packets sent and received and the
 //!   round-trip times. A run that prints no summary (unknown host, no route) or does not end in
 //!   `ping_timeout` counts as nothing back.
-//! throughput (tx only, link stopped, one at a time): the bandwidth tool's client
-//!   (`network_test.iperf`) to its server on the receiver: `-c <peer> -p <port> -t <dur> -i 1
-//!   --json-stream --forceflush --connect-timeout 3000 [-R] [-u -b <rate>M]`. Its stdout has one
-//!   JSON object a line (`start`, `interval`, `end`, `error`). The client gets SIGTERM `duration
-//!   + 10 s` after it started (it then tells the server it is leaving) and SIGKILL 2 s later.
+//! throughput (tx only, link stopped, one at a time): one saturation test. The video travels in
+//!   UDP, so the test does too: the bandwidth tool's client (`network_test.iperf`) sends to its
+//!   server on the receiver at more than the line carries (`network_test.saturate_mbps`, default
+//!   6), in datagrams of the video's packet payload, and what arrives is the line's speed:
+//!   `-c <peer> -p <port> -u -b <saturate>M -l 1316 -t <dur> -i 1 --json-stream --forceflush
+//!   --get-server-output --connect-timeout 3000 [-R]` (the tool's control connection is TCP on the
+//!   same port). Its stdout has one JSON object a line (`start`, `interval`, `server_output_*`,
+//!   `end`, `error`). The client gets SIGTERM `duration + 10 s` after it started (it then tells
+//!   the server it is leaving) and SIGKILL 2 s later. A test that lost SATURATED_LOSS_PCT or more
+//!   filled the line (`saturated`); otherwise the line is faster than the test.
 //! The receiver runs the tool's server (`-s -p <port>`) as a long-lived child (`Server`): its own
 //!   process group with PDEATHSIG, stdout and stderr into run_dir/nettest-server.log, started
 //!   again with a backoff when it exits, stopped on shutdown. It never looks at the link.
 //!
 //! Where the tool puts which numbers (iperf3 3.18, checked on localhost; the captures are
-//! tests/fixtures/iperf3_*.jsonl):
-//! - `interval` lines are measured by the client: the sending side without -R (TCP with
-//!   retransmits, UDP only the sending rate), the receiving side with -R (UDP with loss and jitter).
-//! - TCP: `end.sum_received.bits_per_second` is what arrived, in both directions;
-//!   `end.sum_sent.retransmits` the sender's (with -R as the server reported them);
-//!   `end.streams[].sender.mean_rtt` (µs) only without -R (0 with -R: not measured).
-//! - UDP: `end.sum.bits_per_second` is the *sending* rate (the tool itself calls `sum` ambiguous);
-//!   `end.sum_received` has the rate that arrived, `lost_percent` and `jitter_ms`, measured by the
-//!   receiver in both directions. `end.sum` is the fallback for a tool without `sum_received`.
+//! tests/fixtures/iperf3_udp*.jsonl):
+//! - `interval` lines are measured by the client: without -R the sending side (only the rate
+//!   sent), with -R the receiving side (the rate that arrived, loss, jitter).
+//! - `--get-server-output` adds one line before `end` with the server's own report of the test:
+//!   `server_output_text` (the server in its normal text mode, as the receiver runs it: the
+//!   per-second lines `[  5]   0.00-1.00   sec   734 KBytes  6.01 Mbits/sec  0.001 ms  0/571 (0%)`
+//!   up to a `- - -` line and the summary) or `server_output_json` (a server started with -J:
+//!   `intervals[].sum`). Without -R these are the receiving side's seconds.
+//! - `end.sum_received` has the rate that arrived, `lost_percent` and `jitter_ms`, measured by the
+//!   receiver in both directions; `end.sum_sent.bits_per_second` is the rate sent. `end.sum` is
+//!   ambiguous (the sending rate with the receiver's loss and jitter): only a fallback.
+//! - So per_second_mbps (what arrived each second) is the server's report without -R and the
+//!   client's own intervals with -R. While the test runs only `progress` moves (the client's
+//!   seconds so far / duration); the result comes with the end.
 
 use crate::app::App;
 use crate::config::{address_ok, Config, Hop, Role};
 use crate::events::Ev;
 use crate::media;
-use crate::model::{params, FieldError, LinkState};
+use crate::model::{params, FieldError, LinkState, SEND_LIMIT_RANGE};
 use crate::profile::{Env, Spec};
 use crate::util::{iso_jst, now_ms, round};
 use serde::Serialize;
@@ -48,9 +58,16 @@ use tokio::sync::{mpsc, oneshot};
 
 /// Tests kept for GET /network-tests (memory only).
 pub const HISTORY: usize = 20;
-pub const RATE_RANGE: (f64, f64) = (1.0, 20.0);
+/// network_test.saturate_mbps (device.toml only).
+pub const SATURATE_RANGE: (f64, f64) = (2.0, 50.0);
 pub const DURATION_RANGE: (u32, u32) = (5, 30);
 const DEFAULT_DURATION_S: u32 = 10;
+/// The video's packet payload (bytes, the sender's live mode): the test's datagrams are as large.
+const PAYLOAD: u32 = 1316;
+/// A test that lost this share (%) or more filled the line: what arrived is its speed.
+pub const SATURATED_LOSS_PCT: f64 = 1.0;
+/// A shorter interval (the last sliver of a test) says nothing about the line.
+const MIN_INTERVAL_S: f64 = 0.25;
 const PING_COUNT: u32 = 10;
 /// About how long one echo run takes (10 × 0.2 s, then up to 1 s for the last answer).
 const PING_EXPECT: Duration = Duration::from_millis(3000);
@@ -71,15 +88,6 @@ pub enum Direction {
     /// This device → the peer (on tx the video's direction).
     ToPeer,
     FromPeer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    /// The upper limit of the line (TCP).
-    Max,
-    /// A fixed rate, with loss and jitter (UDP).
-    Steady,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -107,15 +115,25 @@ pub enum Refusal {
     Busy,
 }
 
+/// Why POST /network-tests/{id}/use is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UseRefusal {
+    NotFound,
+    /// Not a finished throughput test towards the peer.
+    NotApplicable,
+}
+
 /// The request as it runs (the contract's NetworkTestParams): defaults filled in, null where a
 /// field does not apply.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Request {
     pub kind: TestKind,
     pub direction: Option<Direction>,
-    pub mode: Option<Mode>,
-    pub rate_mbps: Option<f64>,
     pub duration_s: Option<u32>,
+}
+
+impl Request {
+    const REACHABILITY: Request = Request { kind: TestKind::Reachability, direction: None, duration_s: None };
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -131,13 +149,17 @@ pub struct Target {
     pub rtt_max_ms: Option<f64>,
 }
 
+/// The contract's ThroughputResult.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Throughput {
+    /// 届いた速さ: the rate that arrived (end.sum_received).
     pub throughput_mbps: f64,
-    pub loss_pct: Option<f64>,
-    pub jitter_ms: Option<f64>,
-    pub retransmits: Option<i64>,
-    pub rtt_ms: Option<f64>,
+    pub sent_mbps: f64,
+    pub loss_pct: f64,
+    pub jitter_ms: f64,
+    /// loss_pct ≥ SATURATED_LOSS_PCT: the line was full and throughput_mbps is its speed.
+    pub saturated: bool,
+    /// What arrived in each second.
     pub per_second_mbps: Vec<f64>,
 }
 
@@ -192,8 +214,8 @@ fn fe(field: &'static str, code: &'static str, p: Value) -> FieldError {
 }
 
 /// A POST body, checked in the contract's order: kind → role → fields. Missing or null fields
-/// take the defaults; rate_mbps is read only in the steady mode.
-pub fn parse(v: &Value, role: Role, enabled: bool, default_rate: f64) -> Result<Request, Refusal> {
+/// take the defaults; fields of the old modes (mode, rate_mbps) are ignored.
+pub fn parse(v: &Value, role: Role, enabled: bool) -> Result<Request, Refusal> {
     let field = |k: &str| v.get(k).filter(|x| !x.is_null());
     let kind = match field("kind").map(Value::as_str) {
         Some(Some("reachability")) => TestKind::Reachability,
@@ -206,7 +228,7 @@ pub fn parse(v: &Value, role: Role, enabled: bool, default_rate: f64) -> Result<
         return Err(Refusal::UnsupportedRole);
     }
     if kind == TestKind::Reachability {
-        return Ok(Request { kind, direction: None, mode: None, rate_mbps: None, duration_s: None });
+        return Ok(Request::REACHABILITY);
     }
     let mut errors = Vec::new();
     let direction = match field("direction").map(Value::as_str) {
@@ -217,27 +239,6 @@ pub fn parse(v: &Value, role: Role, enabled: bool, default_rate: f64) -> Result<
             errors.push(fe("direction", "invalid", json!({})));
             None
         }
-    };
-    let mode = match field("mode").map(Value::as_str) {
-        None => Some(Mode::Max),
-        Some(Some("max")) => Some(Mode::Max),
-        Some(Some("steady")) => Some(Mode::Steady),
-        Some(_) => {
-            errors.push(fe("mode", "invalid", json!({})));
-            None
-        }
-    };
-    let (rmin, rmax) = RATE_RANGE;
-    let rate_mbps = match (mode, field("rate_mbps")) {
-        (Some(Mode::Steady), None) => Some(default_rate),
-        (Some(Mode::Steady), Some(r)) => match r.as_f64().filter(|r| (rmin..=rmax).contains(r)) {
-            Some(r) => Some(r),
-            None => {
-                errors.push(fe("rate_mbps", "out_of_range", json!({ "min": rmin, "max": rmax })));
-                None
-            }
-        },
-        _ => None,
     };
     let (dmin, dmax) = DURATION_RANGE;
     let duration_s = match field("duration_s") {
@@ -253,20 +254,18 @@ pub fn parse(v: &Value, role: Role, enabled: bool, default_rate: f64) -> Result<
     if !errors.is_empty() {
         return Err(Refusal::Invalid(errors));
     }
-    Ok(Request { kind, direction, mode, rate_mbps, duration_s })
+    Ok(Request { kind, direction, duration_s })
 }
 
-/// The client's command line (after the program).
-pub fn client_args(peer: &str, port: u16, r: &Request) -> Vec<String> {
+/// The client's command line (after the program): UDP at `saturate_mbps`.
+pub fn client_args(peer: &str, port: u16, saturate_mbps: f64, r: &Request) -> Vec<String> {
     let duration = r.duration_s.unwrap_or(DEFAULT_DURATION_S).to_string();
-    let mut a: Vec<String> = vec!["-c".into(), peer.into(), "-p".into(), port.to_string(), "-t".into(), duration];
-    a.extend(["-i", "1", "--json-stream", "--forceflush", "--connect-timeout", "3000"].map(String::from));
+    let mut a: Vec<String> = vec!["-c".into(), peer.into(), "-p".into(), port.to_string()];
+    a.extend(["-u".into(), "-b".into(), format!("{saturate_mbps}M"), "-l".into(), PAYLOAD.to_string()]);
+    a.extend(["-t".into(), duration]);
+    a.extend(["-i", "1", "--json-stream", "--forceflush", "--get-server-output", "--connect-timeout", "3000"].map(String::from));
     if r.direction == Some(Direction::FromPeer) {
         a.push("-R".into());
-    }
-    if r.mode == Some(Mode::Steady) {
-        let rate = r.rate_mbps.unwrap_or(RATE_RANGE.0);
-        a.extend(["-u".into(), "-b".into(), format!("{rate}M")]);
     }
     a
 }
@@ -316,23 +315,27 @@ pub fn parse_ping(out: &str) -> Option<PingSummary> {
 /// What the client's JSON-stream lines said so far.
 #[derive(Debug, Default)]
 pub struct Stream {
-    udp: bool,
+    /// -R: the client receives, so its own seconds are what arrived.
+    reverse: bool,
     /// A `start` line came: the client reached the server and the test began.
     pub connected: bool,
-    /// Seconds measured so far (the end of the last interval).
+    /// Seconds measured so far (the end of the client's last interval).
     pub elapsed_s: f64,
-    pub per_second: Vec<f64>,
+    /// The client's seconds: the rate sent without -R, the rate that arrived with -R.
+    pub client_seconds: Vec<f64>,
+    /// The server's seconds from its report (--get-server-output): what arrived without -R.
+    pub server_seconds: Vec<f64>,
     pub result: Option<Throughput>,
     /// The tool's own message from an `error` line.
     pub error: Option<String>,
 }
 
 impl Stream {
-    pub fn new(udp: bool) -> Stream {
-        Stream { udp, ..Stream::default() }
+    pub fn new(reverse: bool) -> Stream {
+        Stream { reverse, ..Stream::default() }
     }
 
-    /// One stdout line; true when it measured another second.
+    /// One stdout line; true when the client measured another second.
     pub fn line(&mut self, line: &str) -> bool {
         let Ok(v) = serde_json::from_str::<Value>(line) else { return false };
         let data = &v["data"];
@@ -346,15 +349,24 @@ impl Stream {
                 if let Some(end) = sum["end"].as_f64() {
                     self.elapsed_s = end;
                 }
-                // a last sliver of an interval (a few ms) says nothing about the line
-                let secs = sum["seconds"].as_f64().unwrap_or(0.0);
-                if let Some(bps) = sum["bits_per_second"].as_f64().filter(|_| secs >= 0.25) {
-                    self.per_second.push(round(bps / 1e6, 2));
+                if let Some(mbps) = interval_mbps(sum) {
+                    self.client_seconds.push(mbps);
                     return true;
                 }
             }
+            Some("server_output_text") => self.server_seconds = server_text_seconds(data.as_str().unwrap_or_default()),
+            Some("server_output_json") => {
+                self.server_seconds = data["intervals"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|iv| &iv["sum"])
+                    .filter(|sum| sum["omitted"].as_bool() != Some(true))
+                    .filter_map(interval_mbps)
+                    .collect()
+            }
             Some("end") => {
-                if let Some(r) = summary(data, self.udp) {
+                if let Some(r) = summary(data) {
                     self.result = Some(r);
                 }
             }
@@ -364,46 +376,94 @@ impl Stream {
         false
     }
 
-    /// While running: the seconds so far and their mean (the rest stays null until the end).
-    pub fn partial(&self) -> Option<Throughput> {
-        if self.per_second.is_empty() {
-            return None;
+    /// What arrived in each second: the server's report without -R, the client's own with -R.
+    pub fn received_seconds(&self) -> &[f64] {
+        if self.reverse {
+            &self.client_seconds
+        } else {
+            &self.server_seconds
         }
-        let mean = self.per_second.iter().sum::<f64>() / self.per_second.len() as f64;
-        Some(Throughput {
-            throughput_mbps: round(mean, 2),
-            per_second_mbps: self.per_second.clone(),
-            ..Throughput::default()
-        })
     }
 }
 
-/// The result from the `end` line (see the module comment for the fields).
-fn summary(end: &Value, udp: bool) -> Option<Throughput> {
-    let r2 = |v: &Value| v.as_f64().map(|x| round(x, 2));
-    if udp {
-        let s = if end["sum_received"].is_object() { &end["sum_received"] } else { &end["sum"] };
-        let bps = s["bits_per_second"].as_f64()?;
-        return Some(Throughput {
-            throughput_mbps: round(bps / 1e6, 2),
-            loss_pct: r2(&s["lost_percent"]),
-            jitter_ms: r2(&s["jitter_ms"]),
-            ..Throughput::default()
-        });
+/// Mbps of one JSON interval (`bits_per_second` over `seconds`); None for a last sliver.
+fn interval_mbps(sum: &Value) -> Option<f64> {
+    let secs = sum["seconds"].as_f64().unwrap_or(0.0);
+    sum["bits_per_second"].as_f64().filter(|_| secs >= MIN_INTERVAL_S).map(|bps| round(bps / 1e6, 2))
+}
+
+/// The per-second rates of the server's text report (iperf3 3.18 / 3.20), Mbps:
+///   [  5]   0.00-1.00   sec   734 KBytes  6.01 Mbits/sec  0.001 ms  0/571 (0%)
+///   [  5]   0.00-1.00   sec   734 KBytes  6.01 Mbits/sec  571            (the sending side)
+/// up to the `- - -` line before the summary; the `[SUM]` lines instead when there are several
+/// streams. Rates are in bits (K/M/G = 1000s); a last sliver of an interval is left out.
+pub fn server_text_seconds(text: &str) -> Vec<f64> {
+    let (mut streams, mut sums) = (Vec::new(), Vec::new());
+    for line in text.lines().map(str::trim) {
+        if line.starts_with("- -") {
+            break;
+        }
+        let Some((id, rest)) = line.strip_prefix('[').and_then(|l| l.split_once(']')) else { continue };
+        let id = id.trim();
+        let is_sum = id == "SUM";
+        if !is_sum && id.parse::<u32>().is_err() {
+            continue;
+        }
+        let t: Vec<&str> = rest.split_whitespace().collect();
+        if t.len() < 4 || t[1] != "sec" {
+            continue;
+        }
+        let Some((a, b)) = t[0].split_once('-') else { continue };
+        let (Ok(a), Ok(b)) = (a.parse::<f64>(), b.parse::<f64>()) else { continue };
+        let Some(i) = t.iter().position(|w| w.ends_with("bits/sec")).filter(|i| *i > 2) else { continue };
+        let scale = match t[i].strip_suffix("bits/sec") {
+            Some("") => 1.0,
+            Some("K") => 1e3,
+            Some("M") => 1e6,
+            Some("G") => 1e9,
+            Some("T") => 1e12,
+            _ => continue,
+        };
+        let Ok(rate) = t[i - 1].parse::<f64>() else { continue };
+        // the times have two decimals: 3.00-3.23 is a sliver of 0.23 s
+        if b - a + 1e-6 < MIN_INTERVAL_S {
+            continue;
+        }
+        let mbps = round(rate * scale / 1e6, 2);
+        if is_sum {
+            sums.push(mbps);
+        } else {
+            streams.push(mbps);
+        }
     }
-    let bps = end["sum_received"]["bits_per_second"].as_f64()?;
-    let rtts: Vec<f64> = end["streams"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|s| s["sender"]["mean_rtt"].as_f64())
-        .filter(|us| *us > 0.0)
-        .collect();
+    if sums.is_empty() {
+        streams
+    } else {
+        sums
+    }
+}
+
+/// The result from the `end` line (see the module comment for the fields); per_second_mbps is
+/// filled in by the caller.
+fn summary(end: &Value) -> Option<Throughput> {
+    let got = if end["sum_received"].is_object() { &end["sum_received"] } else { &end["sum"] };
+    let bps = got["bits_per_second"].as_f64()?;
+    let sent = end["sum_sent"]["bits_per_second"].as_f64().or_else(|| end["sum"]["bits_per_second"].as_f64()).unwrap_or(bps);
+    let loss = got["lost_percent"]
+        .as_f64()
+        .or_else(|| {
+            let (lost, all) = (got["lost_packets"].as_f64()?, got["packets"].as_f64()?);
+            (all > 0.0).then(|| 100.0 * lost / all)
+        })
+        .unwrap_or(0.0);
+    let loss_pct = round(loss, 2);
     Some(Throughput {
         throughput_mbps: round(bps / 1e6, 2),
-        retransmits: end["sum_sent"]["retransmits"].as_i64().filter(|n| *n >= 0),
-        rtt_ms: (!rtts.is_empty()).then(|| round(rtts.iter().sum::<f64>() / rtts.len() as f64 / 1000.0, 2)),
-        ..Throughput::default()
+        sent_mbps: round(sent / 1e6, 2),
+        loss_pct,
+        jitter_ms: round(got["jitter_ms"].as_f64().unwrap_or(0.0), 2),
+        saturated: loss_pct >= SATURATED_LOSS_PCT,
+        per_second_mbps: Vec::new(),
     })
 }
 
@@ -505,7 +565,7 @@ impl Drop for StartHold<'_> {
 pub struct NetTests {
     enabled: bool,
     port: u16,
-    steady_rate_mbps: f64,
+    saturate_mbps: f64,
     hops: Vec<Hop>,
     rx_peer: Option<String>,
     /// The programs: args empty (made per run), the environment with LC_ALL=C, cwd run_dir.
@@ -531,7 +591,7 @@ impl NetTests {
         NetTests {
             enabled: n.enabled,
             port: n.port,
-            steady_rate_mbps: n.steady_rate_mbps,
+            saturate_mbps: n.saturate_mbps,
             hops: n.hops.clone(),
             rx_peer: cfg.rx.peer_host.clone(),
             ping: program(cfg, &n.ping, Vec::new()),
@@ -550,10 +610,25 @@ impl NetTests {
     /// GET /network-tests/options
     pub fn options(&self) -> Value {
         json!({
-            "steady_rate_mbps": self.steady_rate_mbps,
-            "rate_range_mbps": [RATE_RANGE.0, RATE_RANGE.1],
             "duration_range_s": [DURATION_RANGE.0, DURATION_RANGE.1],
+            "saturate_mbps": self.saturate_mbps,
         })
+    }
+
+    /// POST /network-tests/{id}/use: the send cap a finished throughput test towards the peer
+    /// gives, and when it finished. A test that did not fill the line says only that the line
+    /// carries the test's rate: then that rate. Kept within the send cap's range.
+    pub fn send_limit_from(&self, id: &str) -> Result<(f64, String), UseRefusal> {
+        let book = self.book();
+        let t = &book.items.iter().find(|r| r.t.id == id).ok_or(UseRefusal::NotFound)?.t;
+        match (t.kind, t.state, t.request.direction, &t.result, &t.finished_at) {
+            (TestKind::Throughput, TestState::Done, Some(Direction::ToPeer), Some(Outcome::Throughput(r)), Some(at)) => {
+                let mbps = if r.saturated { r.throughput_mbps } else { self.saturate_mbps };
+                let (lo, hi) = SEND_LIMIT_RANGE;
+                Ok((round(mbps, 2).clamp(lo, hi), at.clone()))
+            }
+            _ => Err(UseRefusal::NotApplicable),
+        }
     }
 
     /// Newest first.
@@ -627,7 +702,7 @@ impl Aim {
 /// POST /network-tests: checks the request and the busy rules, keeps the test and starts it.
 pub fn start(app: &Arc<App>, body: &Value) -> Result<NetworkTest, Refusal> {
     let n = &app.nettest;
-    let req = parse(body, app.cfg.role, n.enabled, n.steady_rate_mbps)?;
+    let req = parse(body, app.cfg.role, n.enabled)?;
     // Read from the link before the book is locked (the two locks are never held together). The
     // link leaves `stopped` only by a start, and a start holds the book's `starting` count.
     let (state, peer) = {
@@ -686,7 +761,7 @@ pub fn start(app: &Arc<App>, body: &Value) -> Result<NetworkTest, Refusal> {
         TestKind::Throughput => {
             let peer = peer.unwrap_or_default();
             if address_ok(&peer) {
-                let args = client_args(&peer, n.port, &req);
+                let args = client_args(&peer, n.port, n.saturate_mbps, &req);
                 dlog!("network test {id}: throughput {} {}", n.iperf.program.display(), args.join(" "));
                 run = Some(Box::pin(run_throughput(app.clone(), id.clone(), req.clone(), args)));
             } else {
@@ -839,7 +914,7 @@ async fn run_throughput(app: Arc<App>, id: String, req: Request, args: Vec<Strin
             }
         });
     }
-    let mut s = Stream::new(req.mode == Some(Mode::Steady));
+    let mut s = Stream::new(req.direction == Some(Direction::FromPeer));
     let mut timed_out = false;
     let mut kill_at = None;
     // until stdout ends (the client is leaving), with SIGTERM at the deadline and SIGKILL after
@@ -854,11 +929,9 @@ async fn run_throughput(app: Arc<App>, id: String, req: Request, args: Vec<Strin
                         dlog!("network test {id}: {e}");
                     }
                     if measured {
-                        let (progress, partial) = ((s.elapsed_s / f64::from(duration_s)).clamp(0.0, 0.99), s.partial());
-                        n.update(&id, |r| {
-                            r.t.progress = round(progress, 2);
-                            r.t.result = partial.map(Outcome::Throughput);
-                        });
+                        // only the progress: the client's own seconds are the rate sent (without -R)
+                        let progress = round((s.elapsed_s / f64::from(duration_s)).clamp(0.0, 0.99), 2);
+                        n.update(&id, |r| r.t.progress = progress);
                     }
                 }
                 None => break,
@@ -887,7 +960,10 @@ async fn run_throughput(app: Arc<App>, id: String, req: Request, args: Vec<Strin
     let code = status.and_then(|s| s.code().or_else(|| s.signal().map(|g| 128 + g)));
     let outcome = match s.result.take() {
         Some(mut r) => {
-            r.per_second_mbps = std::mem::take(&mut s.per_second);
+            r.per_second_mbps = s.received_seconds().to_vec();
+            if r.per_second_mbps.is_empty() {
+                dlog!("network test {id}: no per-second report from the receiving side");
+            }
             Ok(r)
         }
         // never reached the server in time (no answer, or a path that drops the test's packets)
@@ -898,9 +974,17 @@ async fn run_throughput(app: Arc<App>, id: String, req: Request, args: Vec<Strin
     match outcome {
         Ok(r) => {
             let mbps = r.throughput_mbps;
-            dlog!("network test {id}: done: {mbps} Mbps (exit {})", code.map_or("?".into(), |c| c.to_string()));
+            dlog!(
+                "network test {id}: done: {mbps} Mbps arrived, {} sent, loss {} %, jitter {} ms, saturated {} (exit {})",
+                r.sent_mbps,
+                r.loss_pct,
+                r.jitter_ms,
+                r.saturated,
+                code.map_or("?".into(), |c| c.to_string())
+            );
             n.finish(&id, TestState::Done, Some(Outcome::Throughput(r)), None);
-            let ev = Ev::info("network_test_done").with(json!({ "mbps": round(mbps, 1), "direction": req.direction }));
+            // what arrived, two decimals as in the result (the event list shows 届いた速さ 5.26 Mbps)
+            let ev = Ev::info("network_test_done").with(json!({ "mbps": mbps, "direction": req.direction }));
             app.emit(&mut app.lock(), ev);
         }
         Err(f) => {
@@ -1149,8 +1233,8 @@ mod tests {
         fs::read_to_string(Path::new(FIX).join(name)).unwrap()
     }
 
-    fn replay(name: &str, udp: bool) -> Stream {
-        let mut s = Stream::new(udp);
+    fn replay(name: &str, reverse: bool) -> Stream {
+        let mut s = Stream::new(reverse);
         for l in fixture(name).lines() {
             s.line(l);
         }
@@ -1196,53 +1280,85 @@ mod tests {
     }
 
     #[test]
-    fn client_streams_tcp() {
-        let s = replay("iperf3_tcp.jsonl", false);
+    fn client_streams_to_the_peer() {
+        // the real capture (6 Mbps over localhost: nothing lost)
+        let s = replay("iperf3_udp.jsonl", false);
         assert!(s.connected && s.error.is_none());
+        assert!((s.elapsed_s - 3.001316).abs() < 1e-9);
+        assert_eq!(s.client_seconds, [6.01, 6.0, 6.0], "the rate sent");
+        assert_eq!(s.server_seconds, [6.01, 6.0, 6.0], "the receiver's report");
+        assert_eq!(s.received_seconds(), [6.01, 6.0, 6.0]);
         let r = s.result.clone().unwrap();
-        // sum_received (what arrived), not sum_sent
-        assert_eq!(r.throughput_mbps, round(84662025687.90953 / 1e6, 2));
-        assert_eq!((r.retransmits, r.rtt_ms), (Some(0), Some(0.02)), "mean_rtt 17 µs");
-        assert_eq!((r.loss_pct, r.jitter_ms), (None, None));
-        assert_eq!(s.per_second, [81363.39, 84835.96, 86041.13]);
-        assert!((s.elapsed_s - 3.000837).abs() < 1e-9);
-        let p = s.partial().unwrap();
-        assert_eq!(p.throughput_mbps, round((81363.39 + 84835.96 + 86041.13) / 3.0, 2));
-        assert_eq!((p.retransmits, p.rtt_ms, p.loss_pct), (None, None, None));
-
-        // -R: the client receives; the round-trip time is not measured on this side
-        let s = replay("iperf3_tcp_reverse.jsonl", false);
+        assert_eq!(
+            r,
+            Throughput { throughput_mbps: 6.0, sent_mbps: 6.0, loss_pct: 0.0, jitter_ms: 0.0, saturated: false, per_second_mbps: vec![] }
+        );
+        // the radio link's numbers in the same capture: sum_received is what arrived, the
+        // receiver's seconds without the 0.23 s tail, the line was full
+        let s = replay("iperf3_udp_saturated.jsonl", false);
+        assert_eq!(s.received_seconds(), [5.29, 5.24, 5.25]);
+        assert_eq!(s.client_seconds, [6.01, 6.0, 6.0]);
         let r = s.result.unwrap();
-        assert_eq!(r.throughput_mbps, round(83327904787.5503 / 1e6, 2));
-        assert_eq!((r.retransmits, r.rtt_ms), (Some(0), None));
-        assert_eq!(s.per_second.len(), 3);
+        assert_eq!((r.throughput_mbps, r.sent_mbps, r.loss_pct, r.jitter_ms, r.saturated), (5.26, 6.0, 5.79, 2.87, true));
+        // a server started with -J reports in JSON
+        let s = replay("iperf3_udp_server_json.jsonl", false);
+        assert_eq!((s.server_seconds.as_slice(), s.client_seconds.len()), ([6.01, 6.0].as_slice(), 2));
+        assert_eq!(s.result.unwrap().throughput_mbps, round(6004509.712477088 / 1e6, 2));
     }
 
     #[test]
-    fn client_streams_udp() {
-        let s = replay("iperf3_udp.jsonl", true);
-        let r = s.result.unwrap();
-        // sum_received: the receiver's rate (end.sum is the sending rate, 6027168)
-        assert_eq!(r.throughput_mbps, round(6027108.087476012 / 1e6, 2));
-        assert_eq!((r.loss_pct, r.jitter_ms), (Some(0.0), Some(0.0)));
-        assert_eq!((r.retransmits, r.rtt_ms), (None, None));
-        assert_eq!(s.per_second, [6.02, 6.03, 6.03]);
+    fn client_streams_from_the_peer() {
+        // -R: the client receives; its own seconds are what arrived (the server's are the rate sent)
         let s = replay("iperf3_udp_reverse.jsonl", true);
-        assert_eq!(s.result.unwrap().throughput_mbps, round(6027254.697063402 / 1e6, 2));
+        assert_eq!(s.client_seconds, [6.01, 6.0, 6.0]);
+        assert_eq!(s.server_seconds, [6.01, 6.0, 6.0], "the sending side's text form is read too");
+        assert_eq!(s.received_seconds(), s.client_seconds.as_slice());
+        let r = s.result.unwrap();
+        assert_eq!((r.throughput_mbps, r.sent_mbps, r.loss_pct, r.saturated), (round(6002426.507511944 / 1e6, 2), 6.0, 0.0, false));
+        let mut lone = Stream::new(true);
+        lone.line(&fixture("iperf3_udp_reverse.jsonl").lines().nth(1).unwrap().replace("6007330.867411932", "5260000"));
+        assert_eq!(lone.received_seconds(), [5.26]);
+    }
 
-        // a lossy line, and a tool without sum_received
+    #[test]
+    fn client_streams_on_a_lossy_line() {
+        // real captures with real loss (localhost, the receiving side paused 12 ms in every 100 ms
+        // with a 2 KB socket buffer): 6 Mbps sent, about 5.5 arrived, 8 % lost
+        let s = replay("iperf3_udp_lossy.jsonl", false);
+        assert_eq!(s.client_seconds, [6.01, 6.0, 6.0, 5.99, 6.01, 6.0], "the rate sent");
+        assert_eq!(s.received_seconds(), [5.52, 5.49, 5.48, 5.5, 5.48, 5.48], "the server's report: what arrived");
+        let r = s.result.unwrap();
+        assert_eq!((r.throughput_mbps, r.sent_mbps, r.loss_pct, r.jitter_ms, r.saturated), (5.49, 6.0, 8.3, 0.05, true));
+        // -R: the client's seconds arrived; the server's report is the rate sent, its 0.12 s tail left out
+        let s = replay("iperf3_udp_lossy_reverse.jsonl", true);
+        assert_eq!(s.received_seconds(), [5.68, 5.5, 5.47, 5.5, 5.47, 5.51]);
+        assert_eq!(s.server_seconds, [6.01, 6.0, 6.0, 6.0, 6.0, 6.0]);
+        let r = s.result.unwrap();
+        assert_eq!((r.throughput_mbps, r.sent_mbps, r.loss_pct, r.jitter_ms, r.saturated), (5.52, 6.0, 7.97, 0.11, true));
+    }
+
+    #[test]
+    fn end_lines() {
         let end = |data: Value| json!({ "event": "end", "data": data }).to_string();
-        let mut s = Stream::new(true);
+        let mut s = Stream::new(false);
         s.line(&end(json!({
-            "sum": { "bits_per_second": 6.0e6, "jitter_ms": 3.1234, "lost_percent": 10.2345 },
-            "sum_sent": { "bits_per_second": 6.0e6, "jitter_ms": 0, "lost_percent": 0 },
-            "sum_received": { "bits_per_second": 5.38e6, "jitter_ms": 3.1234, "lost_percent": 10.2345 },
+            "sum": { "bits_per_second": 6.0e6, "jitter_ms": 3.1234, "lost_percent": 12.3456 },
+            "sum_sent": { "bits_per_second": 5.9876e6, "jitter_ms": 0, "lost_percent": 0 },
+            "sum_received": { "bits_per_second": 5.2649e6, "jitter_ms": 3.1234, "lost_percent": 12.3456 },
         })));
         let r = s.result.unwrap();
-        assert_eq!((r.throughput_mbps, r.loss_pct, r.jitter_ms), (5.38, Some(10.23), Some(3.12)));
-        let mut s = Stream::new(true);
-        s.line(&end(json!({ "sum": { "bits_per_second": 5.5e6, "jitter_ms": 2.0, "lost_percent": 1.5 } })));
-        assert_eq!(s.result.unwrap().loss_pct, Some(1.5));
+        assert_eq!((r.throughput_mbps, r.sent_mbps, r.loss_pct, r.jitter_ms, r.saturated), (5.26, 5.99, 12.35, 3.12, true));
+        // a tool without sum_received / sum_sent: the ambiguous sum, the loss from the counts
+        let mut s = Stream::new(false);
+        s.line(&end(json!({ "sum": { "bits_per_second": 5.5e6, "jitter_ms": 2.0, "lost_packets": 3, "packets": 400 } })));
+        let r = s.result.unwrap();
+        assert_eq!((r.throughput_mbps, r.sent_mbps, r.loss_pct, r.saturated), (5.5, 5.5, 0.75, false));
+        // just at the line: 1 % (two decimals) is full
+        for (loss, full) in [(0.994, false), (0.995, true), (1.0, true)] {
+            let mut s = Stream::new(false);
+            s.line(&end(json!({ "sum_received": { "bits_per_second": 6e6, "lost_percent": loss } })));
+            assert_eq!(s.result.unwrap().saturated, full, "{loss}");
+        }
         // the end line after an error carries nothing
         let mut s = Stream::new(false);
         s.line(&end(json!({})));
@@ -1251,10 +1367,45 @@ mod tests {
         let iv = |secs: f64, omitted: bool| {
             json!({ "event": "interval", "data": { "sum": { "end": 9.0, "seconds": secs, "bits_per_second": 1e6, "omitted": omitted } } }).to_string()
         };
-        let mut s = Stream::new(false);
+        let mut s = Stream::new(true);
         assert!(!s.line(&iv(1.0, true)) && !s.line(&iv(0.01, false)) && s.line(&iv(1.0, false)));
         assert!(!s.line("not json") && !s.line("{}"));
-        assert_eq!(s.per_second, [1.0]);
+        assert_eq!((s.client_seconds.as_slice(), s.elapsed_s), ([1.0].as_slice(), 9.0));
+        // the server's JSON report: the same rules
+        let mut s = Stream::new(false);
+        let sj = json!({ "event": "server_output_json", "data": { "intervals": [
+            { "sum": { "seconds": 1.0, "bits_per_second": 5.31e6 } },
+            { "sum": { "seconds": 1.0, "bits_per_second": 4e6, "omitted": true } },
+            { "sum": { "seconds": 0.1, "bits_per_second": 4e6 } },
+        ] } });
+        assert!(!s.line(&sj.to_string()));
+        assert_eq!(s.received_seconds(), [5.31]);
+    }
+
+    #[test]
+    fn server_text_reports() {
+        let t = "Accepted connection from 192.168.0.220, port 46772\n\
+                 [  5] local 192.168.0.210 port 60022 connected to 192.168.0.220 port 57407\n\
+                 [ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams\n\
+                 [  5]   0.00-1.00   sec   645 KBytes  5.29 Mbits/sec  2.514 ms  33/535 (6.2%)  \n\
+                 [  5]   1.00-2.00   sec  98.7 KBytes   809 Kbits/sec  9.100 ms  400/477 (84%)  \n\
+                 [  5]   9.00-10.00  sec  0.00 Bytes  0.00 bits/sec  9.100 ms  0/0 (0%)  \n\
+                 [  5]  10.00-11.00  sec   134 MBytes  1.12 Gbits/sec  0.010 ms  0/9 (0%)  \n\
+                 [  5]  11.00-11.20  sec   129 KBytes  5.28 Mbits/sec  2.871 ms  0/100 (0%)  \n\
+                 - - - - - - - - - - - - - - - - - - - - - - - - -\n\
+                 [ ID] Interval           Transfer     Bitrate         Jitter    Lost/Total Datagrams\n\
+                 [  5]   0.00-11.20  sec  2.02 MBytes  5.26 Mbits/sec  2.871 ms  99/1711 (5.8%)  receiver\n";
+        assert_eq!(server_text_seconds(t), [5.29, 0.81, 0.0, 1120.0]);
+        // several streams: the [SUM] lines
+        let multi = "[  5]   0.00-1.00   sec   300 KBytes  2.46 Mbits/sec  1.0 ms  0/10 (0%)\n\
+                     [  7]   0.00-1.00   sec   300 KBytes  2.46 Mbits/sec  1.0 ms  0/10 (0%)\n\
+                     [SUM]   0.00-1.00   sec   600 KBytes  4.92 Mbits/sec  1.0 ms  0/20 (0%)\n";
+        assert_eq!(server_text_seconds(multi), [4.92]);
+        // the server's banner, an error, nothing
+        assert!(server_text_seconds("-----\nServer listening on 60022 (test #2)\n-----\n").is_empty());
+        assert!(server_text_seconds("iperf3: error - the client has terminated\n").is_empty());
+        assert!(server_text_seconds("").is_empty());
+        assert!(server_text_seconds("[  5]   0.00-1.00   sec   645 KBytes  5.29 Xbits/sec\n[  5] x-y sec 1 KBytes 1 Mbits/sec\n").is_empty());
     }
 
     #[test]
@@ -1280,61 +1431,54 @@ mod tests {
 
     #[test]
     fn requests() {
-        let tx = |v: Value| parse(&v, Role::Tx, true, 6.0);
+        let tx = |v: Value| parse(&v, Role::Tx, true);
         let r = tx(json!({ "kind": "throughput" })).unwrap();
+        assert_eq!(r, Request { kind: TestKind::Throughput, direction: Some(Direction::ToPeer), duration_s: Some(10) });
+        let r = tx(json!({ "kind": "throughput", "direction": "from_peer", "duration_s": 30 })).unwrap();
+        assert_eq!((r.direction, r.duration_s), (Some(Direction::FromPeer), Some(30)));
+        let r = tx(json!({ "kind": "throughput", "duration_s": 5.0, "direction": null })).unwrap();
+        assert_eq!((r.duration_s, r.direction), (Some(5), Some(Direction::ToPeer)));
+        // the old modes' fields are ignored, whatever they hold
+        let old = tx(json!({ "kind": "throughput", "mode": "steady", "rate_mbps": 99 })).unwrap();
+        assert_eq!(old, tx(json!({ "kind": "throughput" })).unwrap());
+        assert!(tx(json!({ "kind": "throughput", "mode": 1, "rate_mbps": "x" })).is_ok());
+        assert_eq!(tx(json!({ "kind": "reachability", "direction": "x", "duration_s": 99 })).unwrap(), Request::REACHABILITY);
         assert_eq!(
-            r,
-            Request { kind: TestKind::Throughput, direction: Some(Direction::ToPeer), mode: Some(Mode::Max), rate_mbps: None, duration_s: Some(10) }
+            serde_json::to_value(tx(json!({ "kind": "throughput" })).unwrap()).unwrap(),
+            json!({ "kind": "throughput", "direction": "to_peer", "duration_s": 10 })
         );
-        let r = tx(json!({ "kind": "throughput", "direction": "from_peer", "mode": "steady", "duration_s": 30 })).unwrap();
-        assert_eq!((r.direction, r.mode, r.rate_mbps, r.duration_s), (Some(Direction::FromPeer), Some(Mode::Steady), Some(6.0), Some(30)));
-        let r = tx(json!({ "kind": "throughput", "mode": "steady", "rate_mbps": 2.5, "duration_s": 5.0, "direction": null })).unwrap();
-        assert_eq!((r.rate_mbps, r.duration_s, r.direction), (Some(2.5), Some(5), Some(Direction::ToPeer)));
-        // the rate is read only in the steady mode
-        assert_eq!(tx(json!({ "kind": "throughput", "mode": "max", "rate_mbps": 99 })).unwrap().rate_mbps, None);
-        let reach = Request { kind: TestKind::Reachability, direction: None, mode: None, rate_mbps: None, duration_s: None };
-        assert_eq!(tx(json!({ "kind": "reachability", "direction": "x", "duration_s": 99 })).unwrap(), reach);
 
         assert_eq!(codes(tx(json!({}))), ["kind:required"]);
         assert_eq!(codes(tx(json!({ "kind": null }))), ["kind:required"]);
         assert_eq!(codes(tx(json!([1]))), ["kind:required"]);
         assert_eq!(codes(tx(json!({ "kind": "bandwidth" }))), ["kind:invalid"]);
         assert_eq!(codes(tx(json!({ "kind": 1 }))), ["kind:invalid"]);
-        assert_eq!(codes(tx(json!({ "kind": "throughput", "direction": "up", "mode": 1 }))), ["direction:invalid", "mode:invalid"]);
-        for rate in [json!(0.5), json!(20.5), json!("6"), json!(true)] {
-            assert_eq!(codes(tx(json!({ "kind": "throughput", "mode": "steady", "rate_mbps": rate }))), ["rate_mbps:out_of_range"]);
-        }
+        assert_eq!(codes(tx(json!({ "kind": "throughput", "direction": "up", "duration_s": 3 }))), ["direction:invalid", "duration_s:out_of_range"]);
         for d in [json!(4), json!(31), json!(10.5), json!("10")] {
             assert_eq!(codes(tx(json!({ "kind": "throughput", "duration_s": d }))), ["duration_s:out_of_range"]);
         }
-        let Err(Refusal::Invalid(e)) = tx(json!({ "kind": "throughput", "mode": "steady", "rate_mbps": 30, "duration_s": 1 })) else {
-            panic!()
-        };
-        assert_eq!(serde_json::to_value(&e).unwrap()[0]["params"], json!({ "min": 1.0, "max": 20.0 }));
-        assert_eq!(serde_json::to_value(&e).unwrap()[1]["params"], json!({ "min": 5, "max": 30 }));
+        let Err(Refusal::Invalid(e)) = tx(json!({ "kind": "throughput", "duration_s": 1 })) else { panic!() };
+        assert_eq!(serde_json::to_value(&e).unwrap()[0]["params"], json!({ "min": 5, "max": 30 }));
 
         // the role before the fields; tests turned off: not offered at all
-        assert_eq!(parse(&json!({ "kind": "throughput", "duration_s": 1 }), Role::Rx, true, 6.0), Err(Refusal::UnsupportedRole));
-        assert_eq!(parse(&json!({ "kind": "reachability" }), Role::Rx, true, 6.0), Ok(reach.clone()));
-        assert_eq!(parse(&json!({ "kind": "reachability" }), Role::Tx, false, 6.0), Err(Refusal::UnsupportedRole));
-        assert_eq!(codes(parse(&json!({ "kind": "x" }), Role::Rx, false, 6.0)), ["kind:invalid"]);
+        assert_eq!(parse(&json!({ "kind": "throughput", "duration_s": 1 }), Role::Rx, true), Err(Refusal::UnsupportedRole));
+        assert_eq!(parse(&json!({ "kind": "reachability" }), Role::Rx, true), Ok(Request::REACHABILITY));
+        assert_eq!(parse(&json!({ "kind": "reachability" }), Role::Tx, false), Err(Refusal::UnsupportedRole));
+        assert_eq!(codes(parse(&json!({ "kind": "x" }), Role::Rx, false)), ["kind:invalid"]);
     }
 
     #[test]
     fn command_lines() {
-        let r = parse(&json!({ "kind": "throughput" }), Role::Tx, true, 6.0).unwrap();
+        let r = parse(&json!({ "kind": "throughput" }), Role::Tx, true).unwrap();
         assert_eq!(
-            client_args("192.168.0.210", 60022, &r).join(" "),
-            "-c 192.168.0.210 -p 60022 -t 10 -i 1 --json-stream --forceflush --connect-timeout 3000"
+            client_args("192.168.0.210", 60022, 6.0, &r).join(" "),
+            "-c 192.168.0.210 -p 60022 -u -b 6M -l 1316 -t 10 -i 1 --json-stream --forceflush --get-server-output --connect-timeout 3000"
         );
-        let r = parse(&json!({ "kind": "throughput", "direction": "from_peer", "mode": "steady", "rate_mbps": 2.5, "duration_s": 20 }), Role::Tx, true, 6.0)
-            .unwrap();
+        let r = parse(&json!({ "kind": "throughput", "direction": "from_peer", "duration_s": 20 }), Role::Tx, true).unwrap();
         assert_eq!(
-            client_args("192.168.0.210", 60022, &r).join(" "),
-            "-c 192.168.0.210 -p 60022 -t 20 -i 1 --json-stream --forceflush --connect-timeout 3000 -R -u -b 2.5M"
+            client_args("192.168.0.210", 60022, 7.5, &r).join(" "),
+            "-c 192.168.0.210 -p 60022 -u -b 7.5M -l 1316 -t 20 -i 1 --json-stream --forceflush --get-server-output --connect-timeout 3000 -R"
         );
-        let r = parse(&json!({ "kind": "throughput", "mode": "steady" }), Role::Tx, true, 6.0).unwrap();
-        assert!(client_args("h", 1, &r).join(" ").ends_with(" -u -b 6M"));
         assert_eq!(ping_args("192.168.0.65").join(" "), "-n -q -c 10 -i 0.2 -W 1 192.168.0.65");
 
         let cfg = Config::parse("id = \"RX\"\nrole = \"rx\"\nrun_dir = \"/run/c\"\n[media]\nrepo = \"/m\"\n").unwrap();
@@ -1356,7 +1500,7 @@ mod tests {
                 started_at: String::new(),
                 finished_at: None,
                 progress: 0.0,
-                request: Request { kind: TestKind::Reachability, direction: None, mode: None, rate_mbps: None, duration_s: None },
+                request: Request::REACHABILITY,
                 result: None,
                 error: None,
             },
@@ -1377,6 +1521,7 @@ mod tests {
     #[tokio::test]
     async fn throughput_to_the_peer() {
         let (app, dir) = stub_app("tput", Role::Tx, LinkState::Stopped, "port = 60022\n");
+        app.lock().settings.transport.peer_host = "lossy-10.0.0.2".into();
         let t = start(&app, &json!({ "kind": "throughput" })).unwrap();
         assert_eq!((t.state, t.progress, t.finished_at.as_deref()), (TestState::Running, 0.0, None));
         assert!(t.result.is_none() && t.error.is_none());
@@ -1385,59 +1530,105 @@ mod tests {
         assert_eq!(t.progress, 1.0);
         assert!(t.finished_at.is_some());
         let Some(Outcome::Throughput(r)) = &t.result else { panic!("{t:?}") };
-        assert_eq!(r.throughput_mbps, 84662.03);
-        assert_eq!(r.per_second_mbps, [81363.39, 84835.96, 86041.13]);
-        assert_eq!((r.retransmits, r.rtt_ms, r.loss_pct, r.jitter_ms), (Some(0), Some(0.02), None, None));
+        assert_eq!(
+            r,
+            &Throughput {
+                throughput_mbps: 5.26,
+                sent_mbps: 6.0,
+                loss_pct: 5.79,
+                jitter_ms: 2.87,
+                saturated: true,
+                per_second_mbps: vec![5.29, 5.24, 5.25],
+            }
+        );
         let args = starts(&dir, "stub_iperf3");
         assert_eq!(args.len(), 1);
-        assert_eq!(args[0].join(" "), "-c 10.0.0.2 -p 60022 -t 10 -i 1 --json-stream --forceflush --connect-timeout 3000");
+        assert_eq!(
+            args[0].join(" "),
+            "-c lossy-10.0.0.2 -p 60022 -u -b 6M -l 1316 -t 10 -i 1 --json-stream --forceflush --get-server-output --connect-timeout 3000"
+        );
         let ev = app.lock().events.latest(5);
         assert_eq!(ev[0].code, "network_test_done");
-        assert_eq!(Value::Object(ev[0].params.clone()), json!({ "mbps": 84662.0, "direction": "to_peer" }));
+        assert_eq!(Value::Object(ev[0].params.clone()), json!({ "mbps": 5.26, "direction": "to_peer" }));
         // what the API shows
         let v = serde_json::to_value(&t).unwrap();
-        assert_eq!(
-            v["request"],
-            json!({ "kind": "throughput", "direction": "to_peer", "mode": "max", "rate_mbps": null, "duration_s": 10 })
-        );
+        assert_eq!(v["request"], json!({ "kind": "throughput", "direction": "to_peer", "duration_s": 10 }));
         let keys: Vec<&str> = v["result"].as_object().unwrap().keys().map(String::as_str).collect();
-        assert_eq!(keys, ["jitter_ms", "loss_pct", "per_second_mbps", "retransmits", "rtt_ms", "throughput_mbps"]);
+        assert_eq!(keys, ["jitter_ms", "loss_pct", "per_second_mbps", "saturated", "sent_mbps", "throughput_mbps"]);
         assert_eq!(v["error"], Value::Null);
 
-        // the other way, at a fixed rate (the default one)
-        let t = start(&app, &json!({ "kind": "throughput", "direction": "from_peer", "mode": "steady", "duration_s": 5 })).unwrap();
+        // the other way: the client's own seconds; the line was not full
+        app.lock().settings.transport.peer_host = "10.0.0.2".into();
+        let t = start(&app, &json!({ "kind": "throughput", "direction": "from_peer", "mode": "max", "duration_s": 5 })).unwrap();
         let t = wait_done(&app, &t.id).await;
         let Some(Outcome::Throughput(r)) = &t.result else { panic!("{t:?}") };
-        assert_eq!((r.throughput_mbps, r.loss_pct, r.jitter_ms, r.retransmits, r.rtt_ms), (6.03, Some(0.0), Some(0.0), None, None));
-        assert_eq!(starts(&dir, "stub_iperf3")[1][12..].join(" "), "-R -u -b 6M");
+        assert_eq!((r.throughput_mbps, r.loss_pct, r.saturated), (6.0, 0.0, false));
+        assert_eq!(r.per_second_mbps, [6.01, 6.0, 6.0]);
+        assert_eq!(starts(&dir, "stub_iperf3")[1][10..].join(" "), "5 -i 1 --json-stream --forceflush --get-server-output --connect-timeout 3000 -R");
         assert_eq!(app.lock().events.latest(1)[0].params["direction"], "from_peer");
         assert_eq!(app.nettest.list().len(), 2);
+        assert_eq!(app.nettest.options(), json!({ "duration_range_s": [5, 30], "saturate_mbps": 6.0 }));
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
     async fn throughput_progress_while_running() {
-        let (app, dir) = stub_app("progress", Role::Tx, LinkState::Stopped, "");
+        let (app, dir) = stub_app("progress", Role::Tx, LinkState::Stopped, "saturate_mbps = 8\n");
         app.lock().settings.transport.peer_host = "slow-10.0.0.2".into();
         let t = start(&app, &json!({ "kind": "throughput", "duration_s": 5 })).unwrap();
-        // the stub writes a line every 0.25 s: the first measured second shows while it runs
+        // the stub writes a line every 0.25 s: the progress moves, the result waits for the end
         let mid = loop {
             let mid = app.nettest.get(&t.id).unwrap();
-            if mid.result.is_some() || mid.state != TestState::Running {
+            if mid.progress > 0.0 || mid.state != TestState::Running {
                 break mid;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         };
         assert_eq!(mid.state, TestState::Running);
         assert!(mid.progress > 0.0 && mid.progress < 1.0, "{}", mid.progress);
-        let Some(Outcome::Throughput(r)) = &mid.result else { panic!("{mid:?}") };
-        assert!(!r.per_second_mbps.is_empty());
-        assert_eq!((r.loss_pct, r.jitter_ms, r.retransmits, r.rtt_ms), (None, None, None, None), "only at the end");
+        assert!(mid.result.is_none(), "{mid:?}");
         assert!(app.nettest.throughput_running());
         assert!(app.nettest.hold_start().is_none(), "no transport start meanwhile");
         let t = wait_done(&app, &t.id).await;
         assert_eq!(t.state, TestState::Done);
         assert!(app.nettest.hold_start().is_some());
+        assert_eq!(starts(&dir, "stub_iperf3")[0][6], "8M", "the configured rate");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn which_tests_give_the_send_cap() {
+        let (app, dir) = stub_app("use", Role::Tx, LinkState::Stopped, "saturate_mbps = 6.5\n");
+        let n = &app.nettest;
+        assert_eq!(n.send_limit_from("nope"), Err(UseRefusal::NotFound));
+        // full line: what arrived, with the time it finished
+        app.lock().settings.transport.peer_host = "lossy-10.0.0.2".into();
+        let full = wait_done(&app, &start(&app, &json!({ "kind": "throughput" })).unwrap().id).await;
+        assert_eq!(n.send_limit_from(&full.id), Ok((5.26, full.finished_at.clone().unwrap())));
+        // not full: the line carries at least the test's rate
+        app.lock().settings.transport.peer_host = "10.0.0.2".into();
+        let free = wait_done(&app, &start(&app, &json!({ "kind": "throughput" })).unwrap().id).await;
+        assert_eq!(n.send_limit_from(&free.id).unwrap().0, 6.5);
+        // the other way, a failure, a running test, a reachability test: not a send cap
+        let back = wait_done(&app, &start(&app, &json!({ "kind": "throughput", "direction": "from_peer" })).unwrap().id).await;
+        assert_eq!(n.send_limit_from(&back.id), Err(UseRefusal::NotApplicable));
+        app.lock().settings.transport.peer_host = "refused.example".into();
+        let failed = wait_done(&app, &start(&app, &json!({ "kind": "throughput" })).unwrap().id).await;
+        assert_eq!((failed.state, n.send_limit_from(&failed.id)), (TestState::Failed, Err(UseRefusal::NotApplicable)));
+        app.lock().settings.transport.peer_host = "slow-10.0.0.2".into();
+        let running = start(&app, &json!({ "kind": "throughput" })).unwrap();
+        assert_eq!(n.send_limit_from(&running.id), Err(UseRefusal::NotApplicable));
+        let reach = start(&app, &json!({ "kind": "reachability" })).unwrap();
+        wait_done(&app, &reach.id).await;
+        assert_eq!(n.send_limit_from(&reach.id), Err(UseRefusal::NotApplicable));
+        wait_done(&app, &running.id).await;
+        // kept within the cap's range
+        let mut b = n.book();
+        let r = b.get_mut(&full.id).unwrap();
+        let Some(Outcome::Throughput(t)) = r.t.result.as_mut() else { panic!() };
+        t.throughput_mbps = 0.42;
+        drop(b);
+        assert_eq!(n.send_limit_from(&full.id).unwrap().0, 1.0);
         fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1522,10 +1713,7 @@ mod tests {
         let (app, dir) = stub_app("reach", Role::Tx, LinkState::Live, &extra);
         let t0 = Instant::now();
         let t = start(&app, &json!({ "kind": "reachability", "mode": "bogus" })).unwrap();
-        assert_eq!(
-            serde_json::to_value(&t.request).unwrap(),
-            json!({ "kind": "reachability", "direction": null, "mode": null, "rate_mbps": null, "duration_s": null })
-        );
+        assert_eq!(serde_json::to_value(&t.request).unwrap(), json!({ "kind": "reachability", "direction": null, "duration_s": null }));
         tokio::time::sleep(Duration::from_millis(300)).await;
         let p = app.nettest.get(&t.id).unwrap().progress;
         assert!(p > 0.0 && p < 1.0, "an estimate from the time: {p}");

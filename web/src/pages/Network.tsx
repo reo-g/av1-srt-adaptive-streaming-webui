@@ -1,7 +1,9 @@
 /**
  * ネットワーク: checks of the line to the peer, started from the browser.
  *   つながりの確認  whether the peer and the devices on the way answer (both roles, also while live)
- *   回線の速さ      how fast data gets through (transmitter only, while the link is stopped)
+ *   回線の速さ      how fast data arrives when more is sent than the line can carry (transmitter
+ *                   only, while the link is stopped); a result towards the receiver can become the
+ *                   send cap (送り出しの上限) of the next transmissions
  *   これまでの結果  the device keeps the last 20 tests in memory
  * The design canvas has no page for this yet; it is built from the existing parts
  * (docs/screens.md「ネットワーク」).
@@ -12,13 +14,14 @@ import { useLive } from '../api/live';
 import type {
   NetworkTest,
   NetworkTestDirection,
-  NetworkTestMode,
   NetworkTestOptions,
   ReachabilityResult,
   ReachabilityTarget,
   Role,
+  SendLimit,
   ThroughputResult,
 } from '../api/types';
+import { AlertDialog } from '../components/Dialog';
 import { Glyph, toneText, type Tone } from '../components/Glyph';
 import { Segmented } from '../components/Segmented';
 import { Row } from '../components/Settings';
@@ -26,22 +29,31 @@ import { Shell } from '../components/Shell';
 import {
   directionChoice,
   directionText,
+  fasterThan,
   fieldErrorText,
   reachFailed,
   reachLabel,
   reachLevel,
   reachNoPeer,
   targetName,
-  testModeName,
-  testModeShort,
   testStartProblem,
   throughputBlocked,
   throughputErrorShort,
   throughputErrorText,
+  throughputHelp,
+  throughputNote,
+  capButton,
+  capConfirmText,
+  capConfirmTitle,
+  capCurrent,
+  capDone,
+  capOffer,
+  capUsedMark,
+  capProblem,
   videoVerdict,
   type ReachLevel,
 } from '../i18n/ja';
-import { fixed1, timeOf } from '../lib/format';
+import { fixed1, fixed2, timeOf } from '../lib/format';
 import { href } from '../lib/router';
 
 type Reach = Extract<NetworkTest, { kind: 'reachability' }>;
@@ -49,10 +61,11 @@ type Tput = Extract<NetworkTest, { kind: 'throughput' }>;
 
 /** Fallbacks until the device's options arrive. */
 const BITRATE_RANGE: [number, number] = [1.5, 4.0];
-const STEADY_RATE = 6;
-const RATE_CHOICES = [2, 4, 6, 8, 10];
+const SATURATE_MBPS = 6;
 const DURATION_CHOICES = [10, 20, 30];
 const DEFAULT_DURATION = 10;
+/** Range of the send cap (TransportSettings.send_limit.mbps). */
+const LIMIT_RANGE: [number, number] = [1, 20];
 
 const LEVEL_TONE: Record<ReachLevel, Tone> = { ok: 'ok', partial: 'warn', none: 'err' };
 const VERDICT_TONE = { ok: 'ok', lower: 'warn', short: 'err' } as const;
@@ -63,13 +76,28 @@ const ms = (v: number) => (v < 10 ? v.toFixed(1) : String(Math.round(v)));
 /** The request as the device ran it, with the defaults where a field is missing. */
 const paramsOf = (t: Tput) => ({
   direction: (t.request?.direction ?? 'to_peer') as NetworkTestDirection,
-  mode: (t.request?.mode ?? 'max') as NetworkTestMode,
-  rate: t.request?.rate_mbps ?? null,
   duration: t.request?.duration_s ?? DEFAULT_DURATION,
 });
 
 const isReach = (t: NetworkTest): t is Reach => t.kind === 'reachability';
 const isTput = (t: NetworkTest): t is Tput => t.kind === 'throughput';
+
+const round2 = (v: number) => Math.round(v * 100) / 100;
+/** false only when the device said the line took everything (an older result without the flag counts as full). */
+const isSaturated = (r: ThroughputResult) => r.saturated !== false;
+/** The line's speed as the result gives it: what arrived, or the test's rate when the line took everything. */
+const speedOf = (r: ThroughputResult, saturateMbps: number) => round2(isSaturated(r) ? r.throughput_mbps : saturateMbps);
+
+/**
+ * What a result would make the send cap (the device does the same in POST …/use), or null when it
+ * cannot be one: not towards the receiver, not finished, or slower than the lowest cap.
+ */
+function capFrom(t: Tput, saturateMbps: number): number | null {
+  if (t.state !== 'done' || !t.result || paramsOf(t).direction !== 'to_peer') return null;
+  const v = speedOf(t.result, saturateMbps);
+  if (v < LIMIT_RANGE[0]) return null;
+  return Math.min(LIMIT_RANGE[1], v);
+}
 
 export function NetworkPage() {
   const { device, status } = useLive();
@@ -82,9 +110,12 @@ export function NetworkPage() {
   const [posting, setPosting] = useState<'reachability' | 'throughput' | null>(null);
   // Throughput form
   const [direction, setDirection] = useState<NetworkTestDirection>('to_peer');
-  const [mode, setMode] = useState<NetworkTestMode>('max');
-  const [rate, setRate] = useState<number | null>(null);
   const [duration, setDuration] = useState(DEFAULT_DURATION);
+  // The send cap now (tx), and making a result the cap
+  const [limit, setLimit] = useState<SendLimit | null>(null);
+  const [capAsk, setCapAsk] = useState<{ id: string; mbps: number } | null>(null);
+  const [capPosting, setCapPosting] = useState(false);
+  const [capNotice, setCapNotice] = useState<string | null>(null);
 
   // A list read that started before a test was posted must not hide the new test.
   const gen = useRef(0);
@@ -93,6 +124,16 @@ export function NetworkPage() {
     api.networkTest
       .list()
       .then((r) => g === gen.current && setList(r.items))
+      .catch(() => undefined);
+  }, []);
+  // The cap can also change in the transport settings or on another screen. A read that started
+  // before the cap was changed here must not bring the old value back.
+  const limitGen = useRef(0);
+  const loadLimit = useCallback(() => {
+    const g = limitGen.current;
+    api.transport
+      .get()
+      .then((s) => g === limitGen.current && setLimit(s.send_limit ?? null))
       .catch(() => undefined);
   }, []);
   const put = (t: NetworkTest) => {
@@ -104,21 +145,27 @@ export function NetworkPage() {
     if (!role) return;
     load();
     if (role === 'tx') {
+      loadLimit();
       api.networkTest.options().then(setOptions).catch(() => undefined);
       api.video
         .options()
         .then((o) => setBitrateRange(o.bitrate_range_mbps))
         .catch(() => undefined);
     }
-  }, [role, load]);
+  }, [role, load, loadLimit]);
 
-  // Every second while a test runs (progress, the latest second), every 5 s otherwise
-  // (a test started from another screen shows up).
+  // Every second while a test runs (progress), every 5 s otherwise (a test started from another
+  // screen shows up). The cap is read again every 5 s as well.
   const running = list?.some((t) => t.state === 'running') ?? false;
   useEffect(() => {
     const t = setInterval(load, running ? 1000 : 5000);
     return () => clearInterval(t);
   }, [running, load]);
+  useEffect(() => {
+    if (role !== 'tx') return;
+    const t = setInterval(loadLimit, 5000);
+    return () => clearInterval(t);
+  }, [role, loadLimit]);
 
   if (!device || !status || !role) {
     return (
@@ -135,10 +182,7 @@ export function NetworkPage() {
   const tputRunning = tput?.state === 'running';
   const stopped = status.state === 'stopped';
 
-  const [rMin, rMax] = options?.rate_range_mbps ?? [1, 20];
-  const defaultRate = options?.steady_rate_mbps ?? STEADY_RATE;
-  const rateNow = rate ?? defaultRate;
-  const rates = [...new Set([...RATE_CHOICES, defaultRate])].filter((r) => r >= rMin && r <= rMax).sort((a, b) => a - b);
+  const saturate = options?.saturate_mbps ?? SATURATE_MBPS;
   const [dMin, dMax] = options?.duration_range_s ?? [5, 30];
   const durations = DURATION_CHOICES.filter((d) => d >= dMin && d <= dMax);
 
@@ -156,17 +200,10 @@ export function NetworkPage() {
 
   const startTput = async () => {
     setTputNotice(null);
+    setCapNotice(null);
     setPosting('throughput');
     try {
-      put(
-        await api.networkTest.start({
-          kind: 'throughput',
-          direction,
-          mode,
-          duration_s: duration,
-          ...(mode === 'steady' ? { rate_mbps: rateNow } : {}),
-        }),
-      );
+      put(await api.networkTest.start({ kind: 'throughput', direction, duration_s: duration }));
     } catch (e) {
       const body = e instanceof ApiFailure ? e.body : null;
       const fieldErrors = body?.error.code === 'invalid' ? (body.error.errors ?? []) : [];
@@ -177,6 +214,29 @@ export function NetworkPage() {
       );
     } finally {
       setPosting(null);
+    }
+  };
+
+  const askCap = (t: Tput) => {
+    const mbps = capFrom(t, saturate);
+    if (mbps === null) return;
+    setCapNotice(null);
+    setCapAsk({ id: t.id, mbps });
+  };
+  const confirmCap = async () => {
+    if (!capAsk) return;
+    setCapPosting(true);
+    try {
+      const s = await api.networkTest.use(capAsk.id);
+      limitGen.current += 1;
+      setLimit(s.send_limit);
+      setCapAsk(null);
+    } catch (e) {
+      setCapAsk(null);
+      setCapNotice(capProblem(e instanceof ApiFailure ? e.body?.error.code : undefined));
+      loadLimit();
+    } finally {
+      setCapPosting(false);
     }
   };
 
@@ -233,7 +293,7 @@ export function NetworkPage() {
             <>
               <div className="nt-body">
                 <p className="nt-help" style={{ marginBottom: 0 }}>
-                  受信機との間で、1 秒あたりどれだけのデータを送れるかを測ります。
+                  {throughputHelp(direction, saturate)}
                 </p>
               </div>
               <Row label="向き" labelId="lbl-dir">
@@ -243,35 +303,6 @@ export function NetworkPage() {
                   onChange={setDirection}
                   options={(['to_peer', 'from_peer'] as const).map((d) => ({ value: d, label: directionChoice(role, d) }))}
                 />
-              </Row>
-              <Row label="測り方" labelId="lbl-mode" top padLabel>
-                <div role="radiogroup" aria-labelledby="lbl-mode" className="choices">
-                  {(['max', 'steady'] as const).map((m) => (
-                    <label key={m} className={mode === m ? 'choice on' : 'choice'}>
-                      <input type="radio" name="nt-mode" checked={mode === m} onChange={() => setMode(m)} />
-                      <span>
-                        <b>{testModeName(m)}</b>
-                        {m === 'max' ? (
-                          <span className="nt-choice-hint">回線がどこまで速く送れるか（上限）を測ります</span>
-                        ) : (
-                          <span className="nt-choice-hint">映像に近い送り方で、届かずに失われた割合と遅れのばらつきを見ます</span>
-                        )}
-                      </span>
-                    </label>
-                  ))}
-                </div>
-                {mode === 'steady' && (
-                  <div className="inline" style={{ marginTop: 10 }}>
-                    <label htmlFor="nt-rate">送る速さ</label>
-                    <select id="nt-rate" className="select nt-select" value={rateNow} onChange={(e) => setRate(Number(e.target.value))}>
-                      {rates.map((r) => (
-                        <option key={r} value={r}>
-                          {r} Mbps
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
               </Row>
               <Row label="時間" labelId="lbl-dur">
                 <Segmented
@@ -308,7 +339,17 @@ export function NetworkPage() {
                   </p>
                 )}
                 {tputNotice && <ProblemLine text={tputNotice} alert />}
-                {tput && <TputView role={role} test={tput} bitrateRange={bitrateRange} />}
+                {tput && <TputView role={role} test={tput} bitrateRange={bitrateRange} saturate={saturate} />}
+                {tput && limit && (
+                  <CapBox
+                    test={tput}
+                    limit={limit}
+                    cap={capFrom(tput, saturate)}
+                    onUse={() => askCap(tput)}
+                    busy={capPosting || capAsk !== null}
+                  />
+                )}
+                {capNotice && <ProblemLine text={capNotice} alert />}
               </div>
             </>
           )}
@@ -336,7 +377,7 @@ export function NetworkPage() {
                         <td className="muted">{timeOf(t.started_at)}</td>
                         <td>{whatOf(role, t)}</td>
                         <td>
-                          <Summary role={role} test={t} />
+                          <Summary role={role} test={t} saturate={saturate} used={!!limit && limit.test_id === t.id} />
                         </td>
                       </tr>
                     ))}
@@ -351,6 +392,31 @@ export function NetworkPage() {
           </div>
         </section>
       </div>
+
+      {capAsk && limit && (
+        <AlertDialog
+          busy={capPosting}
+          title={capConfirmTitle}
+          description={capConfirmText(limit.mbps, capAsk.mbps, status.state !== 'stopped')}
+          onCancel={() => !capPosting && setCapAsk(null)}
+          actions={
+            capPosting ? (
+              <div role="status" style={{ display: 'flex', alignItems: 'center', minHeight: 44, fontWeight: 600 }}>
+                上限を変えています…
+              </div>
+            ) : (
+              <>
+                <button type="button" className="btn" onClick={() => setCapAsk(null)} data-autofocus>
+                  キャンセル
+                </button>
+                <button type="button" className="btn btn-primary" onClick={confirmCap}>
+                  上限にする
+                </button>
+              </>
+            )
+          }
+        />
+      )}
     </Shell>
   );
 }
@@ -445,61 +511,63 @@ function Rtt({ t }: { t: ReachabilityTarget }) {
   );
 }
 
-function TputView({ role, test, bitrateRange }: { role: Role; test: Tput; bitrateRange: [number, number] }) {
+function TputView({
+  role,
+  test,
+  bitrateRange,
+  saturate,
+}: {
+  role: Role;
+  test: Tput;
+  bitrateRange: [number, number];
+  saturate: number;
+}) {
   const p = paramsOf(test);
-  const what = `${directionText(role, p.direction)}・${testModeShort(p.mode, p.rate)}・${p.duration} 秒`;
+  const what = `${directionText(role, p.direction)}・${p.duration} 秒`;
   if (test.state === 'running') {
-    const r = test.result;
-    const latest = r && r.per_second_mbps.length > 0 ? r.per_second_mbps[r.per_second_mbps.length - 1] : null;
     const elapsed = Math.min(p.duration, Math.floor(test.progress * p.duration));
-    return (
-      <Progress
-        value={test.progress}
-        label="回線の速さを測っている進み具合"
-        note={`${what}　${elapsed} / ${p.duration} 秒${latest !== null ? `　いま ${fixed1(latest)} Mbps` : ''}`}
-      />
-    );
+    return <Progress value={test.progress} label="回線の速さを測っている進み具合" note={`${what}　${elapsed} / ${p.duration} 秒`} />;
   }
   if (test.state === 'failed' || !test.result) {
     return <ProblemLine text={throughputErrorText(role, test.error ?? 'failed')} />;
   }
-  return <TputResult what={what} result={test.result} direction={p.direction} mode={p.mode} bitrateRange={bitrateRange} />;
+  return <TputResult what={what} result={test.result} direction={p.direction} bitrateRange={bitrateRange} saturate={saturate} />;
 }
 
 function TputResult({
   what,
   result: r,
   direction,
-  mode,
   bitrateRange,
+  saturate,
 }: {
   what: string;
   result: ThroughputResult;
   direction: NetworkTestDirection;
-  mode: NetworkTestMode;
   bitrateRange: [number, number];
+  saturate: number;
 }) {
-  // The verdict needs the upper limit in the video's direction; a steady test only sends the rate it was given.
-  // Judged on the value as shown (one decimal), so "5.0 Mbps" never reads as too slow.
-  const verdict = direction === 'to_peer' && mode === 'max' ? videoVerdict(Number(fixed1(r.throughput_mbps)), bitrateRange) : null;
-  const extras: [string, string][] =
-    mode === 'steady'
-      ? [
-          ['損失（届かずに失われた割合）', r.loss_pct !== null ? `${fixed1(r.loss_pct)} %` : '—'],
-          ['揺らぎ（遅れのばらつき）', r.jitter_ms !== null ? `${fixed1(r.jitter_ms)} ms` : '—'],
-        ]
-      : r.rtt_ms !== null
-        ? [['往復時間（測っている間）', `${ms(r.rtt_ms)} ms`]]
-        : [];
+  const full = isSaturated(r);
+  // The verdict is about the video's direction, judged on the value as shown (two decimals).
+  const verdict = direction === 'to_peer' ? videoVerdict(speedOf(r, saturate), bitrateRange) : null;
+  const extras: [string, string][] = [];
+  if (Number.isFinite(r.sent_mbps)) extras.push(['送った速さ', `${fixed2(r.sent_mbps)} Mbps`]);
+  if (full && Number.isFinite(r.loss_pct)) extras.push(['届かなかった割合', `${fixed1(r.loss_pct)} %`]);
   return (
     <div className="nt-result" role="status">
       <p className="nt-what">{what}</p>
       <div className="nt-figures">
         <div>
-          <div className="readout-label">送れた速さ</div>
+          <div className="readout-label">届いた速さ</div>
           <div className="readout-value">
-            <b>{fixed1(r.throughput_mbps)}</b>
-            <span>Mbps</span>
+            {full ? (
+              <>
+                <b>{fixed2(r.throughput_mbps)}</b>
+                <span>Mbps</span>
+              </>
+            ) : (
+              <b className="nt-atleast">{fasterThan(saturate)}</b>
+            )}
           </div>
         </div>
         {extras.length > 0 && (
@@ -513,6 +581,7 @@ function TputResult({
           </dl>
         )}
       </div>
+      <p className="nt-note">{throughputNote(full, Number.isFinite(r.sent_mbps) ? r.sent_mbps : saturate)}</p>
       {verdict && (
         <p className="nt-line nt-verdict" style={{ color: toneText[VERDICT_TONE[verdict.level]] }}>
           <Glyph tone={VERDICT_TONE[verdict.level]} />
@@ -523,15 +592,54 @@ function TputResult({
   );
 }
 
+/**
+ * Under a finished result towards the receiver: offer to make it the send cap, or say that it is
+ * the cap now. Hidden when the result is the cap already (from somewhere else) or cannot be one.
+ */
+function CapBox({
+  test,
+  limit,
+  cap,
+  onUse,
+  busy,
+}: {
+  test: Tput;
+  limit: SendLimit;
+  cap: number | null;
+  onUse: () => void;
+  busy: boolean;
+}) {
+  if (limit.test_id === test.id && limit.source === 'measured') {
+    return (
+      <p className="nt-line nt-used" role="status">
+        <Glyph tone="ok" />
+        <span>{capDone(limit)}</span>
+      </p>
+    );
+  }
+  if (cap === null || round2(cap) === round2(limit.mbps)) return null;
+  return (
+    <div className="nt-use">
+      <p>
+        {capOffer}
+        <span className="nowrap-phrase">{capCurrent(limit)}</span>
+      </p>
+      <button type="button" className="btn btn-primary" onClick={onUse} disabled={busy}>
+        {capButton}
+      </button>
+    </div>
+  );
+}
+
 /** 内容 column of the list. */
 function whatOf(role: Role, t: NetworkTest): string {
   if (isReach(t)) return 'つながりの確認';
   const p = paramsOf(t);
-  return `回線の速さ（${directionText(role, p.direction)}・${testModeShort(p.mode, p.rate)}・${p.duration} 秒）`;
+  return `回線の速さ（${directionText(role, p.direction)}・${p.duration} 秒）`;
 }
 
 /** 結果 column of the list: the shape for problems, plain numbers otherwise. */
-function Summary({ role, test: t }: { role: Role; test: NetworkTest }) {
+function Summary({ role, test: t, saturate, used }: { role: Role; test: NetworkTest; saturate: number; used: boolean }) {
   if (t.state === 'running') return <span className="muted">{isReach(t) ? '確かめています…' : '測っています…'}</span>;
   if (isReach(t)) {
     if (t.state === 'failed' || !t.result) return <Flag tone="err" text="確かめられませんでした" />;
@@ -549,11 +657,12 @@ function Summary({ role, test: t }: { role: Role; test: NetworkTest }) {
   }
   if (t.state === 'failed' || !t.result) return <Flag tone="err" text={throughputErrorShort(role, t.error ?? 'failed')} />;
   const r = t.result;
-  const steady = paramsOf(t).mode === 'steady';
-  const parts = [`${fixed1(r.throughput_mbps)} Mbps`];
-  if (steady && r.loss_pct !== null) parts.push(`損失 ${fixed1(r.loss_pct)} %`);
-  if (steady && r.jitter_ms !== null) parts.push(`揺らぎ ${fixed1(r.jitter_ms)} ms`);
-  return <span>{parts.join('、')}</span>;
+  return (
+    <span className="nt-sum">
+      <span>届いた速さ {isSaturated(r) ? `${fixed2(r.throughput_mbps)} Mbps` : fasterThan(saturate)}</span>
+      {used && <span className="chip-outline">{capUsedMark}</span>}
+    </span>
+  );
 }
 
 function Flag({ tone, text }: { tone: Tone; text: string }) {

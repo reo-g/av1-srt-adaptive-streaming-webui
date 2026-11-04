@@ -678,6 +678,7 @@ mod tests {
             listen_port: 60021,
             input: Input::Camera("/dev/video0".into()),
             manual_kbps: None,
+            maxbw_kbps: 5000,
         };
         let t0 = Instant::now();
         (Machine::new(role, Fake::default(), plan, PathBuf::from("/run/ctrld"), t0), t0)
