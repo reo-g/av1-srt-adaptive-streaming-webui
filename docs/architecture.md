@@ -103,7 +103,8 @@ PC・タブレットのブラウザ
 | `Stats.send_late_5m` | 送信側で破棄したパケット（`pktSndDrop`）の直近 5 分（never-drop ではふつう 0） |
 | `Stats.unrecovered_5m` | 受信側で回復できなかったパケット（`pktRcvDrop` ＋ 欠番）の直近 5 分 |
 | `Stats.stalls_5m` / `stall_s_5m` | 再生側が数えた映像の停止の回数と合計秒数（直近 5 分） |
-| `Stats.delay_profile` / `delay_target_ms` / `TransportSettings.delay` | 標準：送受信の `latency`（`SRTO_LATENCY`）8000 ms と再生まで 9.5 s。低遅延（準備中）：約 1.5 s |
+| `Stats.delay_profile` / `delay_target_ms` / `TransportSettings.delay` | 遅延のプロファイル（daemon の `src/profile.rs`）。標準：送受信の `latency`（`SRTO_LATENCY`）8000 ms と再生まで 9.5 s。低遅延：約 1.5 s（標準に preset 10・先読みなし、小さなメッセージをすぐ送る、固定のビットレート、表示の待ち 400 ms と余裕の見張りを足したもの。device.toml の `[profile_low]`）。送信機は伝送を始めるときに伝送設定の遅延を使い、接続のときにストリーム ID（`SRTO_STREAMID`、`delay=low` など）で受信機に伝える。受信機は、受信プログラムが出すストリーム ID の行を見て、再生プログラムの制御の入力（`--ctl-fd`）に低遅延の行を書き、計測値をそのプロファイルに切り替える（`follows_peer: true`）。受信機の `delay_target_ms` は、再生プログラムが自分で足した待ち時間（`ts_offset_ms` の増え分）を含む |
+| `VideoOptions.auto_available` / 影響 `low_delay_fixed` | 低遅延のあいだは、保存した `encode.mode` によらず固定のビットレート（`encode.manual`）で送る（おまかせは効かない）。映像設定は書き換えない |
 | `Stats.video_latency_ms` | 受信機の実測（送信機に入った時刻と表示時刻の差）。測れるまでは `null` |
 | `Media.label` | 画面に出す名前。カメラは名前（例「Facecam 4K」）、ファイルはフォルダーを除いたファイル名。デバイスのパスは出さない |
 | `Impact reconnect_gap` / `input_switch_gap` の `gap_s` | 接続をやり直したときに受信側の映像が途切れる秒数。遅延の設定でおよそ決まる（標準で約 10 秒） |

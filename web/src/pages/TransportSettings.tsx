@@ -22,6 +22,7 @@ import { AlertStrip, Shell } from '../components/Shell';
 import {
   cipherName,
   delayDesc,
+  delayFollowed,
   delayName,
   fieldErrorText,
   modeName,
@@ -97,7 +98,7 @@ const FALLBACK_OPTIONS: TransportOptions = {
   ciphers: ['none'],
   delay_profiles: [
     { profile: 'standard', target_ms: 9500, available: true },
-    { profile: 'low', target_ms: 1500, available: false },
+    { profile: 'low', target_ms: 1500, available: true },
   ],
 };
 
@@ -611,6 +612,7 @@ function TransportSettingsTx() {
                     );
                   })}
                 </div>
+                <p className="help">{delayFollowed}</p>
                 {errFor('delay.profile') && <FieldError text={fieldErrorText(errFor('delay.profile')!)} />}
                 {changed('delay') && <Applied value={delayName(applied.delay, targetMs(applied.delay))} onRevert={() => revert('delay')} />}
               </Row>

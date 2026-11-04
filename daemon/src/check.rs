@@ -98,6 +98,9 @@ pub struct VideoCtx<'a> {
     pub gap_s: i64,
     pub cameras: &'a [String],
     pub files: &'a [String],
+    /// The applied delay is low: the fixed bitrate (applied.manual_mbps) is sent whatever the mode
+    /// says, and automatic mode cannot be in effect (VideoOptions.auto_available false).
+    pub low_delay: bool,
 }
 
 pub fn check_video(d: &VideoDraft, c: &VideoCtx) -> CheckResult {
@@ -146,6 +149,9 @@ pub fn check_video(d: &VideoDraft, c: &VideoCtx) -> CheckResult {
     let br_changed = manual && d.bitrate != Some(c.cur_mbps);
     let loop_changed = file && d.loop_.unwrap_or(false) != a.input.loop_;
     let any = src_changed || mode_changed || br_changed || loop_changed;
+    // While the delay is low the fixed bitrate is sent in either mode: a new mode alone is stored
+    // but changes nothing in the transmission.
+    let sent_mode_changed = mode_changed && !c.low_delay;
 
     match c.state {
         LinkState::Live if src_changed => {
@@ -153,15 +159,19 @@ pub fn check_video(d: &VideoDraft, c: &VideoCtx) -> CheckResult {
             impacts.push(im("warn", "input_switch_gap", json!({ "gap_s": c.gap_s })));
             impacts.push(im("warn", "reconnect_gap", json!({ "gap_s": c.gap_s })));
         }
-        LinkState::Live if mode_changed || br_changed => impacts.push(im("ok", "switch_no_gap", json!({}))),
+        LinkState::Live if sent_mode_changed || br_changed => impacts.push(im("ok", "switch_no_gap", json!({}))),
         LinkState::Stopped if any => impacts.push(im("info", "saved_while_stopped", json!({}))),
         _ => {}
     }
     if mode_changed && manual {
         impacts.push(im("info", "manual_fixed", json!({})));
     }
-    if mode_changed && !manual {
+    if sent_mode_changed && !manual {
         impacts.push(im("info", "auto_decides", json!({})));
+    }
+    if c.low_delay && d.mode() == Some(Mode::Auto) {
+        // not an error: the mode is stored and comes into effect when the delay is standard again
+        impacts.push(im("info", "low_delay_fixed", json!({ "bitrate_mbps": a.manual_mbps })));
     }
     let br = d.bitrate.unwrap_or(0.0);
     if br_changed && br_valid && br < c.cur_mbps {
@@ -286,6 +296,10 @@ pub struct TransportCtx<'a> {
     pub state: LinkState,
     /// (profile, target_ms, available)
     pub profiles: &'a [(DelayProfile, u32, bool)],
+    /// The applied video mode is automatic.
+    pub video_auto: bool,
+    /// The fixed bitrate of the video settings (encode.manual.bitrate_mbps): what low delay sends.
+    pub fixed_mbps: f64,
 }
 
 fn port_ok(p: Option<f64>) -> bool {
@@ -355,6 +369,13 @@ pub fn check_transport(d: &TransportDraft, c: &TransportCtx) -> CheckResult {
             impacts.push(im("ok", "no_peer_effect", json!({})));
         }
     }
+    // To low delay: automatic mode is not used while it is applied (the stored video mode is kept).
+    if dp.is_some_and(|p| p.0 == DelayProfile::Low && p.2) && c.applied.delay != DelayProfile::Low {
+        if c.video_auto {
+            impacts.push(im("info", "low_delay_fixed", json!({ "bitrate_mbps": c.fixed_mbps })));
+        }
+        impacts.push(im("info", "low_delay_effects", json!({})));
+    }
     CheckResult { ok: errors.is_empty(), errors, impacts }
 }
 
@@ -367,11 +388,7 @@ pub fn apply_transport(d: &TransportDraft, a: &TransportStored) -> TransportStor
         peer_host: d.host.clone().unwrap_or_else(|| a.peer_host.clone()),
         peer_port: port(d.port, a.peer_port),
         listen_port: port(d.listen_port, a.listen_port),
-        delay: match d.profile.as_deref() {
-            Some("low") => DelayProfile::Low,
-            Some("standard") => DelayProfile::Standard,
-            _ => a.delay,
-        },
+        delay: d.profile.as_deref().and_then(DelayProfile::parse).unwrap_or(a.delay),
         cipher: d.cipher.clone().unwrap_or_else(|| a.cipher.clone()),
         // a new value is the operator's; the same value keeps where it came from
         send_limit: d.limit_changed(a).map_or_else(|| a.send_limit.clone(), SendLimit::manual),
@@ -626,6 +643,7 @@ mod tests {
                 gap_s: 10,
                 cameras: &cams,
                 files: &files,
+                low_delay: false,
             };
             let r = check_video(&VideoDraft::parse(&body), &ctx);
             let (e, i) = codes(&r);
@@ -650,6 +668,7 @@ mod tests {
             gap_s: 10,
             cameras: &cams,
             files: &files,
+            low_delay: false,
         };
         let check = |body: Value| codes(&check_video(&VideoDraft::parse(&body), &ctx)).0;
         // empty equals the applied (empty) file, still not a choice
@@ -677,6 +696,7 @@ mod tests {
             gap_s: 10,
             cameras: &[],
             files: &[],
+            low_delay: false,
         };
         let body = json!({ "version": 1, "input": { "kind": "file", "camera": "/dev/video0", "file": "/srv/media/a.y4m", "loop": true },
                            "encode": { "mode": "manual", "manual": { "bitrate_mbps": 2.5 } } });
@@ -692,6 +712,98 @@ mod tests {
         assert_eq!((next.version, next.mode, next.manual_mbps), (2, Mode::Manual, 2.0));
         let back = apply_video(&VideoDraft::parse(&draft("camera", "/dev/video0", "", "auto", None)), &next);
         assert_eq!((back.mode, back.manual_mbps), (Mode::Auto, 2.0));
+    }
+
+    /// (case, applied mode, state, draft, impacts): the applied delay is low, the fixed bitrate 3.0.
+    #[test]
+    fn video_rules_while_low_delay_is_applied() {
+        let cams = vec!["/dev/video0".to_string()];
+        let cam = |mode: &str, br: Option<f64>| draft("camera", "/dev/video0", "/srv/media/a.y4m", mode, br);
+        let cases: Vec<(&str, Mode, LinkState, Value, &[&str])> = vec![
+            ("auto stored, nothing changed, live", Mode::Auto, Live, cam("auto", Some(3.0)), &["info:low_delay_fixed"]),
+            ("auto stored, nothing changed, stopped", Mode::Auto, Stopped, cam("auto", None), &["info:low_delay_fixed"]),
+            // the mode is stored, nothing changes in the transmission (no switch, no automatic steps)
+            ("manual -> auto, live", Mode::Manual, Live, cam("auto", Some(3.0)), &["info:low_delay_fixed"]),
+            ("manual -> auto, stopped", Mode::Manual, Stopped, cam("auto", Some(3.0)), &["info:saved_while_stopped", "info:low_delay_fixed"]),
+            ("auto -> manual at the same value, live", Mode::Auto, Live, cam("manual", Some(3.0)), &["info:manual_fixed"]),
+            (
+                "auto -> manual lower, live",
+                Mode::Auto,
+                Live,
+                cam("manual", Some(2.5)),
+                &["ok:switch_no_gap", "info:manual_fixed", "info:bitrate_lower_quality"],
+            ),
+            ("manual, a new value, live", Mode::Manual, Live, cam("manual", Some(3.5)), &["ok:switch_no_gap"]),
+            ("manual, nothing changed", Mode::Manual, Live, cam("manual", Some(3.0)), &[]),
+        ];
+        for (name, mode, state, body, imps) in cases {
+            let applied = video_applied(mode);
+            let ctx = VideoCtx {
+                applied: &applied,
+                state,
+                cur_mbps: 3.0,
+                bandwidth_mbps: None,
+                loop_available: false,
+                gap_s: 2,
+                cameras: &cams,
+                files: &[],
+                low_delay: true,
+            };
+            let r = check_video(&VideoDraft::parse(&body), &ctx);
+            let (e, i) = codes(&r);
+            assert!(e.is_empty() && r.ok, "{name}: {e:?}");
+            assert_eq!(i, imps, "{name}: impacts");
+            if let Some(x) = r.impacts.iter().find(|x| x.code == "low_delay_fixed") {
+                assert_eq!(serde_json::to_value(x).unwrap(), json!({ "level": "info", "code": "low_delay_fixed", "params": { "bitrate_mbps": 3.0 } }));
+            }
+        }
+    }
+
+    #[test]
+    fn transport_rules_to_low_delay() {
+        let profiles = [(DelayProfile::Standard, 9500, true), (DelayProfile::Low, 1500, true)];
+        let low = || tdraft("outbound", "192.168.0.88", json!(60021), "low", "none");
+        // (case, applied delay, video auto, state, draft, impacts)
+        let cases: Vec<(&str, DelayProfile, bool, LinkState, Value, &[&str])> = vec![
+            ("to low, auto, live", DelayProfile::Standard, true, Live, low(), &["warn:reconnect_gap", "info:low_delay_fixed", "info:low_delay_effects"]),
+            ("to low, fixed, stopped", DelayProfile::Standard, false, Stopped, low(), &["info:saved_while_stopped", "info:low_delay_effects"]),
+            (
+                "to low, auto, reconnecting",
+                DelayProfile::Standard,
+                true,
+                Reconnecting,
+                low(),
+                &["info:reconnect", "ok:no_peer_effect", "info:low_delay_fixed", "info:low_delay_effects"],
+            ),
+            ("low already, another peer, live", DelayProfile::Low, true, Live, tdraft("outbound", "192.168.0.89", json!(60021), "low", "none"), &["warn:reconnect_gap"]),
+            ("back to standard, live", DelayProfile::Low, true, Live, tdraft("outbound", "192.168.0.88", json!(60021), "standard", "none"), &["warn:reconnect_gap"]),
+        ];
+        for (name, delay, auto, state, body, imps) in cases {
+            let mut applied = transport_applied();
+            applied.delay = delay;
+            let ctx = TransportCtx { applied: &applied, state, profiles: &profiles, video_auto: auto, fixed_mbps: 2.5 };
+            let r = check_transport(&TransportDraft::parse(&body), &ctx);
+            let (e, i) = codes(&r);
+            assert!(e.is_empty(), "{name}: {e:?}");
+            assert_eq!(i, imps, "{name}: impacts");
+        }
+        // the gap is the new profile's delay; the fixed bitrate is the video settings'
+        let applied = transport_applied();
+        let ctx = TransportCtx { applied: &applied, state: Live, profiles: &profiles, video_auto: true, fixed_mbps: 2.5 };
+        let r = check_transport(&TransportDraft::parse(&low()), &ctx);
+        assert_eq!(
+            serde_json::to_value(&r.impacts).unwrap(),
+            json!([{ "level": "warn", "code": "reconnect_gap", "params": { "gap_s": 2 } },
+                   { "level": "info", "code": "low_delay_fixed", "params": { "bitrate_mbps": 2.5 } },
+                   { "level": "info", "code": "low_delay_effects" }])
+        );
+        let back = apply_transport(&TransportDraft::parse(&low()), &applied);
+        assert_eq!(back.delay, DelayProfile::Low);
+        // not offered (turned off in device.toml): refused, nothing about low delay
+        let off = [(DelayProfile::Standard, 9500, true), (DelayProfile::Low, 1500, false)];
+        let ctx = TransportCtx { profiles: &off, ..ctx };
+        let r = check_transport(&TransportDraft::parse(&low()), &ctx);
+        assert_eq!(codes(&r), (vec!["delay.profile:invalid".to_string()], vec!["warn:reconnect_gap".to_string()]));
     }
 
     fn transport_applied() -> TransportStored {
@@ -746,7 +858,7 @@ mod tests {
         ];
         for (name, state, body, errs, imps) in cases {
             let applied = transport_applied();
-            let ctx = TransportCtx { applied: &applied, state, profiles: &profiles };
+            let ctx = TransportCtx { applied: &applied, state, profiles: &profiles, video_auto: true, fixed_mbps: 3.0 };
             let r = check_transport(&TransportDraft::parse(&body), &ctx);
             let (e, i) = codes(&r);
             assert_eq!(e, errs, "{name}: errors");
@@ -754,7 +866,7 @@ mod tests {
         }
         // the gap follows the profile in effect when the requested one is not available
         let applied = transport_applied();
-        let ctx = TransportCtx { applied: &applied, state: Live, profiles: &profiles };
+        let ctx = TransportCtx { applied: &applied, state: Live, profiles: &profiles, video_auto: true, fixed_mbps: 3.0 };
         let r = check_transport(&TransportDraft::parse(&tdraft("outbound", "10.0.0.1", json!(1), "low", "none")), &ctx);
         assert_eq!(r.impacts[0].params["gap_s"], 10);
     }
@@ -763,7 +875,7 @@ mod tests {
     fn transport_passphrase_and_apply() {
         let profiles = [(DelayProfile::Standard, 9500, true)];
         let applied = transport_applied();
-        let ctx = TransportCtx { applied: &applied, state: Stopped, profiles: &profiles };
+        let ctx = TransportCtx { applied: &applied, state: Stopped, profiles: &profiles, video_auto: true, fixed_mbps: 3.0 };
         let mut body = tdraft("outbound", "10.0.0.5", json!(60030), "standard", "none");
         body["encryption"]["passphrase"] = json!("short");
         // ignored while the cipher is none
@@ -813,14 +925,14 @@ mod tests {
         ];
         for (name, state, body, errs, imps) in cases {
             let applied = transport_applied();
-            let ctx = TransportCtx { applied: &applied, state, profiles: &profiles };
+            let ctx = TransportCtx { applied: &applied, state, profiles: &profiles, video_auto: true, fixed_mbps: 3.0 };
             let r = check_transport(&TransportDraft::parse(&body), &ctx);
             let (e, i) = codes(&r);
             assert_eq!(e, errs, "{name}: errors");
             assert_eq!(i, imps, "{name}: impacts");
         }
         let applied = transport_applied();
-        let ctx = TransportCtx { applied: &applied, state: Stopped, profiles: &profiles };
+        let ctx = TransportCtx { applied: &applied, state: Stopped, profiles: &profiles, video_auto: true, fixed_mbps: 3.0 };
         let r = check_transport(&TransportDraft::parse(&only(json!(25))), &ctx);
         assert_eq!(serde_json::to_value(&r.errors).unwrap()[0]["params"], json!({ "min": 1.0, "max": 20.0 }));
         // send_limit: null is not "left out"; the cap's error comes first (as the mock)

@@ -37,6 +37,9 @@ pub struct Config {
     pub rx: Rx,
     #[serde(default)]
     pub profile: ProfileConfig,
+    /// The low-delay profile (低遅延): layered on the resolved standard profile (profile.rs).
+    #[serde(default)]
+    pub profile_low: ProfileLowConfig,
     #[serde(default)]
     pub preview: Preview,
     #[serde(default)]
@@ -273,6 +276,65 @@ pub struct ProfileConfig {
     pub delay_margin_warn_s: Option<f64>,
 }
 
+/// Changes to the low-delay profile. It starts from the resolved standard profile (the defaults
+/// and [profile]) with the built-in low-delay changes (profile.rs `Profile::low`); this table is
+/// applied last, with the same keys and rules as [profile], plus `enabled` and `player_ctl`.
+/// The receiver always starts with the standard profile (it learns the transmitter's profile only
+/// when it connects), so receiver_env, receiver_args and player_args here are not used; it follows
+/// a low-delay transmitter with player_ctl.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct ProfileLowConfig {
+    /// Offered in the transport settings (TransportOptions.delay_profiles: low available).
+    pub enabled: bool,
+    /// rx: lines written to the player's control input when a low-delay transmitter connects.
+    pub player_ctl: Option<Vec<String>>,
+    pub sender_env: BTreeMap<String, toml::Value>,
+    pub bridge_env: BTreeMap<String, toml::Value>,
+    pub bridge_manual_env: BTreeMap<String, toml::Value>,
+    pub receiver_env: BTreeMap<String, toml::Value>,
+    pub sender_args: Option<Vec<String>>,
+    pub receiver_args: Option<Vec<String>>,
+    pub player_args: Option<Vec<String>>,
+    pub delay_target_ms: Option<u32>,
+    pub delay_margin_warn_s: Option<f64>,
+}
+
+impl Default for ProfileLowConfig {
+    fn default() -> Self {
+        ProfileLowConfig {
+            enabled: true,
+            player_ctl: None,
+            sender_env: BTreeMap::new(),
+            bridge_env: BTreeMap::new(),
+            bridge_manual_env: BTreeMap::new(),
+            receiver_env: BTreeMap::new(),
+            sender_args: None,
+            receiver_args: None,
+            player_args: None,
+            delay_target_ms: None,
+            delay_margin_warn_s: None,
+        }
+    }
+}
+
+impl ProfileLowConfig {
+    /// The keys it shares with [profile].
+    pub fn changes(&self) -> ProfileConfig {
+        ProfileConfig {
+            sender_env: self.sender_env.clone(),
+            bridge_env: self.bridge_env.clone(),
+            bridge_manual_env: self.bridge_manual_env.clone(),
+            receiver_env: self.receiver_env.clone(),
+            sender_args: self.sender_args.clone(),
+            receiver_args: self.receiver_args.clone(),
+            player_args: self.player_args.clone(),
+            delay_target_ms: self.delay_target_ms,
+            delay_margin_warn_s: self.delay_margin_warn_s,
+        }
+    }
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Config, String> {
         let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -403,6 +465,19 @@ mod tests {
         let hops: Vec<&str> = n.hops.iter().map(|h| h.address.as_str()).collect();
         assert_eq!(hops, ["192.168.0.65", "192.168.0.56"]);
         assert!(c.rx.peer_host.is_none());
+        assert!(c.profile_low.enabled && c.profile_low.player_ctl.is_none(), "the low-delay profile as built in");
+    }
+
+    #[test]
+    fn profile_low_section() {
+        let base = "id = \"RX-02\"\nrole = \"rx\"\n[media]\nrepo = \"/opt/m\"\n";
+        let c = Config::parse(&format!("{base}[profile_low]\nenabled = false\nplayer_ctl = [\"adapt on\"]\n[profile_low.bridge_env]\nGOP = 30\n")).unwrap();
+        assert!(!c.profile_low.enabled);
+        assert_eq!(c.profile_low.player_ctl.as_deref(), Some(&["adapt on".to_string()][..]));
+        assert_eq!(c.profile_low.changes().bridge_env["GOP"].as_integer(), Some(30));
+        for bad in ["enabled = 1", "player_ctl = \"adapt on\"", "fixed_bitrate = false", "delay_profile = \"low\""] {
+            assert!(Config::parse(&format!("{base}[profile_low]\n{bad}\n")).is_err(), "{bad}");
+        }
     }
 
     #[test]

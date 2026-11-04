@@ -7,7 +7,7 @@ import { Chevron, FullscreenIcon, Glyph, toneText, type Tone } from '../componen
 import { mediaMeta, OpsPreview } from '../components/Preview';
 import { Shell } from '../components/Shell';
 import { Sparkline } from '../components/Sparkline';
-import { delayName, eventText, startProblem } from '../i18n/ja';
+import { delayFollowsPeer, delayName, eventText, startProblem } from '../i18n/ja';
 import { fixed1, int, timeOf } from '../lib/format';
 import { openFullscreen, takeReturnFocus } from '../lib/fullscreen';
 import { href } from '../lib/router';
@@ -92,7 +92,8 @@ function readouts(role: Role, st: Stats | null, status: Status): Readout[] {
             tone: low ? 'warn' : null,
             spark: margin,
           }
-        : off('映像が止まるまでの余裕', live ? '未取得' : noLink, margin),
+        : // low delay has no such margin (the device sends no margin and no warning level then)
+          off('映像が止まるまでの余裕', live ? (st.delay_profile === 'low' ? '低遅延のあいだは測りません' : '未取得') : noLink, margin),
       loss(),
       live && st.send_mbps !== null
         ? { label: '送っているデータ量', value: fixed1(st.send_mbps), unit: 'Mbps', ref: '直近 6 秒の平均。送り直した分を含む', tone: null, spark: send }
@@ -127,7 +128,7 @@ function readouts(role: Role, st: Stats | null, status: Status): Readout[] {
   ];
 }
 
-function details(role: Role, st: Stats | null, status: Status): { label: string; value: string; warn?: boolean }[] {
+function details(role: Role, st: Stats | null, status: Status): { label: string; value: string; note?: string; warn?: boolean }[] {
   const stopped = status.state === 'stopped';
   const live = status.state === 'live' && st !== null;
   const na = stopped ? '— 停止中' : '— 未取得';
@@ -163,7 +164,8 @@ function details(role: Role, st: Stats | null, status: Status): { label: string;
       value: live && st.unrecovered_5m !== null ? String(st.unrecovered_5m) : na,
       warn: live && (st.unrecovered_5m ?? 0) > 0,
     },
-    delay,
+    // the receiver does not choose the delay: it follows the transmitter
+    { ...delay, note: delayFollowsPeer },
   ];
 }
 
@@ -397,7 +399,7 @@ export function OpsPage() {
               {more && (
                 <dl className="details">
                   {rows.map((d) => (
-                    <div key={d.label}>
+                    <div key={d.label} className={d.note ? 'has-note' : undefined}>
                       <dt>{d.label}</dt>
                       <dd style={{ color: d.warn ? 'var(--warn-text)' : d.value.startsWith('—') ? 'var(--sub)' : 'var(--ink)' }}>
                         {d.warn ? (
@@ -410,6 +412,7 @@ export function OpsPage() {
                           d.value
                         )}
                       </dd>
+                      {d.note && <dd className="details-note">{d.note}</dd>}
                     </div>
                   ))}
                 </dl>

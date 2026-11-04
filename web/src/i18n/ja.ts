@@ -186,6 +186,10 @@ export const impactText = (i: Impact): string => {
       return '送り出しの上限は、次に伝送を始めたときから使います。いまの伝送は、これまでの上限のまま続けます';
     case 'hops_changed':
       return 'つながりの確認で確かめる機器と、無線の回線で通信してよい機器が、この内容に変わります。';
+    case 'low_delay_fixed':
+      return `低遅延のあいだは、おまかせは使えません。画質は固定の ${n1(p.bitrate_mbps)} Mbps で送ります（映像設定の「固定する画質」の値）。`;
+    case 'low_delay_effects':
+      return '動きの多い場面や回線が混んだときは、受信側の遅れが少しずつ増えることがあります。遅れは、回線が落ち着くと 1 分に 1 コマずつ戻ります。';
   }
 };
 
@@ -234,6 +238,11 @@ export const videoModeHelp = (m: 'auto' | 'manual') =>
   m === 'auto'
     ? '回線が混んだら画質を下げ、空いたら戻します。映像が止まりにくくなります。'
     : '選んだ画質のまま送ります。回線が混むと映像が遅れたり止まったりすることがあります。';
+/** Under the choice while the delay is low (VideoOptions.auto_available false). */
+export const autoUnavailable = 'おまかせは、低遅延のあいだは使えません。';
+/** While the delay is low and おまかせ is the applied mode: what is sent instead. */
+export const lowDelayFixedNote = (mbps: number) =>
+  `いまは遅延が低遅延なので、画質は固定の ${n1(mbps)} Mbps で送ります。おまかせは、伝送設定の遅延を標準に戻すと使えます。`;
 
 /** "AV1・入力と同じ解像度とフレームレート（3840×2160・30p）" */
 export const encodingText = (e: VideoEncoding, signal: string | null): string => {
@@ -255,7 +264,13 @@ export const delayName = (p: DelayProfile, targetMs?: number) => {
   return targetMs ? `${name}（${aboutSeconds(targetMs)}）` : name;
 };
 export const delayDesc = (p: DelayProfile) =>
-  p === 'standard' ? '回線が乱れても映像が止まりにくい' : 'おまかせは使えず、画質は固定になります。回線が乱れると映像が止まりやすい';
+  p === 'standard'
+    ? '回線が乱れても映像が止まりにくい'
+    : '映像が早く届きます。おまかせは使えず、画質は固定になります。回線が乱れると、映像が止まったり遅れが増えたりします';
+/** Under the choice of the delay (transmitter): the receiver follows it. */
+export const delayFollowed = '受信機は、この設定に自動で合わせます。';
+/** Next to the delay on the receiver: it is the transmitter's. */
+export const delayFollowsPeer = '送信機の設定に合わせています';
 
 // ---------------------------------------------------------------- preview
 

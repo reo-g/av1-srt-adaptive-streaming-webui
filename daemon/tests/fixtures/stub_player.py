@@ -4,6 +4,9 @@
 Reads its stdin and writes one stats line per second to --stats-fd N with the keys of the
 phase-1 player hook: t, frames, fps, stalls, stall_ms, last_gap_ms, pts. The picture stops once
 for 0.43 s in its 6th second. At the end of its input it plays out for 1 s, then exits.
+--ctl-fd N: control lines as ll_player.py takes them (ts-offset-ms <ms>, adapt on|off), each
+answered on stdout "[player] ctl <line> ok" (or "[player] ctl ignored: <line>"); the stats lines
+then carry "ts_offset_ms". With adapt on, the offset goes up by one frame (33.3 ms) every 5 s.
 """
 import argparse
 import json
@@ -19,6 +22,7 @@ ap.add_argument("--dec")
 ap.add_argument("--ts-offset-ms")
 ap.add_argument("--no-record", action="store_true")
 ap.add_argument("--stats-fd", type=int)
+ap.add_argument("--ctl-fd", type=int)
 a, _ = ap.parse_known_args()
 print(f"[player] start dec={a.dec} ts_offset_ms={a.ts_offset_ms} no_record={a.no_record}", flush=True)
 signal.signal(signal.SIGTERM, lambda *_: (print("[player] stopped by SIGTERM", flush=True), os._exit(0)))
@@ -35,6 +39,26 @@ def reader():
 
 
 threading.Thread(target=reader, daemon=True).start()
+ctl = {"off": float(a.ts_offset_ms or 0), "adapt": False}
+
+
+def control():
+    with os.fdopen(a.ctl_fd, "r") as f:
+        for raw in f:  # EOF ends the reading, never the player
+            w = raw.split()
+            if len(w) == 2 and w[0] == "ts-offset-ms":
+                ctl["off"] = float(w[1])
+            elif len(w) == 2 and w[0] == "adapt" and w[1] in ("on", "off"):
+                ctl["adapt"] = w[1] == "on"
+            elif w:
+                print(f"[player] ctl ignored: {raw.strip()}", flush=True)
+                continue
+            if w:
+                print(f"[player] ctl {raw.strip()} ok", flush=True)
+
+
+if a.ctl_fd is not None:
+    threading.Thread(target=control, daemon=True).start()
 fd = os.fdopen(a.stats_fd, "w", buffering=1) if a.stats_fd else None
 frames = stalls = stall_ms = 0
 seen = 0
@@ -50,9 +74,14 @@ while True:
     if fps and frames >= 150 and stalls == 0:  # one stop, once the picture has run for 5 s
         stalls, stall_ms, gap, fps = 1, 433, 466.3, 17
     frames += fps
+    if ctl["adapt"] and k % 5 == 0:
+        ctl["off"] += 1000 / 30
     if fd:
-        fd.write(json.dumps({"t": round(time.monotonic(), 3), "frames": frames, "fps": float(fps), "stalls": stalls,
-                             "stall_ms": stall_ms, "last_gap_ms": gap, "pts": round(frames / 30, 3)}) + "\n")
+        row = {"t": round(time.monotonic(), 3), "frames": frames, "fps": float(fps), "stalls": stalls,
+               "stall_ms": stall_ms, "last_gap_ms": gap, "pts": round(frames / 30, 3)}
+        if a.ctl_fd is not None:
+            row["ts_offset_ms"] = round(ctl["off"], 1)
+        fd.write(json.dumps(row) + "\n")
     if st["eof"] and end_at is None:
         end_at = time.monotonic() + 1.0
     if end_at and time.monotonic() >= end_at:

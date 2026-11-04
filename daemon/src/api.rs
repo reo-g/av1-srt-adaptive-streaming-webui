@@ -10,7 +10,7 @@ use crate::config::Role;
 use crate::events::Ev;
 use crate::history::INTERVAL_S;
 use crate::media;
-use crate::model::{DelayProfile, LimitSource, LinkState, NetworkStored, SendLimit, TransportStored, SIGNAL_FORMAT};
+use crate::model::{DelayProfile, LimitSource, LinkState, Mode, NetworkStored, SendLimit, TransportStored, SIGNAL_FORMAT};
 use crate::nettest;
 use crate::preview::{Refusal, OFFER_LIMIT};
 use crate::util::{iso_jst, now_ms};
@@ -182,7 +182,7 @@ fn use_test(app: &App, id: &str) -> Response {
     dlog!("send cap {mbps} Mbps from network test {id} (was {} Mbps, {})", from.mbps, from.source.name());
     send_limit_changed(app, &mut i, &from);
     app.send(&json!({ "type": "settings", "section": "transport", "version": i.settings.transport.version }));
-    ok(&transport_view(&i.settings.transport))
+    ok(&transport_view(app, &i))
 }
 
 fn send_limit_changed(app: &App, i: &mut Inner, from: &SendLimit) {
@@ -209,6 +209,8 @@ fn request(app: &App, method: &str, path: &str, uri: &Uri, body: &Bytes) -> Resp
         }
         // 途中の無線機: both roles
         (m, p) if p == "/settings/network" || p.starts_with("/settings/network/") => network_settings(app, m, p, body),
+        // both roles: on rx the delay follows the transmitter (follows_peer) and is ignored in drafts
+        (m, p) if p == "/settings/transport" || p.starts_with("/settings/transport/") => transport_settings(app, m, p, body),
         (m, p) if p.starts_with("/settings/") || p == "/transport/compare" => {
             if !tx {
                 return error(StatusCode::CONFLICT, "unsupported_role");
@@ -259,18 +261,36 @@ fn settings(app: &App, method: &str, path: &str, body: &Bytes) -> Response {
             ok(&check_video(&VideoDraft::parse(&v), &video_ctx(app, &i, &inputs)))
         }
         ("PUT", "/settings/video") => put_video(app, body),
-        ("GET", "/settings/transport") => ok(&transport_view(&app.lock().settings.transport)),
+        ("GET", "/transport/compare") => ok(&compare(&app.lock().settings.transport)),
+        _ => not_found(),
+    }
+}
+
+/// The transport settings (both roles). The receiver does not choose the delay: it follows the
+/// transmitter it is connected to (`follows_peer`), so a draft's delay is ignored there.
+fn transport_settings(app: &App, method: &str, path: &str, body: &Bytes) -> Response {
+    match (method, path) {
+        ("GET", "/settings/transport") => ok(&transport_view(app, &app.lock())),
         ("GET", "/settings/transport/options") => ok(&transport_options(app)),
         ("POST", "/settings/transport/check") => {
             let Some(v) = body_json(body) else { return bad_body() };
             let i = app.lock();
             let profiles = profiles(app);
-            ok(&check_transport(&TransportDraft::parse(&v), &transport_ctx(&i, &profiles)))
+            ok(&check_transport(&transport_draft(app, &i, &v), &transport_ctx(&i, &profiles)))
         }
         ("PUT", "/settings/transport") => put_transport(app, body),
-        ("GET", "/transport/compare") => ok(&compare(&app.lock().settings.transport)),
         _ => not_found(),
     }
+}
+
+/// A transport draft as the rules see it: on rx the delay is the stored one (never an error,
+/// never a change).
+fn transport_draft(app: &App, i: &Inner, v: &Value) -> TransportDraft {
+    let mut d = TransportDraft::parse(v);
+    if app.cfg.role == Role::Rx {
+        d.profile = Some(i.settings.transport.delay.name().into());
+    }
+    d
 }
 
 /// 途中の無線機 (both roles). Allowed in every link state: applying stores the list, the next
@@ -348,18 +368,28 @@ fn video_ctx<'a>(app: &App, i: &'a Inner, inputs: &'a Inputs) -> VideoCtx<'a> {
         cur_mbps: app.current_mbps(i),
         bandwidth_mbps: i.stats.bandwidth_mbps,
         loop_available: false,
-        gap_s: gap_s(app.prof.delay_target_ms),
+        // a new input sets the link up again: the picture comes back after about the delay
+        gap_s: gap_s(app.applied_profile(i).delay_target_ms),
         cameras: &inputs.cameras,
         files: &inputs.file_paths,
+        low_delay: !app.auto_available(i),
     }
 }
 
 fn profiles(app: &App) -> [(DelayProfile, u32, bool); 2] {
-    [(DelayProfile::Standard, app.prof.delay_target_ms, true), (DelayProfile::Low, 1500, false)]
+    let p = &app.profiles;
+    [(DelayProfile::Standard, p.standard.delay_target_ms, true), (DelayProfile::Low, p.low.delay_target_ms, p.low_enabled)]
 }
 
 fn transport_ctx<'a>(i: &'a Inner, profiles: &'a [(DelayProfile, u32, bool)]) -> TransportCtx<'a> {
-    TransportCtx { applied: &i.settings.transport, state: i.link.state, profiles }
+    let v = &i.settings.video;
+    TransportCtx {
+        applied: &i.settings.transport,
+        state: i.link.state,
+        profiles,
+        video_auto: v.mode == Mode::Auto,
+        fixed_mbps: v.manual_mbps,
+    }
 }
 
 fn video_view(app: &App, i: &Inner) -> Value {
@@ -381,24 +411,33 @@ fn video_options(app: &App) -> Value {
         .iter()
         .map(|f| json!({ "path": f.path, "format": f.format(), "duration_s": f.duration_s }))
         .collect();
-    let bandwidth = app.lock().stats.bandwidth_mbps;
+    let i = app.lock();
+    let (bandwidth, auto_available, keyframe_s) =
+        (i.stats.bandwidth_mbps, app.auto_available(&i), app.applied_profile(&i).keyframe_s());
+    drop(i);
     json!({
         "cameras": [{ "device": cam, "label": media::camera_label(cam), "signal": signal }],
         "files": files,
         "loop_available": false,
+        "auto_available": auto_available,
         "bitrate_range_mbps": [BITRATE_RANGE.0, BITRATE_RANGE.1],
-        "encoding": { "codec": "av1", "resolution": "source", "framerate": "source", "keyframe_s": app.prof.keyframe_s() },
+        "encoding": { "codec": "av1", "resolution": "source", "framerate": "source", "keyframe_s": keyframe_s },
         "bandwidth_mbps": bandwidth,
     })
 }
 
-fn transport_view(t: &TransportStored) -> Value {
+/// TransportSettings. tx: the delay chosen here; rx: the transmitter's of the current or last
+/// connection (standard before any), which it follows.
+fn transport_view(app: &App, i: &Inner) -> Value {
+    let t = &i.settings.transport;
+    let rx = app.cfg.role == Role::Rx;
+    let delay = if rx { i.link.delay } else { t.delay };
     json!({
         "version": t.version,
         "mode": t.mode,
         "peer": { "host": t.peer_host, "port": t.peer_port },
         "listen_port": t.listen_port,
-        "delay": { "profile": t.delay },
+        "delay": { "profile": delay, "follows_peer": rx },
         "encryption": { "cipher": t.cipher, "passphrase_set": false, "passphrase_rejected_at": null },
         "send_limit": t.send_limit,
     })
@@ -460,9 +499,9 @@ fn put_video(app: &App, body: &Bytes) -> Response {
 /// (stored now; the running transmission keeps the cap it started with).
 fn put_transport(app: &App, body: &Bytes) -> Response {
     let Some(v) = body_json(body) else { return bad_body() };
-    let d = TransportDraft::parse(&v);
     let profiles = profiles(app);
     let mut i = app.lock();
+    let d = transport_draft(app, &i, &v);
     if d.version != Some(i.settings.transport.version as f64) {
         return error(StatusCode::CONFLICT, "version_conflict");
     }
@@ -493,7 +532,7 @@ fn put_transport(app: &App, body: &Bytes) -> Response {
     app.push_status(&i);
     // the radio line's filter follows the peer (host and port)
     app.update_link_filter(&i);
-    ok(&json!({ "settings": transport_view(&i.settings.transport), "applied_at": iso_jst(now_ms()), "impacts": result.impacts }))
+    ok(&json!({ "settings": transport_view(app, &i), "applied_at": iso_jst(now_ms()), "impacts": result.impacts }))
 }
 
 // ------------------------------------------------------------------ live channel
@@ -785,7 +824,7 @@ mod tests {
         // the next start's sender gets it
         let plan = app.plan(&app.lock());
         assert_eq!(plan.maxbw_kbps, 5260);
-        let spec = crate::profile::sender(&app.cfg, &app.prof, &plan, &dir);
+        let spec = crate::profile::sender(&app.cfg, app.profiles.get(plan.delay), &plan, &dir);
         assert_eq!(spec.args.last().map(String::as_str), Some("5260"));
 
         // kept across a restart
@@ -882,6 +921,123 @@ mod tests {
         body.as_object_mut().unwrap().remove("send_limit");
         let (s, _, v) = put(body).await;
         assert_eq!((s, &v["settings"]["send_limit"]["mbps"]), (StatusCode::OK, &json!(4.0)), "left out: kept");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The applied transport settings as the screen sends them back, with another delay.
+    fn transport_draft_of(view: &Value, delay: &str) -> Value {
+        json!({ "version": view["version"], "mode": view["mode"], "peer": view["peer"], "listen_port": view["listen_port"],
+                "delay": { "profile": delay }, "encryption": { "cipher": view["encryption"]["cipher"] } })
+    }
+
+    #[tokio::test]
+    async fn low_delay_on_the_transmitter() {
+        use crate::config::Role;
+        let (app, dir) = crate::nettest::stub_app("http-low", Role::Tx, LinkState::Stopped, "");
+        let (_, _, opts) = call(&app, Method::GET, "/api/v1/settings/transport/options", "").await;
+        assert_eq!(
+            opts["delay_profiles"],
+            json!([{ "profile": "standard", "target_ms": 9500, "available": true }, { "profile": "low", "target_ms": 1500, "available": true }])
+        );
+        let (_, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        assert_eq!(view["delay"], json!({ "profile": "standard", "follows_peer": false }));
+        let (_, _, v) = call(&app, Method::GET, "/api/v1/settings/video/options", "").await;
+        assert_eq!(v["auto_available"], true);
+
+        // the check: the stored mode is automatic, so the fixed bitrate is named
+        let (_, _, v) = call(&app, Method::POST, "/api/v1/settings/transport/check", transport_draft_of(&view, "low").to_string()).await;
+        assert_eq!(
+            v["impacts"],
+            json!([{ "level": "info", "code": "saved_while_stopped" }, { "level": "info", "code": "low_delay_fixed", "params": { "bitrate_mbps": 3.0 } },
+                   { "level": "info", "code": "low_delay_effects" }])
+        );
+        app.lock().link.state = LinkState::Live;
+        let (_, _, v) = call(&app, Method::POST, "/api/v1/settings/transport/check", transport_draft_of(&view, "low").to_string()).await;
+        assert_eq!(v["impacts"][0], json!({ "level": "warn", "code": "reconnect_gap", "params": { "gap_s": 2 } }));
+        app.lock().link.state = LinkState::Stopped;
+        let (s, _, v) = call(&app, Method::PUT, "/api/v1/settings/transport", transport_draft_of(&view, "low").to_string()).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["settings"]["delay"], json!({ "profile": "low", "follows_peer": false }));
+
+        // the video settings are not touched; automatic mode is not in effect while low is applied
+        let (_, _, video) = call(&app, Method::GET, "/api/v1/settings/video", "").await;
+        assert_eq!((video["encode"]["mode"].clone(), video["encode"]["manual"]["bitrate_mbps"].clone()), (json!("auto"), json!(3.0)));
+        let (_, _, v) = call(&app, Method::GET, "/api/v1/settings/video/options", "").await;
+        assert_eq!(v["auto_available"], false);
+        assert_eq!(app.current_mbps(&app.lock()), 3.0);
+        let vdraft = |mode: &str, br: f64| {
+            json!({ "version": video["version"], "input": video["input"], "encode": { "mode": mode, "manual": { "bitrate_mbps": br } } })
+        };
+        let (_, _, v) = call(&app, Method::POST, "/api/v1/settings/video/check", vdraft("auto", 3.0).to_string()).await;
+        assert_eq!(v, json!({ "ok": true, "errors": [], "impacts": [{ "level": "info", "code": "low_delay_fixed", "params": { "bitrate_mbps": 3.0 } }] }));
+        let (_, _, v) = call(&app, Method::POST, "/api/v1/settings/video/check", vdraft("manual", 2.5).to_string()).await;
+        let imps: Vec<&str> = v["impacts"].as_array().unwrap().iter().map(|i| i["code"].as_str().unwrap()).collect();
+        assert_eq!(imps, ["saved_while_stopped", "manual_fixed", "bitrate_lower_quality"]);
+
+        // the next start: the low-delay commands, the fixed bitrate although the stored mode is automatic
+        let plan = app.plan(&app.lock());
+        assert_eq!((plan.delay, plan.manual_kbps, plan.maxbw_kbps), (DelayProfile::Low, Some(3000), 5000));
+        let p = app.profiles.get(plan.delay);
+        let sender = crate::profile::sender(&app.cfg, p, &plan, &dir);
+        assert_eq!((sender.env["SRT_STREAMID"].as_str(), sender.env["SRT_SEND_PARTIAL"].as_str()), ("delay=low", "1"));
+        let bridge = crate::profile::bridge(&app.cfg, p, &plan, &dir);
+        assert_eq!((bridge.env["INITIAL_TARGET"].as_str(), bridge.env["SVT_PRESET"].as_str(), bridge.env["BUF_NODROP"].as_str()), ("3000", "10", "0"));
+
+        // back to standard: the stored automatic mode again
+        let (_, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        let (_, _, v) = call(&app, Method::POST, "/api/v1/settings/transport/check", transport_draft_of(&view, "standard").to_string()).await;
+        assert_eq!(v["impacts"], json!([{ "level": "info", "code": "saved_while_stopped" }]));
+        let (s, _, _) = call(&app, Method::PUT, "/api/v1/settings/transport", transport_draft_of(&view, "standard").to_string()).await;
+        assert_eq!(s, StatusCode::OK);
+        let plan = app.plan(&app.lock());
+        assert_eq!((plan.delay, plan.manual_kbps), (DelayProfile::Standard, None));
+        let sender = crate::profile::sender(&app.cfg, app.profiles.get(plan.delay), &plan, &dir);
+        assert_eq!(sender.env["SRT_STREAMID"], "delay=standard");
+        assert!(!sender.env.contains_key("SRT_SEND_PARTIAL"));
+        let (_, _, v) = call(&app, Method::GET, "/api/v1/settings/video/options", "").await;
+        assert_eq!(v["auto_available"], true);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // turned off in device.toml: not offered, refused as before; a stored low is standard
+        let (app, dir) = crate::nettest::stub_app("http-low-off", Role::Tx, LinkState::Stopped, "[profile_low]\nenabled = false\n");
+        let (_, _, opts) = call(&app, Method::GET, "/api/v1/settings/transport/options", "").await;
+        assert_eq!(opts["delay_profiles"][1], json!({ "profile": "low", "target_ms": 1500, "available": false }));
+        let (_, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        let (s, _, v) = call(&app, Method::PUT, "/api/v1/settings/transport", transport_draft_of(&view, "low").to_string()).await;
+        assert_eq!((s, &v["error"]["errors"]), (StatusCode::BAD_REQUEST, &json!([{ "field": "delay.profile", "code": "invalid" }])));
+        app.lock().settings.transport.delay = DelayProfile::Low;
+        assert_eq!(app.plan(&app.lock()).delay, DelayProfile::Standard);
+        let (_, _, v) = call(&app, Method::GET, "/api/v1/settings/video/options", "").await;
+        assert_eq!(v["auto_available"], true);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_receiver_follows_the_transmitters_delay() {
+        use crate::config::Role;
+        let (app, dir) = crate::nettest::stub_app("http-low-rx", Role::Rx, LinkState::Stopped, "");
+        let (s, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        assert_eq!((s, &view["delay"]), (StatusCode::OK, &json!({ "profile": "standard", "follows_peer": true })), "before any connection");
+        // a low-delay transmitter connected (supervisor.rs): what it uses, kept after it went away
+        app.lock().link.delay = DelayProfile::Low;
+        let (_, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        assert_eq!(view["delay"], json!({ "profile": "low", "follows_peer": true }));
+        // the plan stays standard (the player follows when the transmitter says so)
+        let plan = app.plan(&app.lock());
+        assert_eq!((plan.delay, plan.low_ctl.clone()), (DelayProfile::Standard, vec!["ts-offset-ms 400".to_string(), "adapt on".to_string()]));
+        // a draft's delay is ignored: no error for one that is not offered, nothing stored
+        for delay in ["standard", "low", "fast"] {
+            let (_, _, v) = call(&app, Method::POST, "/api/v1/settings/transport/check", transport_draft_of(&view, delay).to_string()).await;
+            assert_eq!(v, json!({ "ok": true, "errors": [], "impacts": [{ "level": "info", "code": "saved_while_stopped" }] }), "{delay}");
+        }
+        let mut other = transport_draft_of(&view, "fast");
+        other["peer"]["port"] = json!(60031);
+        let (s, _, v) = call(&app, Method::PUT, "/api/v1/settings/transport", other.to_string()).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(v["settings"]["delay"], json!({ "profile": "low", "follows_peer": true }));
+        assert_eq!(app.lock().settings.transport.delay, DelayProfile::Standard, "the stored delay is not the receiver's to set");
+        let (_, _, v) = call(&app, Method::GET, "/api/v1/settings/transport/options", "").await;
+        assert_eq!(v["delay_profiles"][1]["profile"], "low");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -1001,10 +1157,12 @@ mod tests {
     async fn network_settings_on_the_receiver() {
         use crate::config::Role;
         let (app, dir) = crate::nettest::stub_app("http-net-rx", Role::Rx, LinkState::Listening, RADIOS);
-        // both roles (the transport settings stay the transmitter's)
+        // both roles (the video settings and the comparison stay the transmitter's)
         let (s, _, v) = call(&app, Method::GET, "/api/v1/settings/network", "").await;
         assert_eq!((s, v["version"].clone(), v["hops"].as_array().map(Vec::len)), (StatusCode::OK, json!(1), Some(2)));
-        let (s, _, v) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/settings/video", "").await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "unsupported_role"));
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/transport/compare", "").await;
         assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "unsupported_role"));
         // no transmitter yet: no peer in the filter; the listen port is the video's
         assert_eq!(

@@ -13,7 +13,16 @@ import {
   type PendingItem,
 } from '../components/Settings';
 import { Shell } from '../components/Shell';
-import { encodingText, fieldErrorText, stateLabel, videoModeHelp, videoModeName, videoModeShort } from '../i18n/ja';
+import {
+  autoUnavailable,
+  encodingText,
+  fieldErrorText,
+  lowDelayFixedNote,
+  stateLabel,
+  videoModeHelp,
+  videoModeName,
+  videoModeShort,
+} from '../i18n/ja';
 import { fileName, fixed1, timeOf } from '../lib/format';
 import { NotDesigned } from './Placeholders';
 
@@ -33,9 +42,12 @@ type Key = keyof VDraft;
 /** Fallback when the options have not arrived yet (the device sends the real range). */
 const BITRATE_RANGE: [number, number] = [1.5, 4.0];
 
-/** The applied state as a draft. In auto mode the fixed bitrate starts from what auto aims at. */
-function fromSettings(s: VideoSettings): VDraft {
-  const br = s.encode.mode === 'auto' ? s.encode.auto.bitrate_mbps : s.encode.manual.bitrate_mbps;
+/**
+ * The applied state as a draft. In auto mode the fixed bitrate starts from what auto aims at;
+ * `fixedOnly` (low delay: auto is not in effect) from the fixed bitrate that is sent instead.
+ */
+function fromSettings(s: VideoSettings, fixedOnly: boolean): VDraft {
+  const br = s.encode.mode === 'auto' && !fixedOnly ? s.encode.auto.bitrate_mbps : s.encode.manual.bitrate_mbps;
   return {
     kind: s.input.kind,
     camera: s.input.camera,
@@ -102,7 +114,9 @@ function VideoSettingsTx({ statusLabel, deviceId, peerId, live }: { statusLabel:
     api.video.options().then(setOptions).catch(() => undefined);
   }, []);
 
-  const applied = useMemo(() => (settings ? fromSettings(settings) : null), [settings]);
+  // false while the delay is low: the fixed bitrate is sent whatever the mode says (the stored mode is kept)
+  const autoOk = options?.auto_available ?? true;
+  const applied = useMemo(() => (settings ? fromSettings(settings, !autoOk) : null), [settings, autoOk]);
   const v = stored ?? applied;
   // What auto mode aims at right now (live), for "固定する画質" when leaving auto.
   const autoNow = stats?.target_mbps ?? settings?.encode.auto.bitrate_mbps ?? null;
@@ -123,8 +137,9 @@ function VideoSettingsTx({ statusLabel, deviceId, peerId, live }: { statusLabel:
     const keys: Key[] = ['kind', v.kind === 'camera' ? 'camera' : 'file', ...(v.kind === 'file' ? (['loop'] as Key[]) : []), 'mode'];
     if (v.mode === 'manual') keys.push('bitrate');
     const same = (k: Key) => {
-      // Leaving auto always fixes a bitrate, so it is always listed.
-      if (k === 'bitrate') return !fromAuto && num(v.bitrate) === num(applied.bitrate);
+      // Leaving auto always fixes a bitrate, so it is always listed (not while the delay is low:
+      // the fixed bitrate is already what is sent).
+      if (k === 'bitrate') return (!fromAuto || !autoOk) && num(v.bitrate) === num(applied.bitrate);
       return v[k] === applied[k];
     };
     return keys
@@ -134,13 +149,14 @@ function VideoSettingsTx({ statusLabel, deviceId, peerId, live }: { statusLabel:
         return {
           key: k,
           label: name,
-          from: k === 'bitrate' && fromAuto ? `${autoNow !== null ? `${fixed1(autoNow)} Mbps` : '—'}（おまかせ）` : show(applied),
+          from:
+            k === 'bitrate' && fromAuto && autoOk ? `${autoNow !== null ? `${fixed1(autoNow)} Mbps` : '—'}（おまかせ）` : show(applied),
           to: show(v),
           revert: () => revert(k),
         };
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [settings, applied, v, options, autoNow]);
+  }, [settings, applied, v, options, autoNow, autoOk]);
 
   const n = pending.length;
   useEffect(() => setCount('video', n), [n, setCount]);
@@ -321,21 +337,34 @@ function VideoSettingsTx({ statusLabel, deviceId, peerId, live }: { statusLabel:
               <h2 id="sec-q" className="sec-title">
                 画質
               </h2>
-              <Row label="画質の決め方" labelId="lbl-mode" hint={videoModeHelp(v.mode)} changed={changed('mode')} top>
+              <Row
+                label="画質の決め方"
+                labelId="lbl-mode"
+                hint={videoModeHelp(autoOk ? v.mode : 'manual')}
+                changed={changed('mode')}
+                top
+              >
                 <Segmented
                   labelledBy="lbl-mode"
                   value={v.mode}
                   onChange={(mode) => {
-                    // Leaving auto starts the fixed bitrate from what auto aims at now; back to auto drops it.
-                    if (mode === 'manual' && applied.mode === 'auto' && autoNow !== null) set({ mode, bitrate: autoNow.toFixed(1) });
+                    // Leaving auto starts the fixed bitrate from what auto aims at now (low delay: from the
+                    // fixed bitrate sent now, already in the draft); back to auto drops it.
+                    if (mode === 'manual' && applied.mode === 'auto' && autoNow !== null && autoOk) set({ mode, bitrate: autoNow.toFixed(1) });
                     else if (mode === 'auto' && applied.mode === 'auto') set({ mode, bitrate: applied.bitrate });
                     else set({ mode });
                   }}
                   options={[
-                    { value: 'auto', label: videoModeName('auto') },
+                    { value: 'auto', label: videoModeName('auto'), disabled: !autoOk },
                     { value: 'manual', label: videoModeName('manual') },
                   ]}
                 />
+                {!autoOk && <p className="help">{autoUnavailable}</p>}
+                {!autoOk && settings.encode.mode === 'auto' && (
+                  <p className="help" style={{ color: 'var(--ink)' }}>
+                    {lowDelayFixedNote(settings.encode.manual.bitrate_mbps)}
+                  </p>
+                )}
                 {changed('mode') && <Applied value={videoModeName(applied.mode)} onRevert={() => revert('mode')} />}
               </Row>
 
@@ -375,7 +404,7 @@ function VideoSettingsTx({ statusLabel, deviceId, peerId, live }: { statusLabel:
               <Row
                 label={
                   <>
-                    いまの画質<span className="chip-outline">{videoModeShort(settings.encode.mode)}</span>
+                    いまの画質<span className="chip-outline">{videoModeShort(autoOk ? settings.encode.mode : 'manual')}</span>
                   </>
                 }
                 hint="1 秒ごとに更新します。目標は機器がめざす値、実際は送っている映像の値です"

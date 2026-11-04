@@ -7,6 +7,8 @@ srt_proper_receiver.c writes, including a failed-stats row with null counters) t
 $SRT_RCV_STATS_JSONL. Control files in $STUB_CTL:
   rx_no_caller  nobody calls                          (stays until removed)
   rx_drop       the transmitter goes away: exit       (removed when used)
+  rx_stream_id  the caller's stream id is the file's content, printed before the accepted line
+                as the receiver does (e.g. "delay=low")  (stays until removed)
 """
 import json
 import os
@@ -40,6 +42,9 @@ log(f"[srt-recv] listening on :{port} (latency={lat} ms)")
 time.sleep(1.0)
 while flag("rx_no_caller"):
     time.sleep(0.2)
+if flag("rx_stream_id"):
+    with open(os.path.join(CTL, "rx_stream_id")) as f:
+        log(f"[srt-recv] stream id {f.read().strip()}")
 log("[srt-recv] accepted from 127.0.0.1:51234")
 stats = open(os.environ["SRT_RCV_STATS_JSONL"], "a", buffering=1)
 seq = recv = loss = retr = byte = 0

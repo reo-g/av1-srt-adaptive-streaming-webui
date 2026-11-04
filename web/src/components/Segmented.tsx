@@ -5,7 +5,8 @@ export function Segmented<T extends string>({
   labelledBy,
 }: {
   value: T;
-  options: { value: T; label: string }[];
+  /** disabled: shown but cannot be chosen now (the reason is written next to the control). */
+  options: { value: T; label: string; disabled?: boolean }[];
   onChange: (v: T) => void;
   labelledBy: string;
 }) {
@@ -16,7 +17,8 @@ export function Segmented<T extends string>({
           key={o.value}
           type="button"
           aria-pressed={o.value === value}
-          onClick={() => o.value !== value && onChange(o.value)}
+          disabled={o.disabled}
+          onClick={() => o.value !== value && !o.disabled && onChange(o.value)}
         >
           {o.label}
         </button>

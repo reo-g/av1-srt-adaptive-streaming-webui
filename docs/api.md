@@ -26,11 +26,11 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | POST | `/transport/start` ・ `/stop` ・ `/retry` | 開始・停止・今すぐ再試行 |
 | GET / PUT | `/settings/video` | 映像設定（送信機）：入力と画質の決め方（おまかせ／画質を固定） |
 | POST | `/settings/video/check` | 下書きの検証と、適用したときの影響 |
-| GET | `/settings/video/options` | 選べるカメラ・ファイル、画質の範囲（1.5〜4.0 Mbps）、固定の映像形式（`encoding`）、繰り返し再生の可否 |
-| GET / PUT | `/settings/transport` | 伝送設定（送信機）：接続先、遅延、送り出しの上限、暗号化 |
+| GET | `/settings/video/options` | 選べるカメラ・ファイル、画質の範囲（1.5〜4.0 Mbps）、固定の映像形式（`encoding`）、繰り返し再生の可否、おまかせを使えるか（`auto_available`。低遅延のあいだは `false`） |
+| GET / PUT | `/settings/transport` | 伝送設定（送信機）：接続先、遅延、送り出しの上限、暗号化。受信機も答えるが、遅延は送信機に合わせる（下の「遅延」） |
 | POST | `/settings/transport/check` | 下書きの検証と影響 |
-| GET | `/settings/transport/options` | 接続方法・暗号化・遅延の選択肢（いまは接続方法 `outbound`、暗号化 `none`、遅延は標準のみ。低遅延は `available: false`） |
-| GET | `/transport/compare` | 送信機と受信機の設定の比較 |
+| GET | `/settings/transport/options` | 接続方法・暗号化・遅延の選択肢（いまは接続方法 `outbound`、暗号化 `none`、遅延は標準と低遅延。機器の設定で低遅延を切ると `available: false`） |
+| GET | `/transport/compare` | 送信機と受信機の設定の比較（送信機） |
 | GET / PUT | `/settings/network` | 途中の無線機（送信機・受信機）：つながりの確認で確かめ、無線の回線で通信してよい機器の一覧（名前とアドレス、4 台まで） |
 | POST | `/settings/network/check` | 下書きの検証と影響 |
 | POST / GET | `/network-tests` | 回線の確認を始める（つながりの確認・回線の速さ）／直近 20 件の結果（新しい順） |
@@ -45,7 +45,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 3. 「内容を確認して適用…」で確認ダイアログを開き、「適用する」で `PUT`。機器は切り替えが終わってから応答する。
    - 画質（ビットレート）と画質の決め方：映像を途切れさせずに数秒で切り替える（`switch_no_gap`）。
    - 入力の変更：接続をやり直す（`input_switch_gap` と `reconnect_gap`、どちらも `gap_s`。受信側の映像が約 10 秒途切れる）。同じ途切れなので、画面では 1 行にまとめる。
-   - 伝送設定：接続をやり直す（`reconnect_gap`。`gap_s` は新しい遅延の設定でおよそ決まる）。
+   - 伝送設定：接続をやり直す（`reconnect_gap`。`gap_s` は新しい遅延の設定でおよそ決まる。低遅延なら約 2 秒）。遅延を低遅延にするときは `low_delay_effects`、映像設定がおまかせなら `low_delay_fixed` も出す（下の「遅延」）。
    - 送り出しの上限だけの変更：接続はやり直さない。保存して、次に伝送を始めたときから使う。伝送中（接続中・再接続中も）でも適用できる（`takes_effect_next_start`。いまの伝送とその再試行はこれまでの上限のまま）。ほかの項目と一緒に変えたときは、ほかの項目の決まりに従う（機器は伝送中なら `409 busy`）。
    - 途中の無線機：伝送には触れないので、いつでも（伝送中も）適用できる（`hops_changed`）。`PUT` は `ApplyResult` ではなく新しい `NetworkSettings` を返す。
 4. `409 version_conflict` なら最新の値を読み直して知らせる。`400 invalid` は check と同じ `errors` を返す。
@@ -122,6 +122,20 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 
 `i` は送った一覧の中の位置（0 から）。画面は、空の欄、名前を書いた欄、使えないアドレスを、入力された値で言い分ける（機器はどれも `invalid`）。
 
+## 遅延（`TransportSettings.delay`）
+
+送信機で「標準（約 10 秒）」か「低遅延（約 1.5 秒）」を選ぶ（`DelayProfile`：`standard` / `low`）。受信機は、つながった送信機の遅延に自動で合わせる（2026-11-04 のユーザーの依頼）。
+
+- 選んだ遅延は、次に伝送を始めたときから使う（伝送中の変更は接続のやり直し。再試行と再接続は、始めたときの遅延のまま）。
+- **低遅延のあいだの画質**（2026-11-04 の決定。戻せる）：映像設定は書き換えない。伝送設定の遅延が低遅延のあいだは、映像設定の `encode.mode` が何であっても、固定の画質 `encode.manual.bitrate_mbps`（初期値 3.0 Mbps）で送る。標準に戻すと、保存してある決め方（おまかせなど）に戻る。
+  - `VideoOptions.auto_available`：低遅延のあいだ `false`（それ以外と受信機では `true`）。画面はおまかせを押せなくする。
+  - 映像設定の check：低遅延のあいだに `mode: auto` → `low_delay_fixed {bitrate_mbps}`（info。誤りではない。保存はでき、標準に戻すと使う）。低遅延のあいだは決め方だけの変更では送るものが変わらないので、`switch_no_gap` と `auto_decides` は出さない。
+  - 伝送設定の check：遅延を低遅延にする下書きで、適用中の映像設定がおまかせなら `low_delay_fixed {bitrate_mbps}`、いつでも `low_delay_effects`（どちらも info。状態による影響のあと）。伝送中なら、いつもどおり `reconnect_gap`（新しい遅延の `gap_s`）。
+- 低遅延では、映像が止まるまでの余裕と、その警告がない：送信機の `Stats.delay_margin_s` と `delay_margin_warn_s` は `null`、`delay_margin_low` は出ない。
+- **受信機は送信機に合わせる**：受信機の `TransportSettings.delay` は `{profile, follows_peer: true}`。`profile` はいまの接続か最後の接続の送信機の遅延（まだ一度もつながっていなければ `standard`。機器のメモリーだけに持つ）。受信機の伝送設定の check と `PUT` は `delay` を無視する（誤りにも変更にもならない）。送信機では `follows_peer: false`。受信機の伝送設定の画面はまだデザインしていない。
+- 受信機の `Stats.delay_profile` は、いまの接続か最後の接続の送信機の遅延。`delay_target_ms` はその目標に、送信機がつながってから受信機が自分で足した待ち時間（フレームが遅れて届くと少し長く待つ）を加えたもの（100 ms 単位）。
+- 機器の設定で低遅延を切ると（`available: false`）、低遅延の `PUT` は `delay.profile: invalid` で断られる。
+
 ## 送り出しの上限（`TransportSettings.send_limit`）
 
 送信機が回線に出す量の上限。伝送を始めるときにこの値で始め、回線が混むと機器が自分でこれより下げて送り、空けばこの値まで戻す。初期値は 5.0 Mbps。
@@ -165,13 +179,13 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `retrans_pct` | `null` | 再送で届いたパケットの割合 | 送り直して届いた割合 |
 | `rtt_ms` / `last_rtt_ms` | 往復時間 / 切断前の最後の値 | 同じ | 回線の往復時間 |
 | `bandwidth_mbps` | 回線の推定容量。回線が混んでいるときだけ測れる（それ以外と、送り出しの上限で頭打ちのときは `null`） | — | 回線の推定容量 |
-| `delay_margin_s` | 受信側の映像が止まるまでの余裕（通常は約 6 秒） | — | 映像が止まるまでの余裕 |
-| `delay_margin_warn_s` | 余裕がこれを下回ると `delay_margin_low` を出す（標準の遅延では 3 秒）。推移の破線もこの値 | `null` | 破線の 3 秒を下回ると警告します |
+| `delay_margin_s` | 受信側の映像が止まるまでの余裕（通常は約 6 秒）。低遅延では `null` | — | 映像が止まるまでの余裕（低遅延では「低遅延のあいだは測りません」） |
+| `delay_margin_warn_s` | 余裕がこれを下回ると `delay_margin_low` を出す（標準の遅延では 3 秒）。推移の破線もこの値。低遅延では `null` | `null` | 破線の 3 秒を下回ると警告します |
 | `send_late_5m` | 送りきれずに捨てたパケット（直近 5 分） | — | 送りきれずに捨てたデータ（直近 5 分） |
 | `stalls_5m` / `stall_s_5m` | — | 映像が止まった回数と合計秒数（直近 5 分） | 直近 5 分で映像が止まった回数 |
 | `video_latency_ms` | — | 入力から表示までの実測。測れるまでは `null` | 映像の遅れ（実測するまでは「目安」として `delay_target_ms` を表示） |
 | `unrecovered_5m` | — | 回復できなかったパケット（直近 5 分） | 届かなかったデータ（直近 5 分） |
-| `delay_profile` / `delay_target_ms` | 使っている遅延と、その目標（例 9500 ms） | 同じ | 遅延の設定　標準（約 10 秒） |
+| `delay_profile` / `delay_target_ms` | 使っている遅延と、その目標（例 9500 ms）。停止中は次の伝送で使う遅延 | いまの接続か最後の接続の送信機の遅延。目標には受信機が自分で足した待ち時間を含む（100 ms 単位） | 遅延の設定　標準（約 10 秒）（受信機では「送信機の設定に合わせています」を添える） |
 
 推移（`/stats/history` の `series`）は `send_mbps`、`recv_mbps`、`target_mbps`、`actual_mbps`、`loss_pct`、`rtt_ms`、`bandwidth_mbps`、`delay_margin_s`（送信機）、`stall_s`（受信機。5 秒ごとの停止秒数）。
 
@@ -218,6 +232,8 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `saved_while_stopped` | info | 設定を保存します。伝送は停止したままです |
 | `takes_effect_next_start` | info | 送り出しの上限は、次に伝送を始めたときから使います。いまの伝送は、これまでの上限のまま続けます（停止中以外で、送り出しの上限だけを変えるとき） |
 | `hops_changed` | info | つながりの確認で確かめる機器と、無線の回線で通信してよい機器が、この内容に変わります。（途中の無線機の一覧が適用中と違うとき） |
+| `low_delay_fixed` | info | 低遅延のあいだは、おまかせは使えません。画質は固定の 3.0 Mbps で送ります（映像設定の「固定する画質」の値）。（`bitrate_mbps`。伝送設定：遅延を低遅延にし、映像設定がおまかせのとき。映像設定：低遅延のあいだにおまかせのとき） |
+| `low_delay_effects` | info | 動きの多い場面や回線が混んだときは、受信側の遅れが少しずつ増えることがあります。遅れは、回線が落ち着くと 1 分に 1 コマずつ戻ります。（伝送設定：遅延を低遅延にするとき） |
 
 ### イベント（`DeviceEvent.code`）
 
@@ -251,6 +267,8 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `error` | 受信機に接続できない（`peer_unreachable`）。5 秒ごとに再接続を試みる | 送信機からの接続を待っている |
 
 回線が混んでいる間、送信機は推定容量くらいで送り（溜まった分が余裕を減らす）、推定容量が測れる。実際の映像のビットレートは、目標が変わってから約 3 秒かけて新しい目標に近づく。
+
+遅延は標準と低遅延を選べる。送信機で低遅延を適用すると、固定する画質で送り（おまかせの段階の変更と余裕・その警告はなし、`auto_available: false`）、標準に戻すと保存した決め方に戻る。受信機は送信機に合わせる：モックには送信機がないので、決まった値（`MOCK_PEER_DELAY`、既定 `low`）を計測値と伝送設定（`follows_peer: true`）に出す。
 
 回線の確認は、実際の設置（約 5 Mbps の無線区間、往復約 75 ms、両端の近くに無線機）をまねる。結果はモックを切り替えると消える。
 

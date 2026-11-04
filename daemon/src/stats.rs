@@ -8,12 +8,16 @@
 //! open (the alert and the 5-minute totals grow with it) and reports `video_stalled` with its
 //! full length once it has ended. Stops shorter than MIN_STALL_S (a late or missing source
 //! frame) are not reported anywhere.
+//!
+//! The profile (set_profile) gives the delay target and the margin warning. rx: the target is the
+//! profile's plus what the player's margin watch has added to its display offset since the
+//! transmitter connected (the `ts_offset_ms` of its stats lines), so it is the delay aimed at now.
 
 use crate::config::Role;
 use crate::events::Ev;
 use crate::history::Sample;
-use crate::model::Stats;
-use crate::profile::{EVENTS, FAST, RCV, TICKS};
+use crate::model::{DelayProfile, Stats};
+use crate::profile::{Profile, EVENTS, FAST, RCV, TICKS};
 use crate::util::{floor1, iso_jst, now_ms, round};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -204,6 +208,8 @@ pub struct PlayerRow {
     pub stalls: Option<f64>,
     pub stall_ms: Option<f64>,
     pub last_gap_ms: Option<f64>,
+    /// The display offset in force (with --ctl-fd; the margin watch moves it).
+    pub ts_offset_ms: Option<f64>,
 }
 
 /// Why the automatic mode changed the bitrate, from the controller's cause. Downward steps of
@@ -273,6 +279,8 @@ struct PlayerState {
     open: Option<Stall>,
     /// The player has exited: lines still in its pipe are ignored.
     done: bool,
+    /// Its display offset, from the lines read since the profile was last set.
+    offset_ms: Option<f64>,
 }
 
 // ------------------------------------------------------------------ the sampler
@@ -362,9 +370,12 @@ pub struct Sampler {
     role: Role,
     /// size cap of the session files (None with an archive)
     cap: Option<u64>,
-    delay_profile: &'static str,
+    delay_profile: DelayProfile,
     delay_target_ms: u32,
-    warn_s: f64,
+    /// delay_margin_low below this margin; None: no margin warning and no margin (low delay)
+    warn_s: Option<f64>,
+    /// rx: the player's display offset when the transmitter connected (Profile::initial_offset_ms)
+    offset0_ms: Option<f64>,
     session: Option<u64>,
     tx: TxState,
     rx: RxState,
@@ -375,13 +386,15 @@ pub struct Sampler {
 }
 
 impl Sampler {
+    /// The standard profile's target and margin warning; set_profile changes them.
     pub fn new(role: Role, delay_target_ms: u32, warn_s: f64, cap: Option<u64>) -> Self {
         Sampler {
             role,
             cap,
-            delay_profile: "standard",
+            delay_profile: DelayProfile::Standard,
             delay_target_ms,
-            warn_s,
+            warn_s: Some(warn_s),
+            offset0_ms: None,
             session: None,
             tx: TxState::default(),
             rx: RxState::default(),
@@ -392,13 +405,36 @@ impl Sampler {
         }
     }
 
+    /// The profile in effect (tx: the transmission's, or the applied one while stopped; rx: the
+    /// transmitter's of the current or last connection). `start_args` are the player's arguments
+    /// (rx: its display offset before any control line). Nothing changes when it is the same.
+    pub fn set_profile(&mut self, p: &Profile, start_args: &[String]) {
+        let offset0 = p.initial_offset_ms(start_args);
+        if (self.delay_profile, self.delay_target_ms, self.warn_s, self.offset0_ms)
+            == (p.delay, p.delay_target_ms, p.margin_warn_s, offset0)
+        {
+            return;
+        }
+        if self.delay_profile != p.delay {
+            dlog!("statistics: profile {}, target {} ms", p.delay.name(), p.delay_target_ms);
+        }
+        (self.delay_profile, self.delay_target_ms, self.warn_s, self.offset0_ms) =
+            (p.delay, p.delay_target_ms, p.margin_warn_s, offset0);
+        self.margin_low = false;
+        self.margin_ok = 0;
+        // offsets read before the switch belong to the previous profile
+        for pl in self.rx.players.values_mut() {
+            pl.offset_ms = None;
+        }
+    }
+
     /// Stats with nothing measured.
     pub fn blank(&self) -> Stats {
         Stats {
             at: iso_jst(now_ms()),
-            delay_profile: self.delay_profile,
+            delay_profile: self.delay_profile.name(),
             delay_target_ms: self.delay_target_ms,
-            delay_margin_warn_s: (self.role == Role::Tx).then_some(self.warn_s),
+            delay_margin_warn_s: self.warn_s.filter(|_| self.role == Role::Tx),
             last_rtt_ms: self.last_rtt,
             ..Stats::default()
         }
@@ -483,6 +519,9 @@ impl Sampler {
             }
         }
         let rendered = row.fps.unwrap_or(0.0) > 0.0 || advanced;
+        if row.ts_offset_ms.is_some() {
+            p.offset_ms = row.ts_offset_ms;
+        }
         p.last = Some(row);
         r.stall_acc += acc;
         for s in ended {
@@ -643,7 +682,9 @@ impl Sampler {
                         st.actual_mbps = Some(round(r / 1000.0, 2));
                     }
                 }
-                st.delay_margin_s = k.nd_budget.map(|b| floor1(b.max(0.0)));
+                if self.warn_s.is_some() {
+                    st.delay_margin_s = k.nd_budget.map(|b| floor1(b.max(0.0)));
+                }
             }
             // Silence between the rows' own times; by arrival time only when no rows come at all.
             let by_rows = match (t.ack_t, t.last_t) {
@@ -656,7 +697,7 @@ impl Sampler {
         obs.last_ack = t.ack_at;
 
         match st.delay_margin_s {
-            Some(m) if m < self.warn_s => {
+            Some(m) if self.warn_s.is_some_and(|w| m < w) => {
                 if !self.margin_low {
                     obs.events.push(Ev::warn("delay_margin_low").with(json!({ "margin_s": m })));
                 }
@@ -683,6 +724,7 @@ impl Sampler {
 
     fn sample_rx(&mut self, ctx: &Ctx, now: Instant, st: &mut Stats, obs: &mut Obs) -> Option<f64> {
         let session = self.session;
+        let (target, offset0) = (self.delay_target_ms, self.offset0_ms);
         let r = &mut self.rx;
         let rows: Vec<RcvRow> = match r.rcv.as_mut() {
             Some(f) => f.lines().iter().filter_map(|l| parse::<RcvRow>(l)).collect(),
@@ -744,6 +786,11 @@ impl Sampler {
                 st.rtt_ms = r.rtt.map(|v| round(v, 0));
             }
             st.unrecovered_5m = r.unrecovered.delta().map(|d| d as i64);
+            // what the current player's margin watch has added to the delay since it connected
+            let offset = session.and_then(|sid| r.players.get(&sid)).and_then(|p| p.offset_ms);
+            if let (Some(off), Some(off0)) = (offset, offset0) {
+                st.delay_target_ms = round100(f64::from(target) + (off - off0).max(0.0));
+            }
             st.stalls_5m = Some(stop_count as i64);
             st.stall_s_5m = Some(round(stop_s, 1));
             stall_sample = Some(round(r.stall_acc, 2));
@@ -809,6 +856,11 @@ fn line_capacity(k: &TickRow) -> Option<f64> {
         Some(m) if m > 0.0 && c >= 0.9 * m => None,
         _ => Some(c),
     }
+}
+
+/// To the nearest 100 ms.
+fn round100(ms: f64) -> u32 {
+    ((ms / 100.0).round() * 100.0).max(0.0) as u32
 }
 
 fn video_rate(input: &VecDeque<(f64, f64)>) -> Option<f64> {
@@ -1142,6 +1194,70 @@ mod tests {
                 (Some(3.6), None)
             ]
         );
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn rx_delay_target_follows_the_display_offset() {
+        let d = tmpdir("rx_offset");
+        let std = Profile::standard();
+        let low = Profile::low(&std);
+        let mut s = Sampler::new(Role::Rx, 9500, 3.0, None);
+        let t0 = Instant::now();
+        let row = |off: f64| format!(r#"{{"frames":30,"fps":30.0,"stalls":0,"stall_ms":0,"last_gap_ms":34.0,"ts_offset_ms":{off}}}"#);
+        let target = |s: &mut Sampler, k: u64| s.sample(live(&d), t0 + Duration::from_secs(k)).stats;
+        // standard: the offset of the arguments (7000) never moves
+        s.set_profile(&std, &std.player_args);
+        s.player_line(1, &row(7000.0), t0);
+        let st = target(&mut s, 0);
+        assert_eq!((st.delay_profile, st.delay_target_ms, st.delay_margin_warn_s), ("standard", 9500, None));
+        // a low-delay transmitter connects: the offset read before the switch is not used
+        s.set_profile(&low, &std.player_args);
+        assert_eq!((target(&mut s, 1).delay_profile, target(&mut s, 1).delay_target_ms), ("low", 1500));
+        s.player_line(1, &row(400.0), t0 + Duration::from_secs(2));
+        assert_eq!(target(&mut s, 2).delay_target_ms, 1500);
+        // the margin watch adds frames: the delay aimed at grows by as much, to 100 ms
+        s.player_line(1, &row(433.3), t0 + Duration::from_secs(3));
+        assert_eq!(target(&mut s, 3).delay_target_ms, 1500);
+        s.player_line(1, &row(500.0), t0 + Duration::from_secs(4));
+        assert_eq!(target(&mut s, 4).delay_target_ms, 1600);
+        s.player_line(1, &row(1133.3), t0 + Duration::from_secs(5));
+        assert_eq!(target(&mut s, 5).delay_target_ms, 2200);
+        // never below the profile's
+        s.player_line(1, &row(300.0), t0 + Duration::from_secs(6));
+        assert_eq!(target(&mut s, 6).delay_target_ms, 1500);
+        // not live: the profile's own
+        s.player_line(1, &row(900.0), t0 + Duration::from_secs(7));
+        let st = s.sample(Ctx { live: false, running: true, session: Some((1, &d)) }, t0 + Duration::from_secs(7)).stats;
+        assert_eq!(st.delay_target_ms, 1500);
+        // a player without the field (no control input): the profile's
+        s.set_profile(&std, &std.player_args);
+        s.player_line(1, PLAYER_ROWS.lines().next().unwrap(), t0 + Duration::from_secs(8));
+        assert_eq!(target(&mut s, 8).delay_target_ms, 9500);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn tx_low_delay_has_no_margin_warning() {
+        let d = tmpdir("tx_low");
+        let low = Profile::low(&Profile::standard());
+        let mut s = Sampler::new(Role::Tx, 9500, 3.0, None);
+        s.set_profile(&low, &[]);
+        let t0 = Instant::now();
+        assert_eq!((s.blank().delay_profile, s.blank().delay_target_ms, s.blank().delay_margin_warn_s), ("low", 1500, None));
+        append(&d.join(FAST), &FAST_ROWS.lines().take(11).collect::<Vec<_>>());
+        append(&d.join(TICKS), &[r#"{"cur":3000,"nd_budget":1.2,"nd_c":null}"#]);
+        let o = s.sample(live(&d), t0);
+        assert_eq!((o.stats.delay_margin_s, o.stats.delay_margin_warn_s, o.stats.target_mbps), (None, None, Some(3.0)));
+        assert_eq!(o.obs.margin_low, None);
+        assert!(o.obs.events.is_empty());
+        assert_eq!(o.sample[7], None, "no margin in the history either");
+        // back to standard: the margin and its warning again
+        s.set_profile(&Profile::standard(), &[]);
+        append(&d.join(TICKS), &[r#"{"cur":3500,"nd_budget":2.5,"nd_c":null}"#]);
+        let o = s.sample(live(&d), t0 + Duration::from_secs(1));
+        assert_eq!((o.stats.delay_margin_s, o.stats.delay_margin_warn_s), (Some(2.5), Some(3.0)));
+        assert_eq!(o.obs.margin_low, Some(2.5));
         fs::remove_dir_all(&d).unwrap();
     }
 

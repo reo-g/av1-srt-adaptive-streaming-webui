@@ -7,12 +7,12 @@ use crate::history::History;
 use crate::link_filter::{self, LinkFilter};
 use crate::media::{self, Real};
 use crate::model::{
-    Alert, Device, InputKind, LinkState, Media, Mode, NetworkStored, Peer, Settings, Stats, Status, SIGNAL_FORMAT,
-    TIMEZONE,
+    Alert, DelayProfile, Device, InputKind, LinkState, Media, Mode, NetworkStored, Peer, Settings, Stats, Status,
+    SIGNAL_FORMAT, TIMEZONE,
 };
 use crate::nettest::{NetTests, Server, ServerLaunch};
 use crate::preview::{self, Preview};
-use crate::profile::{Input, Plan, Profile};
+use crate::profile::{Input, Plan, Profile, Profiles};
 use crate::stats::{Ctx, Sampler};
 use crate::store;
 use crate::supervisor::{Kind, Link, Machine, MediaBackend, MediaEvent};
@@ -51,7 +51,8 @@ pub struct Inner {
 
 pub struct App {
     pub cfg: Config,
-    pub prof: Profile,
+    /// The standard and the low-delay profile (profile.rs).
+    pub profiles: Profiles,
     pub firmware: String,
     /// The browser preview (independent of the link; preview.rs).
     pub preview: Preview,
@@ -182,25 +183,50 @@ impl App {
         Media { kind, label, format: (!lost).then(|| SIGNAL_FORMAT.into()), audio: "none", black: lost }
     }
 
+    /// The delay profile of the applied settings: tx the transport settings' (what the next
+    /// transmission uses), rx the transmitter's of the current or last connection.
+    pub fn applied_delay(&self, i: &Inner) -> DelayProfile {
+        match self.cfg.role {
+            Role::Tx => self.profiles.in_effect(i.settings.transport.delay),
+            Role::Rx => i.link.delay,
+        }
+    }
+
+    pub fn applied_profile(&self, i: &Inner) -> &Profile {
+        self.profiles.get(self.applied_delay(i))
+    }
+
+    /// Automatic mode can be in effect (VideoOptions.auto_available): not while the applied delay
+    /// is low (it sends the fixed bitrate whatever the video mode says; the stored mode is kept).
+    pub fn auto_available(&self, i: &Inner) -> bool {
+        !self.applied_profile(i).fixed_bitrate
+    }
+
     /// The bitrate automatic mode aims at now (its first target while nothing is measured).
     pub fn auto_mbps(&self, i: &Inner) -> f64 {
         match (i.settings.video.mode, i.stats.target_mbps) {
             (Mode::Auto, Some(t)) => t,
-            _ => self.prof.initial_mbps(),
+            _ => self.profiles.standard.initial_mbps(),
         }
     }
 
     /// The bitrate in effect now (the check rules compare a draft with it).
     pub fn current_mbps(&self, i: &Inner) -> f64 {
         match i.settings.video.mode {
-            Mode::Manual => i.settings.video.manual_mbps,
-            Mode::Auto => self.auto_mbps(i),
+            Mode::Auto if self.auto_available(i) => self.auto_mbps(i),
+            _ => i.settings.video.manual_mbps,
         }
     }
 
     /// What the next transmission uses (fixed at its start: retries and reconnects keep it).
     pub(crate) fn plan(&self, i: &Inner) -> Plan {
         let (v, t) = (&i.settings.video, &i.settings.transport);
+        // rx: the standard profile until the transmitter says otherwise (supervisor.rs)
+        let delay = match self.cfg.role {
+            Role::Tx => self.profiles.in_effect(t.delay),
+            Role::Rx => DelayProfile::Standard,
+        };
+        let fixed = v.mode == Mode::Manual || self.profiles.get(delay).fixed_bitrate;
         Plan {
             peer_host: t.peer_host.clone(),
             peer_port: t.peer_port,
@@ -209,8 +235,10 @@ impl App {
                 InputKind::Camera => Input::Camera(v.input.camera.clone()),
                 InputKind::File => Input::File(v.input.file.clone()),
             },
-            manual_kbps: (v.mode == Mode::Manual).then(|| (v.manual_mbps * 1000.0).round() as u32),
+            manual_kbps: fixed.then(|| (v.manual_mbps * 1000.0).round() as u32),
             maxbw_kbps: t.send_limit.kbps(),
+            delay,
+            low_ctl: self.profiles.low.player_ctl.clone(),
         }
     }
 
@@ -257,19 +285,44 @@ impl App {
         self.link_filter.update(self.filter_inputs(i));
     }
 
-    /// The developer log line at each start: the send cap the sender gets.
-    fn log_send_cap(&self, i: &Inner, plan: &Plan) {
+    /// The developer log line at each start: the profile, the send cap the sender gets and the bitrate.
+    fn log_start(&self, i: &Inner, plan: &Plan) {
         if self.cfg.role != Role::Tx {
             return;
         }
+        let p = self.profiles.get(plan.delay);
         let l = &i.settings.transport.send_limit;
-        if crate::profile::takes_send_cap(&self.prof) {
+        let rate = match plan.manual_kbps {
+            Some(k) => format!("fixed {k} kbps"),
+            None => format!("automatic from {} kbps", p.initial_mbps() * 1000.0),
+        };
+        let off = if i.settings.transport.delay != plan.delay { " (low is turned off in device.toml)" } else { "" };
+        if crate::profile::takes_send_cap(p) {
             let at = l.measured_at.as_deref().map(|t| format!(", measured {t}")).unwrap_or_default();
-            dlog!("start: send cap {} kbps ({}{at})", plan.maxbw_kbps, l.source.name());
+            dlog!("start: profile {}{off}, send cap {} kbps ({}{at}), {rate}", plan.delay.name(), plan.maxbw_kbps, l.source.name());
         } else {
-            let args = self.prof.sender_args.join(" ");
-            dlog!("start: the profile's sender_args fix the send cap ({args}); the setting {} Mbps is not used", l.mbps);
+            let args = p.sender_args.join(" ");
+            dlog!(
+                "start: profile {}{off}, the profile's sender_args fix the send cap ({args}); the setting {} Mbps is not used, {rate}",
+                plan.delay.name(),
+                l.mbps
+            );
         }
+    }
+
+    /// The profile the statistics follow: tx the running transmission's, or the applied one while
+    /// stopped (what the next start uses); rx the transmitter's of the current or last connection.
+    fn stats_profile<B: MediaBackend>(&self, m: &Machine<B>) -> &Profile {
+        let d = match (self.cfg.role, m.link.state) {
+            (Role::Tx, LinkState::Stopped) => self.profiles.in_effect(self.lock().settings.transport.delay),
+            _ => m.link.delay,
+        };
+        self.profiles.get(d)
+    }
+
+    /// Point the sampler at the profile in effect (no change when it is the same).
+    fn sync_sampler<B: MediaBackend>(&self, m: &Machine<B>, sampler: &mut Sampler) {
+        sampler.set_profile(self.stats_profile(m), &self.profiles.standard.player_args);
     }
 }
 
@@ -307,7 +360,7 @@ fn remove_old_sessions(dir: &Path) {
 }
 
 pub async fn run(cfg: Config) -> Result<(), String> {
-    let prof = Profile::resolve(&cfg.profile)?;
+    let profiles = Profiles::resolve(&cfg)?;
     let (run_dir, state_dir, sessions) = (cfg.run_dir(), cfg.state_dir(), cfg.sessions_dir());
     for d in [&run_dir, &state_dir, &sessions] {
         fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
@@ -330,11 +383,17 @@ pub async fn run(cfg: Config) -> Result<(), String> {
 
     let now = Instant::now();
     let cap = cfg.archive_dir.is_none().then_some(crate::stats::FILE_CAP);
-    let sampler = Sampler::new(cfg.role, prof.delay_target_ms, prof.margin_warn_s, cap);
+    let standard = &profiles.standard;
+    let mut sampler = Sampler::new(cfg.role, standard.delay_target_ms, standard.margin_warn_s.unwrap_or(3.0), cap);
+    let first = match cfg.role {
+        Role::Tx => profiles.get(profiles.in_effect(settings.transport.delay)),
+        Role::Rx => standard,
+    };
+    sampler.set_profile(first, &standard.player_args);
     let (cmd_tx, cmd_rx) = mpsc::channel(16);
     let (media_tx, media_rx) = mpsc::unbounded_channel();
     let (live, _) = broadcast::channel(256);
-    let backend = Real::new(cfg.clone(), prof.clone(), media_tx);
+    let backend = Real::new(cfg.clone(), profiles.clone(), media_tx);
     if cfg.preview.enabled && cfg.preview_sock().as_os_str().len() >= 108 {
         dlog!("preview: {} is too long for a socket path; set a shorter run_dir", cfg.preview_sock().display());
     }
@@ -353,7 +412,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let bind = format!("{}:{}", cfg.http.bind, cfg.http.port);
     let app = Arc::new(App {
         cfg,
-        prof,
+        profiles,
         firmware,
         preview,
         nettest,
@@ -386,6 +445,8 @@ fn placeholder_plan(cfg: &Config) -> Plan {
         input: Input::Camera(cfg.tx.camera.clone()),
         manual_kbps: None,
         maxbw_kbps: crate::model::SendLimit::default().kbps(),
+        delay: DelayProfile::Standard,
+        low_ctl: Vec::new(),
     }
 }
 
@@ -429,7 +490,7 @@ async fn supervise<B: MediaBackend>(
                         if m.link.state == LinkState::Stopped {
                             let i = app.lock();
                             m.plan = app.plan(&i);
-                            app.log_send_cap(&i, &m.plan);
+                            app.log_start(&i, &m.plan);
                             drop(i);
                             sampler.reset_run();
                         }
@@ -438,6 +499,7 @@ async fn supervise<B: MediaBackend>(
                     CmdKind::Stop => m.stop(now),
                     CmdKind::Retry => m.retry(now),
                 }
+                app.sync_sampler(&m, &mut sampler);
                 publish(&app, &mut m, &mut published, &mut kept);
                 let _ = cmd.reply.send(());
             }
@@ -449,7 +511,9 @@ async fn supervise<B: MediaBackend>(
                         if let MediaEvent::Exit { session, kind: Kind::Player, .. } = ev {
                             sampler.player_done(session, now);
                         }
-                        m.on_media(ev, now)
+                        m.on_media(ev, now);
+                        // rx: the transmitter's stream id may have switched the profile
+                        app.sync_sampler(&m, &mut sampler);
                     }
                 }
                 publish(&app, &mut m, &mut published, &mut kept);
@@ -463,6 +527,7 @@ async fn supervise<B: MediaBackend>(
             }
             _ = second.tick() => {
                 let now = Instant::now();
+                app.sync_sampler(&m, &mut sampler);
                 let state = m.link.state;
                 let out = sampler.sample(
                     Ctx { live: state == LinkState::Live, running: state != LinkState::Stopped, session: m.session() },
@@ -565,6 +630,7 @@ pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: N
         next_try: None,
         last_live_until: None,
         peer_addr: None,
+        delay: DelayProfile::Standard,
         alerts: Vec::new(),
         rx_black: false,
         rev: 0,
@@ -579,7 +645,7 @@ pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: N
     let filter_path = cfg.state_dir.as_ref().map(|d| d.join(link_filter::FILE_NAME));
     let link_filter = Arc::new(LinkFilter::new(filter_path, cfg.role, link_filter::system_resolver));
     let app = Arc::new(App {
-        prof: Profile::standard(),
+        profiles: Profiles::resolve(&cfg).expect("profiles"),
         firmware: "test".into(),
         preview,
         nettest,

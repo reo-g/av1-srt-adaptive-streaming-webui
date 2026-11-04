@@ -82,15 +82,21 @@ export interface Status {
 
 /**
  * standard  about 10 s from capture to display; tolerant of a bad line; automatic quality works
- * low       about 1.5 s; picture quality fixed; a bad line makes the picture stop more easily
+ * low       about 1.5 s; picture quality fixed (encode.manual, whatever encode.mode says); a bad line
+ *           makes the picture stop, or the receiver's delay grow, more easily. Chosen on the
+ *           transmitter; the receiver follows the transmitter it is connected to.
  */
 export type DelayProfile = 'standard' | 'low';
 
 /** Fields that do not apply to the role, or cannot be measured now, are null. */
 export interface Stats {
   at: string;
-  delay_profile: DelayProfile; // profile in effect
-  delay_target_ms: number; // target delay of that profile (capture to display), e.g. 9500
+  delay_profile: DelayProfile; // profile in effect (rx: the transmitter's of the current or last connection)
+  /**
+   * Target delay of that profile (capture to display), e.g. 9500. rx: plus what the receiver has
+   * added on its own since the transmitter connected (it waits longer when frames come late), to 100 ms.
+   */
+  delay_target_ms: number;
   loss_pct: number | null; // line loss; tx: resent ÷ sent packets, rx: lost ÷ expected packets
   /** Above this loss_high is raised. null while losses are recovered by resending (standard profile). */
   loss_threshold_pct: number | null;
@@ -104,7 +110,7 @@ export interface Stats {
   bandwidth_mbps: number | null; // estimated line capacity; only measurable while the line is crowded
   send_late_5m: number | null; // packets that could not be sent in time, last 5 min
   delay_margin_s: number | null; // seconds left before the receiver's picture would stop (≈6 s normally); 1 decimal rounded down, same as delay_margin_low.margin_s
-  /** Below this margin delay_margin_low is raised (about 3 s in the standard profile). */
+  /** Below this margin delay_margin_low is raised (about 3 s in the standard profile). null on rx and in the low profile (no margin, no warning). */
   delay_margin_warn_s: number | null;
   // rx only (null on tx)
   recv_mbps: number | null;
@@ -218,6 +224,12 @@ export type ImpactCode =
   // transport: only send_limit changes while the link is not stopped. Stored now, used from the next
   // start (the running transmission and its retries keep their cap)
   | 'takes_effect_next_start'
+  // info, params: bitrate_mbps (encode.manual.bitrate_mbps). Low delay sends the fixed bitrate whatever
+  // the video mode says: transport, delay changes to low while the video mode is auto; video, the mode
+  // is auto while low is applied (not an error: the mode is kept for when the delay is standard again)
+  | 'low_delay_fixed'
+  // info: transport, the delay changes to low (what it means for the picture on a busy line)
+  | 'low_delay_effects'
   // network settings: the list of devices on the way differs from the applied one. つながりの確認 and
   // what the radio line may carry follow the new list; the transmission is not touched
   | 'hops_changed';
@@ -321,12 +333,18 @@ export interface VideoOptions {
   cameras: { device: string; label: string; signal: string | null }[]; // signal "3840×2160　30p" (U+3000 between)
   files: { path: string; format: string; duration_s: number }[]; // format "3840×2160　30p"
   loop_available: boolean; // false: files play once
+  /**
+   * false while the applied transport delay is low: the fixed bitrate (encode.manual) is sent and
+   * auto is not in effect, whatever encode.mode says (the stored mode is kept and applies again
+   * when the delay is standard).
+   */
+  auto_available: boolean;
   bitrate_range_mbps: [number, number]; // [1.5, 4.0]
   encoding: VideoEncoding;
   bandwidth_mbps: number | null; // estimated line capacity, null unless the line is crowded
 }
 
-// ---------------------------------------------------------------- transport settings (tx)
+// ---------------------------------------------------------------- transport settings (both roles; the screen is tx only)
 
 export type TransportMode = 'outbound' | 'inbound' | 'mutual'; // 送信機から接続 / 接続を待つ / 互いに接続
 export type Cipher = 'aes-128' | 'aes-192' | 'aes-256' | 'none';
@@ -355,7 +373,11 @@ export interface TransportSettings {
   mode: TransportMode;
   peer: { host: string; port: number };
   listen_port: number;
-  delay: { profile: DelayProfile };
+  /**
+   * follows_peer: false on tx (chosen here); true on rx, where profile is the transmitter's of the
+   * current or last connection (standard before any) and a check or PUT ignores delay.
+   */
+  delay: { profile: DelayProfile; follows_peer: boolean };
   encryption: {
     cipher: Cipher;
     passphrase_set: boolean; // the value itself is never returned
@@ -369,7 +391,7 @@ export interface TransportSettingsInput {
   mode: TransportMode;
   peer: { host: string; port: number };
   listen_port: number;
-  delay: { profile: DelayProfile };
+  delay: { profile: DelayProfile }; // ignored on rx (it follows the transmitter)
   encryption: {
     cipher: Cipher;
     /** Write only. Omit to keep the current value. */
@@ -386,7 +408,7 @@ export interface TransportSettingsInput {
 export interface TransportOptions {
   modes: TransportMode[]; // ["outbound"]
   ciphers: Cipher[]; // ["none"]
-  /** available=false: shown but cannot be chosen yet (「準備中」). */
+  /** available=false: shown but cannot be chosen (「準備中」); low can be turned off on the device. */
   delay_profiles: { profile: DelayProfile; target_ms: number; available: boolean }[];
 }
 

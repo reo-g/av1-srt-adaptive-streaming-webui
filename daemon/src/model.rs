@@ -169,6 +169,14 @@ impl DelayProfile {
             DelayProfile::Low => "low",
         }
     }
+
+    pub fn parse(s: &str) -> Option<DelayProfile> {
+        match s {
+            "standard" => Some(DelayProfile::Standard),
+            "low" => Some(DelayProfile::Low),
+            _ => None,
+        }
+    }
 }
 
 /// Serialized as the contract's VideoInput.

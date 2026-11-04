@@ -6,7 +6,8 @@
 //! daemon runs a single-threaded runtime and spawns from it, never from spawn_blocking.
 //!
 //! Pipes: tx  bridge stdout → sender stdin; the bridge's stdin is the control input.
-//!        rx  receiver fd 3 (SRT_RCV_PIPE=/dev/fd/3) → player stdin; player stats fd → daemon.
+//!        rx  receiver fd 3 (SRT_RCV_PIPE=/dev/fd/3) → player stdin; player stats fd → daemon;
+//!            daemon → player control fd (--ctl-fd: a low-delay transmitter is followed there).
 //!
 //! Environment: a child gets only the inherited variables in PASS_ENV (plus `media.pass_env`)
 //! and then the profile's, so variables exported for experiments in the shell that started the
@@ -14,7 +15,7 @@
 
 use crate::config::Config;
 use crate::model::SIGNAL_FORMAT;
-use crate::profile::{self, Env, Input, Plan, Profile, Spec};
+use crate::profile::{self, Env, Input, Plan, Profiles, Spec};
 use crate::supervisor::{Kind, MediaBackend, MediaEvent, Session};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -99,26 +100,39 @@ struct Child {
 
 pub struct Real {
     cfg: Config,
-    prof: Profile,
+    profiles: Profiles,
     events: UnboundedSender<MediaEvent>,
     children: HashMap<(u64, Kind), Child>,
     /// The video pipe end waiting for the session's second child (sender → bridge, player → receiver).
     pipes: HashMap<u64, OwnedFd>,
     /// The bridge's control input.
     ctl: HashMap<u64, File>,
+    /// The player's control input (--ctl-fd; non-blocking: a few short lines per session).
+    player_ctl: HashMap<u64, File>,
 }
 
 impl Real {
-    pub fn new(cfg: Config, prof: Profile, events: UnboundedSender<MediaEvent>) -> Self {
-        Real { cfg, prof, events, children: HashMap::new(), pipes: HashMap::new(), ctl: HashMap::new() }
+    pub fn new(cfg: Config, profiles: Profiles, events: UnboundedSender<MediaEvent>) -> Self {
+        Real {
+            cfg,
+            profiles,
+            events,
+            children: HashMap::new(),
+            pipes: HashMap::new(),
+            ctl: HashMap::new(),
+            player_ctl: HashMap::new(),
+        }
     }
 
+    /// The commands of the session's profile (rx: the standard one; the player follows a
+    /// low-delay transmitter through its control input).
     fn spec(&self, s: &Session, kind: Kind, plan: &Plan) -> Spec {
+        let p = self.profiles.get(plan.delay);
         match kind {
-            Kind::Sender => profile::sender(&self.cfg, &self.prof, plan, &s.dir),
-            Kind::Bridge => profile::bridge(&self.cfg, &self.prof, plan, &s.dir),
-            Kind::Receiver => profile::receiver(&self.cfg, &self.prof, plan, &s.dir),
-            Kind::Player => profile::player(&self.cfg, &self.prof, &s.dir),
+            Kind::Sender => profile::sender(&self.cfg, p, plan, &s.dir),
+            Kind::Bridge => profile::bridge(&self.cfg, p, plan, &s.dir),
+            Kind::Receiver => profile::receiver(&self.cfg, p, plan, &s.dir),
+            Kind::Player => profile::player(&self.cfg, p, &s.dir),
         }
     }
 }
@@ -156,6 +170,7 @@ impl MediaBackend for Real {
         let mut held: Vec<OwnedFd> = Vec::new(); // the child's pipe ends; closed here right after the spawn
         let mut extra: Vec<(RawFd, RawFd)> = Vec::new(); // (our fd, fd number in the child)
         let mut ctl = None;
+        let mut player_ctl = None;
         let mut stats = None;
         match kind {
             Kind::Sender => {
@@ -182,6 +197,15 @@ impl MediaBackend for Real {
                     extra.push((sw.as_raw_fd(), fd));
                     held.push(sw);
                     stats = Some(sr);
+                }
+                if let Some(fd) = profile::ctl_fd(&spec.args) {
+                    let (cr, cw) = pipe()?;
+                    // never wait on the player: a line that does not fit is logged and dropped
+                    // SAFETY: fcntl on a pipe fd we own.
+                    unsafe { libc::fcntl(cw.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) };
+                    extra.push((cr.as_raw_fd(), fd));
+                    held.push(cr);
+                    player_ctl = Some(File::from(cw));
                 }
             }
             Kind::Receiver => {
@@ -210,6 +234,9 @@ impl MediaBackend for Real {
         if let Some(c) = ctl {
             self.ctl.insert(s.id, c);
         }
+        if let Some(c) = player_ctl {
+            self.player_ctl.insert(s.id, c);
+        }
         dlog!("session {}: {} started, pid {pid}", s.id, kind.name());
         let stderr = child.stderr.take();
         tokio::spawn(watch(child, stderr, log, log_limit, self.events.clone(), s.id, kind, exited));
@@ -234,6 +261,16 @@ impl MediaBackend for Real {
         }
     }
 
+    fn player_control(&mut self, session: u64, line: &str) {
+        match self.player_ctl.get_mut(&session) {
+            Some(f) => match f.write_all(format!("{line}\n").as_bytes()) {
+                Ok(()) => dlog!("session {session}: player control: {line}"),
+                Err(e) => dlog!("session {session}: player control {line:?}: {e}"),
+            },
+            None => dlog!("session {session}: player control {line:?}: the player has no control input"),
+        }
+    }
+
     fn signal(&mut self, session: u64, kind: Kind, kill: bool) {
         if let Some(c) = self.children.get(&(session, kind)) {
             if !c.exited.load(Ordering::Relaxed) && c.pid > 0 {
@@ -249,6 +286,7 @@ impl MediaBackend for Real {
     fn release(&mut self, session: u64) {
         self.pipes.remove(&session);
         self.ctl.remove(&session);
+        self.player_ctl.remove(&session);
         self.children.retain(|_, c| !c.exited.load(Ordering::Relaxed));
     }
 }

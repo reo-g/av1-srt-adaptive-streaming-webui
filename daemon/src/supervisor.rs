@@ -9,11 +9,13 @@
 //!     starts again only after it has kept working for INPUT_STABLE: a camera that opens but
 //!     fails once it streams waits longer each time instead of reconnecting every 5 s.
 //! RX: player → receiver → (accepted) live. Receiver exit → the player plays out what it
-//!     holds while a new pair starts listening.
+//!     holds while a new pair starts listening. The player always starts with the standard
+//!     profile; the receiver prints the transmitter's stream id right before it accepts, and a
+//!     low-delay transmitter is followed by writing the low profile's player_ctl to the player.
 
 use crate::config::Role;
 use crate::events::Ev;
-use crate::model::{params, LinkState, Params, SIGNAL_FORMAT};
+use crate::model::{params, DelayProfile, LinkState, Params, SIGNAL_FORMAT};
 use crate::profile::{Input, Plan};
 use crate::stats::{Obs, STALL_WINDOW_S};
 use serde_json::{json, Value};
@@ -35,6 +37,8 @@ const INPUT_ASSUME_OK: Duration = Duration::from_secs(10);
 /// follow an unterminated line and is looked for anywhere in a line.
 const EVT_MARK: &str = "@evt ";
 const SRC_ERR_MARK: &str = "[SRC ERR]";
+/// The receiver's line with the caller's stream id, right before its "accepted from" line.
+const STREAM_ID_MARK: &str = "[srt-recv] stream id ";
 const RX_RESPAWN: Duration = Duration::from_millis(500);
 const RX_RESPAWN_FAILED: Duration = Duration::from_secs(5);
 /// An old player may play out what it holds (about the delay) before it is stopped.
@@ -75,6 +79,8 @@ pub trait MediaBackend {
     fn spawn(&mut self, session: &Session, kind: Kind, plan: &Plan) -> io::Result<()>;
     /// A line to the bridge's control input; None closes it (the bridge then stops too).
     fn control(&mut self, session: u64, line: Option<&str>);
+    /// rx: a line to the player's control input (--ctl-fd).
+    fn player_control(&mut self, session: u64, line: &str);
     /// SIGTERM (or SIGKILL) to the child's process group.
     fn signal(&mut self, session: u64, kind: Kind, kill: bool);
     /// The session is over: drop the pipe ends the daemon still holds for it.
@@ -98,6 +104,9 @@ pub struct Link {
     pub last_live_until: Option<Instant>,
     /// rx: the transmitter's address from the receiver's "accepted from" line
     pub peer_addr: Option<(String, u16)>,
+    /// The delay profile of the transmission: tx the plan's (set at each start), rx the
+    /// transmitter's of the current or last connection (standard before any; memory only).
+    pub delay: DelayProfile,
     pub alerts: Vec<AlertEntry>,
     /// rx: no frame rendered for a second
     pub rx_black: bool,
@@ -127,6 +136,8 @@ pub struct Session {
     evt_seen: bool,
     /// tx: since when the input delivers frames (None while it does not)
     input_ok_at: Option<Instant>,
+    /// rx: the profile the transmitter's stream id names (None until the receiver printed one)
+    peer_delay: Option<DelayProfile>,
     term_at: Option<Instant>,
     kill_at: Option<Instant>,
 }
@@ -145,6 +156,15 @@ impl Session {
 /// with SRT_NODROP=1), else its fast-stats line, which it prints right after connecting.
 fn is_connected_line(line: &str) -> bool {
     line.starts_with("[srt-sender]") && (line.contains(" connected") || line.starts_with("[srt-sender] fast stats:"))
+}
+
+/// The profile a transmitter's stream id names (profile.rs `stream_id`): tokens separated by ';' or
+/// white space, the first `delay=…` counts, unknown tokens are ignored. Missing or unknown: standard.
+pub fn stream_id_delay(text: &str) -> DelayProfile {
+    text.split(|c: char| c == ';' || c.is_whitespace())
+        .find_map(|t| t.strip_prefix("delay="))
+        .and_then(DelayProfile::parse)
+        .unwrap_or(DelayProfile::Standard)
 }
 
 pub struct Machine<B: MediaBackend> {
@@ -176,6 +196,7 @@ impl<B: MediaBackend> Machine<B> {
                 next_try: None,
                 last_live_until: None,
                 peer_addr: None,
+                delay: DelayProfile::Standard,
                 alerts: Vec::new(),
                 rx_black: true,
                 rev: 0,
@@ -224,6 +245,13 @@ impl<B: MediaBackend> Machine<B> {
         self.link.rev += 1;
     }
 
+    fn set_delay(&mut self, d: DelayProfile) {
+        if self.link.delay != d {
+            self.link.delay = d;
+            self.link.rev += 1;
+        }
+    }
+
     pub fn clear_alert(&mut self, code: &str) {
         let n = self.link.alerts.len();
         self.link.alerts.retain(|a| a.code != code);
@@ -245,6 +273,7 @@ impl<B: MediaBackend> Machine<B> {
             live_at: None,
             evt_seen: false,
             input_ok_at: None,
+            peer_delay: None,
             term_at: None,
             kill_at: None,
         }
@@ -268,6 +297,10 @@ impl<B: MediaBackend> Machine<B> {
         }
         self.link.attempt = None;
         self.backoff = 0;
+        if self.role == Role::Tx {
+            // the plan is fixed at the start (retries and reconnects keep it)
+            self.set_delay(self.plan.delay);
+        }
         let first = if self.role == Role::Tx { LinkState::Connecting } else { LinkState::Listening };
         self.set_state(first, now);
         // A start right after a stop waits for the old children (camera, port) in tick().
@@ -512,6 +545,10 @@ impl<B: MediaBackend> Machine<B> {
     }
 
     fn receiver_line(&mut self, line: &str, now: Instant) {
+        if let Some(at) = line.find(STREAM_ID_MARK) {
+            self.stream_id(line[at + STREAM_ID_MARK.len()..].trim());
+            return;
+        }
         if line.contains("listening on") {
             self.out.push(Ev::info("listening_started").with(json!({ "port": self.plan.listen_port })));
             return;
@@ -522,11 +559,33 @@ impl<B: MediaBackend> Machine<B> {
             return;
         }
         s.connected = true;
+        // no stream id before the accepted line: a transmitter that does not say, standard
+        let delay = s.peer_delay.unwrap_or(DelayProfile::Standard);
         if let Some((addr, port)) = from.trim().rsplit_once(':') {
             self.link.peer_addr = Some((addr.to_string(), port.parse().unwrap_or(0)));
         }
+        self.set_delay(delay);
         self.set_state(LinkState::Live, now);
         self.out.push(Ev::info("peer_connected"));
+    }
+
+    /// The transmitter's stream id (before the accepted line): a low-delay transmitter is followed
+    /// by writing the low profile's player_ctl to the player before any video arrives.
+    fn stream_id(&mut self, text: &str) {
+        let Some(s) = self.cur.as_mut() else { return };
+        if s.connected || s.peer_delay.is_some() {
+            return;
+        }
+        let delay = stream_id_delay(text);
+        s.peer_delay = Some(delay);
+        let id = s.id;
+        dlog!("session {id}: the transmitter's stream id {text:?}: profile {}", delay.name());
+        if delay == DelayProfile::Low {
+            for l in &self.plan.low_ctl {
+                self.backend.player_control(id, l);
+            }
+        }
+        self.set_delay(delay);
     }
 
     // ------------------------------------------------------------------ children
@@ -663,6 +722,9 @@ mod tests {
         fn control(&mut self, s: u64, line: Option<&str>) {
             self.calls.push(format!("ctl {s} {}", line.unwrap_or("close")));
         }
+        fn player_control(&mut self, s: u64, line: &str) {
+            self.calls.push(format!("player {s} {line}"));
+        }
         fn signal(&mut self, s: u64, k: Kind, kill: bool) {
             self.calls.push(format!("{} {s} {}", if kill { "kill" } else { "term" }, k.name()));
         }
@@ -679,6 +741,8 @@ mod tests {
             input: Input::Camera("/dev/video0".into()),
             manual_kbps: None,
             maxbw_kbps: 5000,
+            delay: DelayProfile::Standard,
+            low_ctl: vec!["ts-offset-ms 400".into(), "adapt on".into()],
         };
         let t0 = Instant::now();
         (Machine::new(role, Fake::default(), plan, PathBuf::from("/run/ctrld"), t0), t0)
@@ -1010,6 +1074,80 @@ mod tests {
         assert_eq!(calls(&mut m), ["release 1", "spawn 2 player", "spawn 2 receiver"]);
         exit(&mut m, 2, Kind::Player, at(t0, 9000));
         assert_eq!(calls(&mut m), ["term 2 receiver"]);
+    }
+
+    #[test]
+    fn stream_ids() {
+        use DelayProfile::*;
+        for (text, want) in [
+            ("delay=low", Low),
+            ("delay=standard", Standard),
+            ("x=1;delay=low", Low),
+            ("id=TX-01 delay=low", Low),
+            ("delay=low;delay=standard", Low),
+            ("delay=fast", Standard),
+            ("delay=", Standard),
+            ("lowdelay=low", Standard),
+            ("#!::r=live,m=publish", Standard),
+            ("", Standard),
+        ] {
+            assert_eq!(stream_id_delay(text), want, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn rx_follows_a_low_delay_transmitter() {
+        let (mut m, t0) = machine(Role::Rx);
+        m.start(t0);
+        calls(&mut m);
+        line(&mut m, 1, Kind::Receiver, "[srt-recv] listening on :60021 (latency=8000 ms)", at(t0, 50));
+        assert_eq!(m.link.delay, DelayProfile::Standard);
+        let rev = m.link.rev;
+        // the stream id comes right before the accepted line: the player gets the low profile's lines first
+        line(&mut m, 1, Kind::Receiver, "[srt-recv] stream id delay=low", at(t0, 2000));
+        assert_eq!(calls(&mut m), ["player 1 ts-offset-ms 400", "player 1 adapt on"]);
+        assert_eq!(m.link.delay, DelayProfile::Low);
+        assert!(m.link.rev > rev, "a status push");
+        // a second one, or one after the accepted line, changes nothing
+        line(&mut m, 1, Kind::Receiver, "[srt-recv] stream id delay=standard", at(t0, 2001));
+        line(&mut m, 1, Kind::Receiver, "[srt-recv] accepted from 192.168.0.42:51234", at(t0, 2002));
+        line(&mut m, 1, Kind::Receiver, "[srt-recv] stream id delay=low", at(t0, 2003));
+        assert!(calls(&mut m).is_empty());
+        assert_eq!((m.link.state, m.link.delay), (LinkState::Live, DelayProfile::Low));
+
+        // the transmitter goes away: the last connection's profile stays until the next one
+        exit(&mut m, 1, Kind::Receiver, at(t0, 60_000));
+        assert_eq!((m.link.state, m.link.delay), (LinkState::Listening, DelayProfile::Low));
+        m.tick(at(t0, 60_500));
+        calls(&mut m);
+        // a transmitter that says nothing, or names another profile: standard, nothing written
+        line(&mut m, 2, Kind::Receiver, "[srt-recv] accepted from 192.168.0.42:51240", at(t0, 61_000));
+        assert_eq!(m.link.delay, DelayProfile::Standard);
+        exit(&mut m, 2, Kind::Receiver, at(t0, 70_000));
+        m.tick(at(t0, 70_500));
+        line(&mut m, 3, Kind::Receiver, "[srt-recv] stream id delay=fast;x=1", at(t0, 71_000));
+        line(&mut m, 3, Kind::Receiver, "[srt-recv] accepted from 192.168.0.42:51241", at(t0, 71_001));
+        assert_eq!(m.link.delay, DelayProfile::Standard);
+        assert!(!calls(&mut m).iter().any(|c| c.starts_with("player")), "nothing for the player");
+        // a line of an old session is not followed
+        line(&mut m, 2, Kind::Receiver, "[srt-recv] stream id delay=low", at(t0, 71_002));
+        assert_eq!(m.link.delay, DelayProfile::Standard);
+        // the stop keeps it (memory only)
+        m.stop(at(t0, 80_000));
+        assert_eq!(m.link.delay, DelayProfile::Standard);
+    }
+
+    #[test]
+    fn tx_takes_the_profile_of_the_plan_at_each_start() {
+        let (mut m, t0) = machine(Role::Tx);
+        m.plan.delay = DelayProfile::Low;
+        go_live(&mut m, t0);
+        assert_eq!(m.link.delay, DelayProfile::Low);
+        m.stop(at(t0, 1000));
+        m.plan.delay = DelayProfile::Standard;
+        // a receiver's line never reaches the transmitter's state
+        m.start(at(t0, 20_000));
+        assert_eq!(m.link.delay, DelayProfile::Standard);
     }
 
     #[test]

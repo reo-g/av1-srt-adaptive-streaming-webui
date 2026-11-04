@@ -102,3 +102,20 @@ address = "192.168.0.56"
 # player_args = ["--out", "/dev/null", "--dec", "vaav1dec", "--ts-offset-ms", "7000", "--no-record", "--stats-fd", "4"]
 # delay_target_ms = 9500
 # delay_margin_warn_s = 3.0
+
+# The low-delay profile (遅延「低遅延」, chosen in the transmitter's transport settings; the receiver
+# follows the transmitter it is connected to). It is the resolved standard profile (the defaults
+# and the [profile] tables above) with these built-in changes (src/profile.rs Profile::low):
+#   sender  SRT_SEND_PARTIAL=1                 bridge  SVT_PRESET=10, SVT_PARAMS=hierarchical-levels=3:lookahead=0
+#   always the fixed bitrate (bridge_manual_env, INITIAL_TARGET = the video settings' fixed bitrate)
+#   player_ctl = ["ts-offset-ms 400", "adapt on"] (rx: written to the player when such a transmitter connects)
+#   delay_target_ms = 1500, no margin warning
+# then [profile_low]: the same keys and rules as [profile] (receiver_env, receiver_args and
+# player_args are not used: the receiver starts with the standard profile), plus:
+# [profile_low]
+# enabled = true               # false: 低遅延 is shown but cannot be chosen; a stored one runs as standard
+# player_ctl = ["ts-offset-ms 400", "adapt on"]
+# delay_target_ms = 1500
+# delay_margin_warn_s = 1.0    # turns a margin warning on (none by default)
+# [profile_low.bridge_env]
+# SVT_PRESET = 10

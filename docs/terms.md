@@ -16,7 +16,8 @@
 
 | 区分 | 元の表記 | 画面の言葉 | API の名前 | 実装側の項目 |
 | --- | --- | --- | --- | --- |
-| 必ず置き換え | SRT 遅延、受信側の再生待ち | 遅延（「標準（約 10 秒）」「低遅延（約 1.5 秒）」）。送信機に入った映像が受信側に映るまでの時間。運用画面の詳細では「遅延の設定」 | `delay.profile`（`standard` / `low`）, `delay_target_ms`, `DelayProfile` | 送受信の `latency`（`SRTO_LATENCY`）と再生側の待ち時間の組。標準は latency 8000 ms・再生まで 9.5 s（never-drop）、低遅延は約 1.45 s |
+| 必ず置き換え | SRT 遅延、受信側の再生待ち | 遅延（「標準（約 10 秒）」「低遅延（約 1.5 秒）」）。送信機に入った映像が受信側に映るまでの時間。運用画面の詳細では「遅延の設定」。受信機では「送信機の設定に合わせています」を添える（受信機は選ばない） | `delay.profile`（`standard` / `low`）, `delay.follows_peer`（受信機は `true`）, `delay_target_ms`, `DelayProfile` | 送受信の `latency`（`SRTO_LATENCY`）と再生側の待ち時間の組。標準は latency 8000 ms・再生まで 9.5 s（never-drop）。低遅延（system repo docs/12、撮影 → 表示 約 1.45 s）は標準のプロファイルに次を足したもの（daemon の `Profile::low`、device.toml の `[profile_low]` で変えられる）：SVT-AV1 の preset 10 と `hierarchical-levels=3:lookahead=0`（先読みなし）、送信側の `SRT_SEND_PARTIAL=1`（1316 B そろうのを待たずに小さなメッセージをすぐ送る。標準では使わない）、固定のビットレート（`bridge_manual_env`、`INITIAL_TARGET` = 映像設定の固定する画質。おまかせ・never-drop 制御なし）、受信側の表示の待ち 400 ms と余裕の見張り（`ll_player.py --ctl-fd` に `ts-offset-ms 400` と `adapt on`。遅れて届くと 1 フレームずつ待ちを足し、60 秒落ち着くと 1 フレーム戻す）。never-drop・`STREAM_ALIGN=tu`・`CAM_PTS=v4l2`・送り出しの上限（MAXBW）は標準と同じ。送信機は接続のときにストリーム ID `delay=standard` / `delay=low`（`SRT_STREAMID` → `SRTO_STREAMID`）を送り、受信機はそれを読んで表示側を合わせる（ストリーム ID は画面にも API にも出さない） |
+| 置き換えを推奨 | 低遅延のときのビットレート固定 | 「低遅延のあいだは、おまかせは使えません。画質は固定の 3.0 Mbps で送ります」。映像設定のおまかせは押せない（「おまかせは、低遅延のあいだは使えません。」） | `VideoOptions.auto_available`、影響 `low_delay_fixed`（`bitrate_mbps`）・`low_delay_effects` | 低遅延のプロファイルは `fixed_bitrate`：保存した `encode.mode` によらず `encode.manual.bitrate_mbps` で送る。映像設定は書き換えない |
 | 必ず置き換え | Caller | 送信機から接続（選択肢が 1 つのときは「この送信機から受信機へ接続します」） | `outbound` | caller モード |
 | 必ず置き換え | Listener | 接続を待つ（状態の表示は「待ち受け中」） | `inbound` | listener モード |
 | 必ず置き換え | Rendezvous | 互いに接続 | `mutual` | rendezvous モード |

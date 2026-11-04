@@ -9,6 +9,7 @@
  *   MOCK_SCENARIO=normal|warn|error   (default warn)
  *   MOCK_PORT=8787
  *   MOCK_LINE_FAST=1           the line is faster than the line-speed test sends (result 「6 Mbps 以上」)
+ *   MOCK_PEER_DELAY=low|standard  rx: the delay of the transmitter it follows (default low)
  *
  * Scenarios (they imitate the real system: automatic bitrate between 1.5 and 4.0 Mbps,
  * standard delay profile of about 10 s, losses recovered by resending):
@@ -20,6 +21,12 @@
  * what shrinks the margin) and the capacity can be estimated; otherwise it is unknown (null).
  * The produced video rate follows a new target over a few seconds.
  *   error   the receiver cannot be reached: tx keeps reconnecting, rx waits for a caller
+ *
+ * 遅延 (delay): the transmitter offers 標準 and 低遅延. While low is applied it sends the fixed
+ * bitrate (encode.manual) whatever the video mode says, without automatic steps, margin or margin
+ * warning (VideoOptions.auto_available false); the stored video mode is kept. The receiver follows
+ * the transmitter: here a fixed value (MOCK_PEER_DELAY), shown in its stats and its transport
+ * settings (delay.follows_peer), and its check and PUT ignore delay.
  *
  * 途中の無線機 (GET/PUT /settings/network, both roles): starts with the two radios of the real
  * installation (the one next to this device first) at version 1, checks drafts with the device's
@@ -103,7 +110,7 @@ const MARGIN_WARN_S = 3;
 const RAMP_S = 3;
 const STALL_WINDOW_S = 300;
 
-const OPTIONS: Omit<VideoOptions, 'bandwidth_mbps'> = {
+const OPTIONS: Omit<VideoOptions, 'bandwidth_mbps' | 'auto_available'> = {
   cameras: [{ device: '/dev/video0', label: 'Facecam 4K', signal: SIGNAL_4K30 }],
   files: [
     { path: '/srv/media/big_buck_bunny_2160p30.y4m', format: SIGNAL_4K30, duration_s: 634 },
@@ -119,7 +126,7 @@ const TRANSPORT_OPTIONS: TransportOptions = {
   ciphers: ['none'],
   delay_profiles: [
     { profile: 'standard', target_ms: 9500, available: true },
-    { profile: 'low', target_ms: 1500, available: false },
+    { profile: 'low', target_ms: 1500, available: true },
   ],
 };
 const targetMsOf = (p: DelayProfile) => TRANSPORT_OPTIONS.delay_profiles.find((d) => d.profile === p)?.target_ms ?? 9500;
@@ -127,7 +134,8 @@ const targetMsOf = (p: DelayProfile) => TRANSPORT_OPTIONS.delay_profiles.find((d
 const reconnectGapS = (p: DelayProfile) => Math.round(targetMsOf(p) / 1000);
 const baseName = (path: string) => path.slice(path.lastIndexOf('/') + 1);
 
-const PEER_DELAY: DelayProfile = 'standard';
+/** rx: the delay of the transmitter it follows (the mock has no transmitter: a fixed value). */
+const RX_PEER_DELAY: DelayProfile = process.env.MOCK_PEER_DELAY === 'standard' ? 'standard' : 'low';
 const PEER_CIPHER = 'none';
 
 /** 送り出しの上限: the device's initial value and the range it accepts (Mbps, two decimals). */
@@ -205,15 +213,20 @@ function line(T: number): Line {
 
 const jit = (T: number, a: number, p: number) => a * (0.6 * Math.sin(T * 0.9 + p) + 0.4 * Math.sin(T * 0.23 + 2 * p));
 
+/** The delay in effect: tx the applied transport settings', rx the transmitter's it follows. */
+const delayInEffect = (): DelayProfile => (role === 'tx' ? transport.delay.profile : RX_PEER_DELAY);
+/** tx: low delay is applied, so the fixed bitrate is sent whatever the video mode says. */
+const lowApplied = () => role === 'tx' && transport.delay.profile === 'low';
+const autoInEffect = () => video.encode.mode === 'auto' && !lowApplied();
 const autoTarget = (T = modelT()) => line(T).target;
-const effectiveTarget = (T = modelT()) => (video.encode.mode === 'auto' ? autoTarget(T) : video.encode.manual.bitrate_mbps);
+const effectiveTarget = (T = modelT()) => (autoInEffect() ? autoTarget(T) : video.encode.manual.bitrate_mbps);
 
 /** The rate the encoder aims at after a change: it reaches a new target over RAMP_S seconds. */
 function rampedTarget(T: number): number {
   const target = effectiveTarget(T);
   if (switchRamp && T >= switchRamp.at && T < switchRamp.at + RAMP_S)
     return switchRamp.from + ((target - switchRamp.from) * (T - switchRamp.at)) / RAMP_S;
-  if (video.encode.mode !== 'auto') return target;
+  if (!autoInEffect()) return target;
   // Automatic steps: the mean of the target over the last RAMP_S seconds is a ramp after each step.
   const k = 6;
   let sum = 0;
@@ -229,7 +242,7 @@ function marginAt(T: number): number {
 
 /** When the margin fell below the warning level (model time), or null when it is not low. */
 function marginLowSince(T: number): number | null {
-  if (role !== 'tx' || line(T).margin >= MARGIN_WARN_S) return null;
+  if (role !== 'tx' || lowApplied() || line(T).margin >= MARGIN_WARN_S) return null;
   let k = 1;
   while (k < 300 && line(T - k).margin < MARGIN_WARN_S) k++;
   return T - k + 1;
@@ -269,7 +282,8 @@ function sample(T: number): Sample {
       loss_pct: loss,
       rtt_ms: rtt,
       bandwidth_mbps: capacity,
-      delay_margin_s: marginAt(T),
+      // low delay: no margin (and no warning)
+      delay_margin_s: lowApplied() ? null : marginAt(T),
     };
   return {
     recv_mbps: wire - 0.01,
@@ -301,7 +315,7 @@ function reset() {
     mode: 'outbound',
     peer: { host: '10.20.1.15', port: 9000 },
     listen_port: 9000,
-    delay: { profile: 'standard' },
+    delay: { profile: 'standard', follows_peer: false },
     encryption: { cipher: 'none', passphrase_set: false, passphrase_rejected_at: null },
     send_limit: { mbps: SEND_LIMIT_DEFAULT, source: 'default', measured_at: null, test_id: null },
   };
@@ -418,7 +432,7 @@ function stats(): Stats {
   const live = isLive();
   const T = modelT();
   const v = sample(T);
-  const profile = transport.delay.profile;
+  const profile = delayInEffect();
   const both = {
     at: iso(now()),
     delay_profile: profile,
@@ -437,8 +451,8 @@ function stats(): Stats {
       actual_mbps: live ? r1(v.actual_mbps!) : null,
       bandwidth_mbps: live && v.bandwidth_mbps != null ? r1(v.bandwidth_mbps) : null,
       send_late_5m: live ? 0 : null,
-      delay_margin_s: live ? v.delay_margin_s! : null,
-      delay_margin_warn_s: MARGIN_WARN_S,
+      delay_margin_s: live ? (v.delay_margin_s ?? null) : null,
+      delay_margin_warn_s: lowApplied() ? null : MARGIN_WARN_S,
       recv_mbps: null,
       stalls_5m: null,
       stall_s_5m: null,
@@ -534,6 +548,7 @@ function checkVideo(input: VideoSettingsInput): CheckResult {
   const errors: FieldError[] = [];
   const impacts: Impact[] = [];
   const cur = effectiveTarget();
+  const low = lowApplied();
   const br = input.encode.manual?.bitrate_mbps;
   const manual = input.encode.mode === 'manual';
   const [bMin, bMax] = OPTIONS.bitrate_range_mbps;
@@ -546,6 +561,8 @@ function checkVideo(input: VideoSettingsInput): CheckResult {
   const brC = manual && br !== cur;
   const loopC = input.input.kind === 'file' && input.input.loop !== video.input.loop;
   const any = srcC || modeC || brC || loopC;
+  // While the delay is low the fixed bitrate is sent in either mode: a new mode alone changes nothing sent.
+  const sentModeC = modeC && !low;
 
   const st = status().state;
   if (st === 'live') {
@@ -554,10 +571,13 @@ function checkVideo(input: VideoSettingsInput): CheckResult {
       const gap_s = reconnectGapS(transport.delay.profile);
       impacts.push({ level: 'warn', code: 'input_switch_gap', params: { gap_s } });
       impacts.push({ level: 'warn', code: 'reconnect_gap', params: { gap_s } });
-    } else if (modeC || brC) impacts.push({ level: 'ok', code: 'switch_no_gap' });
+    } else if (sentModeC || brC) impacts.push({ level: 'ok', code: 'switch_no_gap' });
   } else if (st === 'stopped' && any) impacts.push({ level: 'info', code: 'saved_while_stopped' });
   if (modeC && manual) impacts.push({ level: 'info', code: 'manual_fixed' });
-  if (modeC && !manual) impacts.push({ level: 'info', code: 'auto_decides' });
+  if (sentModeC && !manual) impacts.push({ level: 'info', code: 'auto_decides' });
+  // Not an error: the mode is stored and applies again when the delay is standard.
+  if (low && input.encode.mode === 'auto')
+    impacts.push({ level: 'info', code: 'low_delay_fixed', params: { bitrate_mbps: video.encode.manual.bitrate_mbps } });
   if (brC && brValid && br < cur) impacts.push({ level: 'info', code: 'bitrate_lower_quality' });
   const bw = stats().bandwidth_mbps;
   if (manual && (brC || modeC) && brValid && bw !== null && br > bw * 0.8)
@@ -567,6 +587,14 @@ function checkVideo(input: VideoSettingsInput): CheckResult {
 
 const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 const portOk = (p: number) => Number.isInteger(p) && p >= 1 && p <= 65535;
+
+/** The draft as the rules see it: the receiver follows the transmitter's delay, so its draft's delay is ignored. */
+const asDevice = (input: TransportSettingsInput): TransportSettingsInput =>
+  role === 'rx' ? { ...input, delay: { profile: transport.delay.profile } } : input;
+
+/** The transport settings as served: tx the delay chosen here, rx the transmitter's it follows. */
+const transportView = (): TransportSettings =>
+  role === 'rx' ? { ...transport, delay: { profile: RX_PEER_DELAY, follows_peer: true } } : transport;
 
 /** A field other than the send cap differs from the applied settings (applying would set the link up again). */
 const linkFieldsChanged = (input: TransportSettingsInput) =>
@@ -586,7 +614,8 @@ function draftLimit(input: TransportSettingsInput): { given: boolean; mbps: numb
   return { given: true, mbps: typeof x === 'number' && Number.isFinite(x) && x >= lo && x <= hi ? r2(x) : null };
 }
 
-function checkTransport(input: TransportSettingsInput): CheckResult {
+function checkTransport(raw: TransportSettingsInput): CheckResult {
+  const input = asDevice(raw);
   const errors: FieldError[] = [];
   const impacts: Impact[] = [];
   const limit = draftLimit(input);
@@ -620,6 +649,12 @@ function checkTransport(input: TransportSettingsInput): CheckResult {
     impacts.push({ level: 'info', code: 'reconnect' });
     impacts.push({ level: 'ok', code: 'no_peer_effect' });
   }
+  // To low delay: automatic mode is not used while it is applied (the stored video mode is kept).
+  if (dp?.available && dp.profile === 'low' && transport.delay.profile !== 'low') {
+    if (video.encode.mode === 'auto')
+      impacts.push({ level: 'info', code: 'low_delay_fixed', params: { bitrate_mbps: video.encode.manual.bitrate_mbps } });
+    impacts.push({ level: 'info', code: 'low_delay_effects' });
+  }
   return { ok: errors.length === 0, errors, impacts };
 }
 
@@ -637,7 +672,8 @@ function compare(): CompareResult {
         peer: { listen_port: 9000 },
         verdict: transport.peer.port === 9000 ? 'match' : 'mismatch',
       },
-      { key: 'delay', local: transport.delay.profile, peer: PEER_DELAY, verdict: transport.delay.profile === PEER_DELAY ? 'match' : 'mismatch' },
+      // the receiver follows the transmitter's delay when it connects
+      { key: 'delay', local: transport.delay.profile, peer: transport.delay.profile, verdict: 'match' },
       { key: 'cipher', local: cipher, peer: PEER_CIPHER, verdict: cipher === PEER_CIPHER ? 'match' : 'mismatch' },
       {
         key: 'passphrase',
@@ -914,7 +950,7 @@ function useNetworkTest(id: string): { code: number; body: TransportSettings | A
   };
   addEvent('info', 'send_limit_changed', { mbps, from_mbps: from, source: 'measured' });
   broadcast({ type: 'settings', section: 'transport', version: transport.version });
-  return { code: 200, body: transport };
+  return { code: 200, body: transportView() };
 }
 
 const testList = (): NetworkTestList => {
@@ -1034,7 +1070,10 @@ const server = http.createServer(async (req, res) => {
     // video (transmitter)
     if (path.startsWith('/settings/video') && role !== 'tx') return send(res, 409, { error: { code: 'unsupported_role' } });
     if (m === 'GET' && path === '/settings/video') return send(res, 200, videoView());
-    if (m === 'GET' && path === '/settings/video/options') return send(res, 200, { ...OPTIONS, bandwidth_mbps: stats().bandwidth_mbps });
+    if (m === 'GET' && path === '/settings/video/options') {
+      const o: VideoOptions = { ...OPTIONS, auto_available: !lowApplied(), bandwidth_mbps: stats().bandwidth_mbps };
+      return send(res, 200, o);
+    }
     if (m === 'POST' && path === '/settings/video/check') return send(res, 200, checkVideo(await readJson<VideoSettingsInput>(req)));
     if (m === 'PUT' && path === '/settings/video') {
       const input = await readJson<VideoSettingsInput>(req);
@@ -1069,15 +1108,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, out);
     }
 
-    // transport (transmitter)
-    if ((path.startsWith('/settings/transport') || path === '/transport/compare') && role !== 'tx')
-      return send(res, 409, { error: { code: 'unsupported_role' } });
-    if (m === 'GET' && path === '/settings/transport') return send(res, 200, transport);
+    // transport (both roles; the comparison is the transmitter's)
+    if (path === '/transport/compare' && role !== 'tx') return send(res, 409, { error: { code: 'unsupported_role' } });
+    if (m === 'GET' && path === '/settings/transport') return send(res, 200, transportView());
     if (m === 'GET' && path === '/settings/transport/options') return send(res, 200, TRANSPORT_OPTIONS);
     if (m === 'GET' && path === '/transport/compare') return send(res, 200, compare());
     if (m === 'POST' && path === '/settings/transport/check') return send(res, 200, checkTransport(await readJson<TransportSettingsInput>(req)));
     if (m === 'PUT' && path === '/settings/transport') {
-      const input = await readJson<TransportSettingsInput>(req);
+      const input = asDevice(await readJson<TransportSettingsInput>(req));
       if (input.version !== transport.version) return send(res, 409, { error: { code: 'version_conflict' } });
       const c = checkTransport(input);
       if (!c.ok) return send(res, 400, { error: { code: 'invalid', errors: c.errors } });
@@ -1088,13 +1126,15 @@ const server = http.createServer(async (req, res) => {
       // Setting the link up again takes a moment; storing the cap alone does not.
       await sleep(linkChanged || !limitChanged ? 1000 : 300);
       const newPass = input.encryption.passphrase !== undefined && input.encryption.cipher !== 'none';
+      const prevBr = effectiveTarget();
+      const from = rampedTarget(modelT());
       transport = {
         ...transport,
         version: transport.version + 1,
         mode: input.mode,
         peer: { ...input.peer },
         listen_port: input.listen_port,
-        delay: { profile: input.delay.profile },
+        delay: { profile: input.delay.profile, follows_peer: false },
         encryption: {
           cipher: input.encryption.cipher,
           passphrase_set: input.encryption.cipher === 'none' ? transport.encryption.passphrase_set : transport.encryption.passphrase_set || newPass,
@@ -1103,12 +1143,17 @@ const server = http.createServer(async (req, res) => {
         // A new value is the operator's; the same value keeps where it came from.
         send_limit: limitChanged ? { mbps: nextMbps, source: 'manual', measured_at: null, test_id: null } : prevLimit,
       };
+      // a new delay can change the bitrate in effect (low delay sends the fixed one)
+      if (effectiveTarget() !== prevBr) {
+        switchRamp = { at: modelT(), from };
+        lastAutoTarget = autoTarget();
+      }
       if (linkChanged || !limitChanged) addEvent('info', 'transport_settings_applied');
       if (newPass) addEvent('info', 'passphrase_changed');
       if (limitChanged) addEvent('info', 'send_limit_changed', { mbps: nextMbps, from_mbps: prevLimit.mbps, source: 'manual' });
       broadcast({ type: 'settings', section: 'transport', version: transport.version });
       broadcast({ type: 'status', status: status() });
-      const out: ApplyResult<TransportSettings> = { settings: transport, applied_at: iso(now()), impacts: c.impacts };
+      const out: ApplyResult<TransportSettings> = { settings: transportView(), applied_at: iso(now()), impacts: c.impacts };
       return send(res, 200, out);
     }
 
@@ -1193,7 +1238,7 @@ setInterval(() => {
     if (role === 'tx') {
       // Automatic mode steps the bitrate as the line changes.
       const l = line(T);
-      if (video.encode.mode === 'auto' && lastAutoTarget !== null && l.target !== lastAutoTarget)
+      if (autoInEffect() && lastAutoTarget !== null && l.target !== lastAutoTarget)
         addEvent('info', 'bitrate_changed', { mbps: l.target, from_mbps: lastAutoTarget, reason: l.reason });
       lastAutoTarget = l.target;
       const low = marginLowSince(T) !== null;

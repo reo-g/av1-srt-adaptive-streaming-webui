@@ -22,11 +22,12 @@ ctrld --config ~/.config/ctrld/device.toml   # the default path; see device.exam
 ```
 
 `device.toml` holds the identity (`id`, `role`, `serial`), the HTTP bind address and port
-(default `0.0.0.0:8080`), the directories, the media program paths and the **profile**: the
+(default `0.0.0.0:8080`), the directories, the media program paths and the **profiles**: the
 environment and arguments of each child. The built-in defaults are the standard profile (the
 current automatic mode, `src/profile.rs`); entries under `[profile.*_env]` replace a default
 and an empty string removes it, so the controller settings being tuned are not fixed in the
-daemon. The daemon adds the per-session file paths itself.
+daemon. The low-delay profile is layered on the resolved standard one and changed by
+`[profile_low]` (below). The daemon adds the per-session file paths itself.
 
 `tx.peer_host` / `tx.peer_port` are only the initial transport settings; after the first apply
 the settings screen's values (in `state_dir/settings.json`) are used.
@@ -91,10 +92,55 @@ so this is the only knob (`BUF_ND_MAXBW_KBPS` is not set). Default 5.0 Mbps (`so
 1.0–20.0 with two decimals; set from a line-speed test (`POST /network-tests/{id}/use`, `measured`)
 or in the transport settings (`manual`). It is fixed when a transmission starts (retries and
 reconnects keep it): a change while live is stored and used from the next start. The developer
-log has a line with the cap at each start. A `sender_args` in device.toml with a number in place
+log has a line with the profile, the cap and the bitrate at each start. A `sender_args` in device.toml with a number in place
 of the placeholder keeps working: that number is the cap and the setting is not used (the log
 line says so). A `settings.json` from before the cap existed loads with the default; a value
 outside the range (edited by hand) is replaced by the default.
+
+**Delay profiles** (遅延, `TransportSettings.delay`: `standard` / `low`, `src/profile.rs`). The
+transmitter's transport settings choose one; every session of a transmission uses the profile of
+the applied settings at its start (retries and reconnects keep it), for its commands, its
+statistics (delay target, margin warning) and the developer log line at the start (`start:
+profile low, send cap 5000 kbps (default), fixed 3000 kbps`). The low-delay profile (system repo
+docs/12) is the resolved standard profile (defaults + `[profile]`) with these changes, then
+`[profile_low]`:
+
+| | standard | low |
+| --- | --- | --- |
+| sender | — | `SRT_SEND_PARTIAL=1` (small messages are sent at once; only here: in the standard profile it makes keyframes burst past the send cap, docs/12 §12.6) |
+| bridge | automatic (`bridge_env`) | `SVT_PRESET=10`, `SVT_PARAMS=hierarchical-levels=3:lookahead=0`, always the fixed bitrate (`bridge_manual_env`: no automatic steps, no never-drop controller) with `INITIAL_TARGET` = the video settings' fixed bitrate (`encode.manual.bitrate_mbps`), whatever `encode.mode` says |
+| player (rx) | the arguments (`--ts-offset-ms 7000`) | `player_ctl = ["ts-offset-ms 400", "adapt on"]`, written to the player when a low-delay transmitter connects |
+| `delay_target_ms` | 9500 | 1500 |
+| margin warning | `delay_margin_warn_s = 3.0` | none (`Stats.delay_margin_s` and `delay_margin_warn_s` null, `delay_margin_low` never raised) |
+
+Unchanged in low: `SRT_NODROP=1`, `STREAM_ALIGN=tu`, `CAM_PTS=v4l2`, the send cap as the
+sender's MAXBW (`{maxbw_kbps}`), the receiver's environment and arguments. `[profile_low]` takes
+the same keys as `[profile]` (env values replace, an empty string removes; `sender_args` etc.
+replace; `delay_target_ms`; `delay_margin_warn_s` turns a margin warning on) plus `enabled`
+(default true; false: `low` is offered with `available: false`, a `PUT` with it is refused as
+`delay.profile: invalid`, and a stored `low` runs as standard, which the start line says) and
+`player_ctl` (a list of single lines; empty ones are dropped). `receiver_env`, `receiver_args`
+and `player_args` of `[profile_low]` are not used: the receiver starts before it knows the
+transmitter's profile. The video settings are never changed by the delay: while low is applied
+`VideoOptions.auto_available` is false and a stored automatic mode applies again after going back
+to standard.
+
+The daemon (not the profile) gives every sender `SRT_STREAMID=delay=standard` or `delay=low`.
+The receiver prints the caller's stream id (`[srt-recv] stream id <text>`) right before its
+`accepted from` line; the daemon reads `delay=<profile>` from it (tokens separated by `;` or white
+space, the first `delay=` counts, unknown tokens are ignored; missing or unknown: standard). The
+player always starts with the standard profile's arguments plus `--ctl-fd 5` (a pipe; 6 when the
+stats use 5; not added when `player_args` name one), whose write end the daemon keeps per session
+(non-blocking; closed with the session, which the player takes as the end of control only). For
+`low` it writes each `player_ctl` line there, before any video arrives (the player answers `[player]
+ctl <line> ok` in `player.log`), and the session's statistics switch to the low profile; each step
+has a developer-log line. rx `TransportSettings.delay` is `{profile: <the current or last
+connection's>, follows_peer: true}` (standard before any; memory only); on rx a transport check
+or `PUT` ignores `delay` (the stored value is kept). rx `Stats.delay_target_ms` = the profile's
+target + max(0, the player's `ts_offset_ms` − the profile's first offset), to 100 ms (the player's
+margin watch raises its offset when frames come late, so this is the delay aimed at now; the
+first offset is the last `ts-offset-ms` line of `player_ctl`, else `--ts-offset-ms` of the
+arguments; only while live, and only from stats lines read since the profile was set).
 
 **Environment of the children.** A child does not inherit the daemon's whole environment: only
 `PATH`, `HOME`, `USER`, `LOGNAME`, the locale (`LANG`, `LANGUAGE`, `LC_*`, `TZ`), `TMPDIR`, the
@@ -123,12 +169,12 @@ None of these logs is shown in the UI.
   `input_detected`) only once the bridge reports frames (`@evt {"input":"ok"}`; after 10 s live
   when the bridge reports no input events at all), and the backoff starts from 5 s again only
   after 10 s of frames, so a camera that opens but fails once it streams waits longer each
-  time. Then the sender (`- <peer> <port> 8000 live 10000 <send cap, kbps>`);
+  time. Then the sender (`- <peer> <port> 8000 live 10000 <send cap, kbps>`, `SRT_STREAMID=delay=<profile>`);
   when it reports the connection, the bridge (stdout → sender stdin, stdin = control input,
   cwd `<repo>/sender`). Stop: `{"cmd":"stop"}` to the bridge, the sender drains its input
   (≤ `SRT_DRAIN_MAX_MS`), SIGTERM to the process groups after 6 s, SIGKILL after 8 s.
   Sender exit → `reconnecting`, the next try 5 s after the previous one started.
-- **rx**: the player first (stdin = a 1 MiB pipe, stats on fd 4), then the receiver with the
+- **rx**: the player first (stdin = a 1 MiB pipe, stats on fd 4, control on fd 5), then the receiver with the
   pipe as its fd 3 (`SRT_RCV_PIPE=/dev/fd/3`). Receiver exit → the old player plays out what it
   holds (≤ 30 s) while a new pair starts listening 0.5 s later.
 - **rx stops** come from the player's stats: a stop is followed while it lasts (the alert and
@@ -232,7 +278,15 @@ changed, the existing ones (`reconnect_gap` while live). Events: a new cap alone
 `send_limit_changed {mbps, from_mbps, source}` only; with other fields,
 `transport_settings_applied` then `send_limit_changed`. An input must be chosen: an empty camera or file is a field error, and with no
 file chosen yet the first file offered is the default. `/transport/compare` has no peer data
-yet (`verdict: unknown`).
+yet (`verdict: unknown`). The transport settings are answered on rx too (its screen is not
+designed yet): the same object and rules, except that `delay` follows the transmitter
+(`follows_peer: true`) and is ignored in a check or `PUT`; the video settings and
+`/transport/compare` stay `409 unsupported_role` there. Delay impacts: to `low` → `info
+low_delay_fixed {bitrate_mbps}` (the fixed bitrate, while the applied video mode is auto) and
+`info low_delay_effects`, after the usual ones (`reconnect_gap` with the new profile's delay,
+`gap_s` 2 for low). Video check while low is applied: mode auto → `info low_delay_fixed
+{bitrate_mbps}` (not an error), and a new mode alone gives no `switch_no_gap` / `auto_decides`
+(nothing sent changes).
 
 Network settings (途中の無線機, both roles, allowed in every link state: applying does not touch
 the transmission): `GET /settings/network` → `{version, hops: [{label, address}]}`; `POST
@@ -362,6 +416,16 @@ the previous peer and tried again later); `src/api.rs` its content for tx and rx
 `PUT` rule are table-tested in `src/check.rs` and over HTTP in `src/api.rs`; `{maxbw_kbps}`
 (and a literal in an overriding `sender_args`) in `src/profile.rs`.
 
+Delay profiles: `src/profile.rs` the low profile's layering (`[profile]` under it,
+`[profile_low]` over it, `enabled`, `player_ctl`) and a low session's commands (stream id, small
+messages, preset and parameters, the fixed-bitrate environment, the player's `--ctl-fd`),
+`src/supervisor.rs` the stream id rules and the receiver following a transmitter (the lines
+written to the player through the fake backend, standard without a stream id),
+`src/stats.rs` the rx delay target from `ts_offset_ms` and tx without a margin, `src/check.rs`
+the impacts, `src/api.rs` both roles over HTTP (options, `auto_available`, the plan's fixed
+bitrate while the stored mode is auto, `enabled = false`, rx `follows_peer` and a draft's delay
+ignored).
+
 `src/preview.rs` and `src/api.rs` run `tests/fixtures/stub_preview.py` (canned answers, the
 real program's arguments only, markers in an offer make it fail, stay silent, answer late, hang or
 exit; see its docstring) for the preview manager's lifecycle, id matching, timeouts, the
@@ -371,4 +435,6 @@ viewer limit, restarts and the HTTP codes.
 lines and write statistics rows), for a smoke test of the real process handling without a
 camera, encoder or network: point `[media]` at them (`repo = ".../daemon/tests/fixtures"`,
 `sender = "stub_sender.py"`, …, `[preview] program = "stub_preview.py"`) and drive them with the
-control files described in each stub.
+control files described in each stub (`media.pass_env = ["STUB_CTL"]`). `rx_stream_id` (its
+content, e.g. `delay=low`) makes the stub receiver print a transmitter's stream id, and the stub
+player follows its `--ctl-fd` lines as the real one does (and reports `ts_offset_ms`).

@@ -33,6 +33,8 @@ def log(msg):
 
 host, port, lat = sys.argv[2], sys.argv[3], sys.argv[4]
 log("[srt-sender] reading from stdin (live mode)")
+if os.environ.get("SRT_STREAMID"):
+    log(f"[srt-sender] stream id {os.environ['SRT_STREAMID']}")
 log(f"[srt-sender] connecting to {host}:{port} (latency={lat} ms)")
 if flag("fail_connect"):
     time.sleep(1.0)

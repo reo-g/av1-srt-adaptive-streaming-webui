@@ -17,7 +17,12 @@ tags:
   - name: video settings
     description: Transmitter only. A receiver answers 409 unsupported_role.
   - name: transport settings
-    description: Transmitter only. A receiver answers 409 unsupported_role.
+    description: |
+      The transmitter's screen. A receiver answers them too (its screen is not designed yet), but it
+      does not choose the delay: it follows the transmitter it is connected to (delay.follows_peer
+      true, delay.profile the transmitter's of the current or last connection, standard before any;
+      kept in memory only) and its check and PUT ignore delay. /transport/compare is transmitter
+      only (a receiver answers 409 unsupported_role).
   - name: network settings
     description: |
       The devices on the way to the peer (途中の無線機), both roles. They are checked by
@@ -141,6 +146,9 @@ paths:
       description: |
         A new bitrate or mode is taken over without a gap in the picture (a few seconds).
         A new input sets the link up again (the receiver's picture stops for about 10 s).
+        While the transport delay is low the fixed bitrate (encode.manual) is sent whatever the
+        mode says; mode auto is stored and applies again when the delay is standard
+        (VideoOptions.auto_available, impact low_delay_fixed).
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/VideoSettingsInput' } } } }
       responses:
         '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/ApplyVideoResult' } } } }
@@ -171,6 +179,9 @@ paths:
         is accepted while the link runs too (impact takes_effect_next_start; the running transmission,
         its retries included, keeps its cap). The other fields keep their rules (the device may answer 409 busy while live). A new
         send_limit value becomes source "manual" and adds the event send_limit_changed.
+        A new delay is used from the next transmission (the receiver follows it when the
+        transmitter connects). The video settings are never changed by it. On a receiver delay
+        is ignored.
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TransportSettingsInput' } } } }
       responses:
         '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/ApplyTransportResult' } } } }
@@ -357,15 +368,17 @@ components:
       enum: [standard, low]
       description: |
         standard: about 10 s from capture to display; tolerant of a bad line; automatic quality works.
-        low: about 1.5 s; picture quality fixed; a bad line makes the picture stop more easily.
+        low: about 1.5 s; picture quality fixed (encode.manual, whatever encode.mode says); a bad line
+        makes the picture stop, or the receiver's delay grow, more easily.
+        Chosen on the transmitter; the receiver follows the transmitter it is connected to.
     Stats:
       type: object
       description: Fields that do not apply to the role, or cannot be measured now, are null.
       required: [at, delay_profile, delay_target_ms, loss_pct, loss_threshold_pct, rtt_ms, last_rtt_ms, retrans_pct, send_mbps, target_mbps, actual_mbps, bandwidth_mbps, send_late_5m, delay_margin_s, delay_margin_warn_s, recv_mbps, stalls_5m, stall_s_5m, video_latency_ms, unrecovered_5m]
       properties:
         at: { type: string, format: date-time }
-        delay_profile: { $ref: '#/components/schemas/DelayProfile' }
-        delay_target_ms: { type: integer, description: "target delay of the profile in effect, capture to display", examples: [9500] }
+        delay_profile: { $ref: '#/components/schemas/DelayProfile', description: "the profile in effect; rx: the transmitter's of the current or last connection" }
+        delay_target_ms: { type: integer, description: "target delay of the profile in effect, capture to display; rx: plus what the receiver has added on its own since the transmitter connected (it waits longer when frames come late), to 100 ms", examples: [9500] }
         loss_pct: { type: [number, 'null'], description: 'line loss; tx: resent ÷ sent packets, rx: lost ÷ expected packets' }
         loss_threshold_pct: { type: [number, 'null'], description: above this loss_high is raised; null while losses are recovered by resending (standard profile) }
         rtt_ms: { type: [number, 'null'] }
@@ -376,8 +389,8 @@ components:
         actual_mbps: { type: [number, 'null'], description: 'tx; video bitrate actually produced: mean of the last 3 keyframe intervals (about 6 s)' }
         bandwidth_mbps: { type: [number, 'null'], description: "tx; estimated line capacity, only measurable while the line is crowded (null while the device's own sending cap is the limit)" }
         send_late_5m: { type: [integer, 'null'], description: "tx; packets that could not be sent in time, last 5 min" }
-        delay_margin_s: { type: [number, 'null'], description: "tx; seconds left before the receiver's picture would stop (about 6 s normally); one decimal rounded down, the same value as delay_margin_low.margin_s" }
-        delay_margin_warn_s: { type: [number, 'null'], description: tx; delay_margin_low is raised below this margin (about 3 s in the standard profile); null on rx, examples: [3] }
+        delay_margin_s: { type: [number, 'null'], description: "tx; seconds left before the receiver's picture would stop (about 6 s normally); one decimal rounded down, the same value as delay_margin_low.margin_s. null in the low profile" }
+        delay_margin_warn_s: { type: [number, 'null'], description: "tx; delay_margin_low is raised below this margin (about 3 s in the standard profile); null on rx and in the low profile (no margin, no warning)", examples: [3] }
         recv_mbps: { type: [number, 'null'], description: rx; what arrives (6 s mean) }
         stalls_5m: { type: [integer, 'null'], description: "rx; times the picture stopped, last 5 min" }
         stall_s_5m: { type: [number, 'null'], description: "rx; total seconds the picture stood still, last 5 min" }
@@ -439,7 +452,7 @@ components:
         level: { type: string, enum: [warn, ok, info] }
         code:
           type: string
-          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, takes_effect_next_start, hops_changed]
+          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, takes_effect_next_start, hops_changed, low_delay_fixed, low_delay_effects]
         params:
           $ref: '#/components/schemas/Params'
           description: |
@@ -449,6 +462,8 @@ components:
             bitrate_near_bandwidth: bandwidth_mbps (the fixed bitrate is above 0.8 × the estimated capacity).
             takes_effect_next_start (info): send_limit changes and nothing else does, while the link is not stopped (live, connecting, reconnecting); it is stored and used from the next start (retries keep the cap they started with).
             hops_changed (info, network settings): the list differs from the applied one; reachability and what the radio line may carry follow the new list. Nothing else is affected (the transmission is not touched).
+            low_delay_fixed (info): bitrate_mbps (encode.manual.bitrate_mbps). Low delay sends this fixed bitrate whatever the video mode says. Transport: the delay changes to low while the applied video mode is auto. Video: the draft's mode is auto while low is applied (not an error; auto applies again when the delay is standard). While low is applied, a change of the mode alone does not change what is sent (no switch_no_gap, no auto_decides).
+            low_delay_effects (info, transport): the delay changes to low; on a busy line the receiver's delay may grow (it comes back slowly once the line is quiet).
     CheckResult:
       type: object
       required: [ok, errors, impacts]
@@ -535,7 +550,7 @@ components:
         keyframe_s: { type: number, examples: [2] }
     VideoOptions:
       type: object
-      required: [cameras, files, loop_available, bitrate_range_mbps, encoding, bandwidth_mbps]
+      required: [cameras, files, loop_available, auto_available, bitrate_range_mbps, encoding, bandwidth_mbps]
       properties:
         cameras:
           type: array
@@ -556,6 +571,12 @@ components:
               format: { type: string, examples: ['3840×2160　30p'] }
               duration_s: { type: integer }
         loop_available: { type: boolean, description: false while files can only be played once }
+        auto_available:
+          type: boolean
+          description: |
+            false while the applied transport delay is low: the fixed bitrate (encode.manual) is sent
+            and auto is not in effect, whatever encode.mode says. The stored mode is kept and applies
+            again when the delay is standard.
         bitrate_range_mbps: { type: array, items: { type: number }, minItems: 2, maxItems: 2, examples: [[1.5, 4.0]] }
         encoding: { $ref: '#/components/schemas/VideoEncoding' }
         bandwidth_mbps: { type: [number, 'null'], description: "estimated line capacity; null unless the line is crowded" }
@@ -597,9 +618,15 @@ components:
         listen_port: { type: integer }
         delay:
           type: object
-          required: [profile]
+          required: [profile, follows_peer]
           properties:
             profile: { $ref: '#/components/schemas/DelayProfile' }
+            follows_peer:
+              type: boolean
+              description: |
+                false on the transmitter (the delay is chosen here). true on the receiver: profile
+                is the transmitter's of the current or last connection (standard before any; kept
+                in memory only), and a check or PUT ignores delay.
         encryption:
           type: object
           required: [cipher, passphrase_set, passphrase_rejected_at]
@@ -623,7 +650,7 @@ components:
           type: object
           required: [profile]
           properties:
-            profile: { $ref: '#/components/schemas/DelayProfile', description: one of TransportOptions.delay_profiles with available=true }
+            profile: { $ref: '#/components/schemas/DelayProfile', description: one of TransportOptions.delay_profiles with available=true; ignored on a receiver }
         encryption:
           type: object
           required: [cipher]
@@ -655,8 +682,8 @@ components:
             properties:
               profile: { $ref: '#/components/schemas/DelayProfile' }
               target_ms: { type: integer, examples: [9500] }
-              available: { type: boolean, description: false = shown but not selectable yet }
-          examples: [[{ profile: standard, target_ms: 9500, available: true }, { profile: low, target_ms: 1500, available: false }]]
+              available: { type: boolean, description: "false = shown but not selectable (low can be turned off on the device)" }
+          examples: [[{ profile: standard, target_ms: 9500, available: true }, { profile: low, target_ms: 1500, available: true }]]
     ApplyTransportResult:
       type: object
       required: [settings, applied_at, impacts]
