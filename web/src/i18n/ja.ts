@@ -231,3 +231,42 @@ export const delayName = (p: DelayProfile, targetMs?: number) => {
 };
 export const delayDesc = (p: DelayProfile) =>
   p === 'standard' ? '回線が乱れても映像が止まりにくい' : 'おまかせは使えず、画質は固定になります。回線が乱れると映像が止まりやすい';
+
+// ---------------------------------------------------------------- preview
+
+/** Why the preview cannot be shown (from the device's error code or the browser's abilities). */
+export type PreviewProblem = 'failed' | 'busy' | 'unsupported';
+
+export const previewConnecting = 'プレビューを準備しています';
+export const previewRetry = 'もう一度試す';
+export const previewAutoRetry = '少し待つと、自動でもう一度つなぎます。';
+
+export const previewProblemText = (p: PreviewProblem): string =>
+  ({
+    failed: 'プレビューを表示できませんでした',
+    busy: 'ほかの画面でプレビューを見ているため、表示できません',
+    unsupported: 'このブラウザではプレビューを表示できません',
+  })[p];
+
+/** The line under the problem: what it means for the video itself, or what to do. */
+export const previewProblemHint = (role: Role, p: PreviewProblem): string => {
+  switch (p) {
+    case 'busy':
+      return 'ほかの画面を閉じてから、もう一度試してください。';
+    case 'unsupported':
+      return 'Google Chrome か Safari で開いてください。';
+    case 'failed':
+      return role === 'tx' ? '受信機へ送っている映像には影響ありません。' : '受信機が出力している映像には影響ありません。';
+  }
+};
+
+/**
+ * Caption under the preview. tx shows the picture after compression (what the receiver
+ * gets), a few seconds behind the input; rx shows its own output, slightly behind it.
+ */
+export const previewCaption = (role: Role, live: boolean): string => {
+  if (!live) return role === 'tx' ? 'プレビューは伝送中だけ表示します。' : 'プレビューは受信中だけ表示します。';
+  return role === 'tx'
+    ? '受信機へ送っている映像を、圧縮したあとの画質で確認用に表示しています。入力より数秒遅れて映ります。'
+    : '受信機が出力している映像を、確認用に表示しています。出力より少し遅れて映ります。';
+};

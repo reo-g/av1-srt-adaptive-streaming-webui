@@ -19,6 +19,13 @@ tags:
   - name: transport settings
     description: Transmitter only. A receiver answers 409 unsupported_role.
   - name: network test
+  - name: preview
+    description: |
+      Live picture in the browser, only while the link is live. tx shows what it sends (after
+      compression, a few seconds behind the input), rx what it outputs. The browser opens a
+      receive-only peer connection, gathers its candidates (no external servers), posts the
+      offer and applies the answer; there is no trickle. Close with DELETE when the screen
+      stops showing it (another page, hidden tab, link no longer live).
 paths:
   /device:
     get:
@@ -56,13 +63,33 @@ paths:
         '200':
           description: OK
           content: { application/json: { schema: { type: array, items: { $ref: '#/components/schemas/DeviceEvent' } } } }
-  /preview.mjpeg:
-    get:
-      tags: [device]
-      summary: Preview frames (multipart/x-mixed-replace, JPEG, ≈5 fps, 640×360)
-      description: tx streams its input, rx what it outputs. Clients stop reading when hidden.
+  /preview/sessions:
+    post:
+      tags: [preview]
+      summary: Open a preview session (offer in, answer out)
+      description: |
+        The device answers once it is ready to send (this can take a few seconds the first time).
+        Errors: 409 not_live (the link is not live), 429 too_many_viewers (the device's viewer
+        limit is reached), 400 bad_offer (missing, empty, not starting with "v=0" or over 64 KB),
+        400 no_common_codec (the browser cannot play any of the preview's video formats),
+        503 preview_unavailable (the preview is turned off or could not be prepared now).
+        The transmission never depends on the preview.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/PreviewOffer' } } } }
       responses:
-        '200': { description: Stream, content: { multipart/x-mixed-replace: { schema: { type: string, format: binary } } } }
+        '201': { description: Opened, content: { application/json: { schema: { $ref: '#/components/schemas/PreviewSession' } } } }
+        '400': { description: bad_offer or no_common_codec, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '409': { description: not_live, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '429': { description: too_many_viewers, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '503': { description: preview_unavailable, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+  /preview/sessions/{id}:
+    delete:
+      tags: [preview]
+      summary: Close a preview session
+      description: Also 204 for an unknown or already closed id. The device also closes a session whose connection is lost.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Closed }
   /transport/start:
     post:
       tags: [transport control]
@@ -209,12 +236,12 @@ components:
         params: { $ref: '#/components/schemas/Params' }
     Media:
       type: object
-      required: [kind, label, format, preview_fps, audio, black]
+      description: The picture of the operation screen. tx its input (the preview shows it as sent), rx its output.
+      required: [kind, label, format, audio, black]
       properties:
         kind: { type: string, enum: [camera, file, output] }
         label: { type: string, description: 'a name the operator recognises: the camera name, the file name (no folder), or the output', examples: [Facecam 4K, sample_2160p30.y4m, OUT 1] }
         format: { type: [string, 'null'], description: 'width×height, U+3000, frame rate', examples: ['3840×2160　30p'] }
-        preview_fps: { type: number }
         audio: { type: string, enum: [none] }
         black: { type: boolean }
     Status:
@@ -245,24 +272,24 @@ components:
       properties:
         at: { type: string, format: date-time }
         delay_profile: { $ref: '#/components/schemas/DelayProfile' }
-        delay_target_ms: { type: integer, description: target delay of the profile in effect, capture to display, examples: [9500] }
+        delay_target_ms: { type: integer, description: "target delay of the profile in effect, capture to display", examples: [9500] }
         loss_pct: { type: [number, 'null'], description: 'line loss; tx: resent ÷ sent packets, rx: lost ÷ expected packets' }
         loss_threshold_pct: { type: [number, 'null'], description: above this loss_high is raised; null while losses are recovered by resending (standard profile) }
         rtt_ms: { type: [number, 'null'] }
         last_rtt_ms: { type: [number, 'null'] }
         retrans_pct: { type: [number, 'null'], description: rx only (share of packets that arrived by resending); null on tx }
-        send_mbps: { type: [number, 'null'], description: tx; what goes out on the line, resends included (6 s mean) }
+        send_mbps: { type: [number, 'null'], description: "tx; what goes out on the line, resends included (6 s mean)" }
         target_mbps: { type: [number, 'null'], description: tx; video bitrate aimed at now (automatic step or the fixed value) }
-        actual_mbps: { type: [number, 'null'], description: tx; video bitrate actually produced: mean of the last 3 keyframe intervals (about 6 s) }
-        bandwidth_mbps: { type: [number, 'null'], description: tx; estimated line capacity, only measurable while the line is crowded (null while the device's own sending cap is the limit) }
-        send_late_5m: { type: [integer, 'null'], description: tx; packets that could not be sent in time, last 5 min }
+        actual_mbps: { type: [number, 'null'], description: 'tx; video bitrate actually produced: mean of the last 3 keyframe intervals (about 6 s)' }
+        bandwidth_mbps: { type: [number, 'null'], description: "tx; estimated line capacity, only measurable while the line is crowded (null while the device's own sending cap is the limit)" }
+        send_late_5m: { type: [integer, 'null'], description: "tx; packets that could not be sent in time, last 5 min" }
         delay_margin_s: { type: [number, 'null'], description: "tx; seconds left before the receiver's picture would stop (about 6 s normally); one decimal rounded down, the same value as delay_margin_low.margin_s" }
         delay_margin_warn_s: { type: [number, 'null'], description: tx; delay_margin_low is raised below this margin (about 3 s in the standard profile); null on rx, examples: [3] }
         recv_mbps: { type: [number, 'null'], description: rx; what arrives (6 s mean) }
-        stalls_5m: { type: [integer, 'null'], description: rx; times the picture stopped, last 5 min }
-        stall_s_5m: { type: [number, 'null'], description: rx; total seconds the picture stood still, last 5 min }
-        video_latency_ms: { type: [number, 'null'], description: rx; measured capture-to-display delay, null until really measured (the UI then shows delay_target_ms as an estimate) }
-        unrecovered_5m: { type: [integer, 'null'], description: rx; packets that could not be recovered, last 5 min }
+        stalls_5m: { type: [integer, 'null'], description: "rx; times the picture stopped, last 5 min" }
+        stall_s_5m: { type: [number, 'null'], description: "rx; total seconds the picture stood still, last 5 min" }
+        video_latency_ms: { type: [number, 'null'], description: "rx; measured capture-to-display delay, null until really measured (the UI then shows delay_target_ms as an estimate)" }
+        unrecovered_5m: { type: [integer, 'null'], description: "rx; packets that could not be recovered, last 5 min" }
     StatsHistory:
       type: object
       required: [interval_s, end, series]
@@ -333,8 +360,21 @@ components:
           type: object
           required: [code]
           properties:
-            code: { type: string, enum: [version_conflict, invalid, busy, not_found, unsupported_role] }
+            code:
+              type: string
+              enum: [version_conflict, invalid, busy, not_found, unsupported_role, not_live, too_many_viewers, bad_offer, no_common_codec, preview_unavailable]
             errors: { type: array, items: { $ref: '#/components/schemas/FieldError' } }
+    PreviewOffer:
+      type: object
+      required: [offer]
+      properties:
+        offer: { type: string, maxLength: 65536, description: 'session description of a receive-only video offer, candidates included; starts with "v=0"' }
+    PreviewSession:
+      type: object
+      required: [id, answer]
+      properties:
+        id: { type: string, description: opaque; used to close the session }
+        answer: { type: string, description: "the device's session description, candidates included" }
     EncodeParams:
       type: object
       description: The only encoding parameter that can be chosen. Everything else is fixed (VideoOptions.encoding).
@@ -414,7 +454,7 @@ components:
         loop_available: { type: boolean, description: false while files can only be played once }
         bitrate_range_mbps: { type: array, items: { type: number }, minItems: 2, maxItems: 2, examples: [[1.5, 4.0]] }
         encoding: { $ref: '#/components/schemas/VideoEncoding' }
-        bandwidth_mbps: { type: [number, 'null'], description: estimated line capacity; null unless the line is crowded }
+        bandwidth_mbps: { type: [number, 'null'], description: "estimated line capacity; null unless the line is crowded" }
     ApplyVideoResult:
       type: object
       required: [settings, applied_at, impacts]

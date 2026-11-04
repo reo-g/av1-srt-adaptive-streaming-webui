@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { previewUrl } from '../api/client';
 import { useLive } from '../api/live';
 import { FullscreenIcon, Glyph } from '../components/Glyph';
-import { hasPicture, mediaMeta, usePageVisible } from '../components/Preview';
+import { hasPicture, mediaMeta, PreviewVideo, usePreviewActive } from '../components/Preview';
 import { stateBadge, useDeviceNow } from '../components/Shell';
-import { alertLabel, alertText } from '../i18n/ja';
+import { alertLabel, alertText, previewCaption } from '../i18n/ja';
 import { timeOf } from '../lib/format';
 import { closeFullscreen } from '../lib/fullscreen';
 
@@ -18,11 +17,10 @@ const RECOVERED_FOR_MS = 10000;
 export function FullscreenPage() {
   const { device, status } = useLive();
   const now = useDeviceNow();
-  const visible = usePageVisible();
+  const active = usePreviewActive(status);
   const [band, setBand] = useState(true);
   const [safe, setSafe] = useState(false);
   const [recovered, setRecovered] = useState(false);
-  const [failed, setFailed] = useState(false);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const hadAlerts = useRef(false);
   const exitBtn = useRef<HTMLButtonElement>(null);
@@ -76,14 +74,13 @@ export function FullscreenPage() {
     return () => clearTimeout(t);
   }, [alertCount]);
 
-  useEffect(() => setFailed(false), [status?.media.format, status?.media.black]);
-
   if (!device || !status) return <div className="fs" />;
   const tx = device.role === 'tx';
   const badge = stateBadge(device.role, status, now);
   const worst = status.alerts.some((a) => a.level === 'error') ? 'error' : 'warn';
   const lead = status.alerts.find((a) => a.level === worst);
   const picture = hasPicture(status.media);
+  const live = status.state === 'live';
   const reason = tx
     ? '入力信号を検出できません'
     : status.state === 'stopped'
@@ -97,12 +94,12 @@ export function FullscreenPage() {
       <h1 className="sr-only">{tx ? '入力映像' : '受信映像'}（全画面）</h1>
       <div className="fs-stage" onClick={() => (band ? setBand(false) : wake())}>
         <div className="fs-frame">
-          {picture && visible && !failed ? (
-            <img src={previewUrl()} alt={tx ? '入力映像' : '受信映像'} onError={() => setFailed(true)} />
+          {active ? (
+            <PreviewVideo role={device.role} label={tx ? '入力映像' : '受信映像'} />
           ) : (
             <div className={picture ? 'ph' : 'ph none'}>
               {picture ? (tx ? '入力映像' : '受信映像') : tx ? '入力映像なし' : '受信映像なし'}
-              {!picture && <small>{reason}</small>}
+              {!picture ? <small>{reason}</small> : !live && <small>{previewCaption(device.role, false)}</small>}
             </div>
           )}
           {safe && (

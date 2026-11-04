@@ -7,6 +7,8 @@ import type {
   DeviceEvent,
   NetworkTest,
   NetworkTestRequest,
+  PreviewOffer,
+  PreviewSession,
   Stats,
   StatsHistory,
   Status,
@@ -29,11 +31,17 @@ export class ApiFailure extends Error {
   }
 }
 
-async function req<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown): Promise<T> {
+async function req<T>(
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+  path: string,
+  body?: unknown,
+  init?: Pick<RequestInit, 'keepalive'>,
+): Promise<T> {
   const res = await fetch(BASE + path, {
     method,
     headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
+    ...init,
   });
   if (!res.ok) {
     let parsed: ApiError | null = null;
@@ -76,9 +84,12 @@ export const api = {
     start: (body: NetworkTestRequest) => req<NetworkTest>('POST', '/network-tests', body),
     get: (id: string) => req<NetworkTest>('GET', `/network-tests/${encodeURIComponent(id)}`),
   },
-};
 
-export const previewUrl = () => `${BASE}/preview.mjpeg`;
+  /** Open a preview session: send the browser's offer, get the device's answer. */
+  startPreview: (offer: string) => req<PreviewSession>('POST', '/preview/sessions', { offer } satisfies PreviewOffer),
+  /** Close it. keepalive lets the request finish when the page is being closed. */
+  stopPreview: (id: string) => req<void>('DELETE', `/preview/sessions/${encodeURIComponent(id)}`, undefined, { keepalive: true }),
+};
 
 export const liveUrl = () => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';

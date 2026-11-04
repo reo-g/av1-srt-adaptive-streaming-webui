@@ -55,12 +55,11 @@ export interface Alert {
   params?: Params;
 }
 
-/** What the preview shows: the input on tx, the output on rx. */
+/** The picture of the operation screen: the input on tx (the preview shows it as sent), the output on rx. */
 export interface Media {
   kind: 'camera' | 'file' | 'output';
   label: string; // what the operator recognises: camera name "Facecam 4K", file name "sample_2160p30.y4m", "OUT 1"
   format: string | null; // "3840×2160　30p" (U+3000 between); null while there is no signal
-  preview_fps: number; // ≈5
   audio: 'none';
   black: boolean; // rx: the output is black
 }
@@ -222,8 +221,38 @@ export interface ApplyResult<T> {
   impacts: Impact[];
 }
 
+export type ApiErrorCode =
+  | 'version_conflict'
+  | 'invalid'
+  | 'busy'
+  | 'not_found'
+  | 'unsupported_role'
+  // POST /preview/sessions
+  | 'not_live' // 409: the preview exists only while the link is live
+  | 'too_many_viewers' // 429: other screens are already watching (the device limits the number)
+  | 'bad_offer' // 400: the offer is missing, empty or not a session description
+  | 'no_common_codec' // 400: the browser cannot play any of the preview's video formats
+  | 'preview_unavailable'; // 503: the device could not prepare the preview now
+
 export interface ApiError {
-  error: { code: 'version_conflict' | 'invalid' | 'busy' | 'not_found' | 'unsupported_role'; errors?: FieldError[] };
+  error: { code: ApiErrorCode; errors?: FieldError[] };
+}
+
+// ---------------------------------------------------------------- preview
+
+/**
+ * Live preview in the browser (POST /preview/sessions). tx shows the picture as it is sent
+ * (after compression), rx the picture it is showing. Only while the link is live.
+ * The browser makes a receive-only offer with its candidates already gathered; the
+ * device answers in one step (no trickle). Close it with DELETE /preview/sessions/{id}.
+ */
+export interface PreviewOffer {
+  offer: string; // session description text, starts with "v=0"; at most 64 KB
+}
+
+export interface PreviewSession {
+  id: string; // opaque
+  answer: string; // session description text
 }
 
 // ---------------------------------------------------------------- video settings (tx)

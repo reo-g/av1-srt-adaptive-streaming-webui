@@ -22,7 +22,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | GET | `/stats` | 最新の計測値 |
 | GET | `/stats/history?window_s=300` | 直近 5 分の推移（5 秒ごと 60 点） |
 | GET | `/events?limit=20` | イベント（新しい順） |
-| GET | `/preview.mjpeg` | プレビュー映像（約 5 fps） |
+| POST / DELETE | `/preview/sessions`, `/preview/sessions/{id}` | プレビュー（ブラウザで見る確認用の映像）を開く・閉じる |
 | POST | `/transport/start` ・ `/stop` ・ `/retry` | 開始・停止・今すぐ再試行 |
 | GET / PUT | `/settings/video` | 映像設定（送信機）：入力と画質の決め方（おまかせ／画質を固定） |
 | POST | `/settings/video/check` | 下書きの検証と、適用したときの影響 |
@@ -42,6 +42,26 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
    - 入力の変更：接続をやり直す（`input_switch_gap` と `reconnect_gap`、どちらも `gap_s`。受信側の映像が約 10 秒途切れる）。同じ途切れなので、画面では 1 行にまとめる。
    - 伝送設定：接続をやり直す（`reconnect_gap`。`gap_s` は新しい遅延の設定でおよそ決まる）。
 4. `409 version_conflict` なら最新の値を読み直して知らせる。`400 invalid` は check と同じ `errors` を返す。
+
+## プレビュー
+
+運用画面と全画面表示の映像は、ブラウザの WebRTC で機器から受け取る（外部のサーバーは使わず、LAN の中だけでつなぐ）。
+
+- 送信機は **送っている映像**（圧縮したあと。入力より数秒遅れる）、受信機は **出力している映像**（表示に合わせて止まり、少し遅れる）を見せる。
+- 開くのは、接続の状態が `live` で映像があり（`Media.format` があり、黒ではない）、タブが前に出ている間だけ。どれかが外れたら、別の画面へ移ったときも含めて閉じる（`DELETE` と接続の終了）。
+- 手順：ブラウザが受信専用の offer を作り、候補を集め終えてから（最大 2 秒）`POST /preview/sessions {"offer": "..."}`。`201 {"id", "answer"}` の answer を設定する。候補を後から送り足すこと（trickle）はしない。
+- 機器は最初の offer で準備を始めるので、最初の応答には数秒かかることがある。プレビューは伝送とは別に動き、失敗しても伝送には影響しない。
+- 接続が切れたとき（`failed`、または `disconnected` が 5 秒続いたとき）と、answer から 15 秒たっても映らないとき（機器も 15 秒でその視聴を外す）、画面は 3 → 6 → 12 → 30 秒と間隔を延ばしてつなぎ直す。
+
+| エラー | いつ | 画面 |
+| --- | --- | --- |
+| `409 not_live` | 接続の状態が `live` でない | すぐ画面の状態も変わるので、裏でつなぎ直す |
+| `429 too_many_viewers` | 見ている画面の数が機器の上限（既定 3）に達した | ほかの画面でプレビューを見ているため、表示できません ＋「もう一度試す」 |
+| `400 bad_offer` | offer がない・空・`v=0` で始まらない・64 KB を超える | プレビューを表示できませんでした ＋「もう一度試す」 |
+| `400 no_common_codec` | ブラウザが、プレビューの映像形式をどれも再生できない | このブラウザではプレビューを表示できません |
+| `503 preview_unavailable` | プレビューが無効、または準備できなかった | プレビューを表示できませんでした ＋「もう一度試す」 |
+
+`DELETE /preview/sessions/{id}` は、知らない id でも `204`。
 
 ## 状態（`Status.state`）
 
@@ -136,7 +156,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 
 ## モック（開発用）
 
-`web/mock/server.ts` がこの API をまねる。開発用に `POST /mock/role {"role":"tx"|"rx"}` と `POST /mock/scenario {"scenario":"normal"|"warn"|"error"}` がある。機器のデーモンには実装しない。
+`web/mock/server.ts` がこの API をまねる。プレビューの映像はまねられないので、`POST /preview/sessions` は `live` の間 `503 preview_unavailable` を返す（画面には「プレビューを表示できませんでした」が出る）。開発用に `POST /mock/role {"role":"tx"|"rx"}` と `POST /mock/scenario {"scenario":"normal"|"warn"|"error"}` がある。機器のデーモンには実装しない。
 
 | 状況 | 送信機 | 受信機 |
 | --- | --- | --- |

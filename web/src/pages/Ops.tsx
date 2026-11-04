@@ -4,7 +4,7 @@ import { useLive } from '../api/live';
 import type { DeviceEvent, Metric, Role, Stats, StatsHistory, Status } from '../api/types';
 import { AlertDialog } from '../components/Dialog';
 import { Chevron, FullscreenIcon, Glyph, toneText, type Tone } from '../components/Glyph';
-import { mediaMeta, PreviewImage } from '../components/Preview';
+import { mediaMeta, OpsPreview } from '../components/Preview';
 import { Shell } from '../components/Shell';
 import { Sparkline } from '../components/Sparkline';
 import { delayName, eventText } from '../i18n/ja';
@@ -314,7 +314,7 @@ export function OpsPage() {
                 </button>
               </div>
             </div>
-            <PreviewImage media={status.media} role={role} />
+            <OpsPreview status={status} role={role} />
             <div className="audio-line">
               <span>音声</span>
               <span>なし</span>

@@ -20,15 +20,16 @@
  * The produced video rate follows a new target over a few seconds.
  *   error   the receiver cannot be reached: tx keeps reconnecting, rx waits for a caller
  *
+ * The preview cannot be imitated: POST /preview/sessions answers 503 preview_unavailable while
+ * live, so the screens show their "cannot show the preview" overlay.
+ *
  * Development-only endpoints: POST /mock/role {role}, POST /mock/scenario {scenario}
  */
-import { readdirSync, readFileSync } from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import type {
   Alert,
+  ApiError,
   ApplyResult,
   BitrateReason,
   CheckResult,
@@ -45,6 +46,7 @@ import type {
   Metric,
   NetworkTest,
   Params,
+  PreviewOffer,
   Role,
   Stats,
   StatsHistory,
@@ -64,12 +66,6 @@ let role: Role = process.env.MOCK_ROLE === 'rx' ? 'rx' : 'tx';
 let scenario: Scenario = (['normal', 'warn', 'error'] as const).includes(process.env.MOCK_SCENARIO as Scenario)
   ? (process.env.MOCK_SCENARIO as Scenario)
   : 'warn';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const frames = readdirSync(join(here, 'assets'))
-  .filter((f) => f.endsWith('.jpg'))
-  .sort()
-  .map((f) => readFileSync(join(here, 'assets', f)));
 
 // ------------------------------------------------------------------ time helpers
 
@@ -323,14 +319,14 @@ function alerts(): Alert[] {
 function media(): Media {
   if (role === 'rx') {
     const live = isLive();
-    return { kind: 'output', label: 'OUT 1', format: live ? SIGNAL_4K30 : null, preview_fps: 5, audio: 'none', black: !live };
+    return { kind: 'output', label: 'OUT 1', format: live ? SIGNAL_4K30 : null, audio: 'none', black: !live };
   }
   // Names the operator recognises: the camera's name, the file name without its folder.
   const label =
     video.input.kind === 'camera'
       ? (OPTIONS.cameras.find((c) => c.device === video.input.camera)?.label ?? video.input.camera)
       : baseName(video.input.file);
-  return { kind: video.input.kind, label, format: SIGNAL_4K30, preview_fps: 5, audio: 'none', black: false };
+  return { kind: video.input.kind, label, format: SIGNAL_4K30, audio: 'none', black: false };
 }
 
 function status(): Status {
@@ -640,22 +636,26 @@ async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') as T;
 }
 
-function mjpeg(req: IncomingMessage, res: ServerResponse) {
-  res.writeHead(200, {
-    'Content-Type': 'multipart/x-mixed-replace; boundary=frame',
-    'Cache-Control': 'no-store',
-    Connection: 'close',
-  });
-  let i = 0;
-  const write = () => {
-    const buf = frames[i++ % frames.length];
-    res.write(`--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${buf.length}\r\n\r\n`);
-    res.write(buf);
-    res.write('\r\n');
-  };
-  write();
-  const timer = setInterval(write, 200); // ≈5 fps
-  req.on('close', () => clearInterval(timer));
+const fail = (res: ServerResponse, code: number, name: ApiError['error']['code']) => send(res, code, { error: { code: name } } satisfies ApiError);
+
+/**
+ * Preview sessions. The mock cannot stream a picture, so a well-formed offer while live is
+ * answered 503 preview_unavailable (the screens then show 「プレビューを表示できませんでした」).
+ */
+const PREVIEW_OFFER_MAX = 64 * 1024; // bytes of the offer text, as the daemon counts them
+async function startPreview(req: IncomingMessage, res: ServerResponse) {
+  // Same order of checks as the device: the offer first, then the link state.
+  let offer: unknown;
+  try {
+    offer = (await readJson<Partial<PreviewOffer>>(req)).offer;
+  } catch {
+    offer = undefined;
+  }
+  if (typeof offer !== 'string' || !offer.trimStart().startsWith('v=0') || Buffer.byteLength(offer) > PREVIEW_OFFER_MAX) {
+    return fail(res, 400, 'bad_offer');
+  }
+  if (!isLive()) return fail(res, 409, 'not_live');
+  return fail(res, 503, 'preview_unavailable');
 }
 
 const videoView = (): VideoSettings => ({ ...video, encode: { ...video.encode, auto: { bitrate_mbps: autoTarget() } } });
@@ -695,7 +695,8 @@ const server = http.createServer(async (req, res) => {
       const limit = Math.min(500, Number(url.searchParams.get('limit') ?? 20));
       return send(res, 200, events.slice(0, limit));
     }
-    if (m === 'GET' && path === '/preview.mjpeg') return mjpeg(req, res);
+    if (m === 'POST' && path === '/preview/sessions') return startPreview(req, res);
+    if (m === 'DELETE' && /^\/preview\/sessions\/[^/]+$/.test(path)) return send(res, 204);
 
     if (m === 'POST' && path === '/transport/stop') {
       if (stoppedAt === null) {
