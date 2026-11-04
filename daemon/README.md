@@ -45,7 +45,7 @@ the profile instead.
 
 | Setting | Default | Holds |
 | --- | --- | --- |
-| `run_dir` | `$XDG_RUNTIME_DIR/ctrld` (tmpfs) | one directory per session: the children's stderr logs (`sender.log`, `bridge.log`, `receiver.log`, `player.log`, each starting with the environment and command line), the statistics files the daemon reads, `daemon.log` (the developer log ring when the session ended). Without an archive only the current and the last finished session are kept, a log is cut back to its header once it passes 16 MiB and a statistics file is emptied once it passes 64 MiB. |
+| `run_dir` | `$XDG_RUNTIME_DIR/ctrld` (tmpfs) | one directory per session: the children's stderr logs (`sender.log`, `bridge.log`, `receiver.log`, `player.log`, each starting with the environment and command line), the statistics files the daemon reads, `daemon.log` (the developer log ring when the session ended). Without an archive only the current and the last finished session are kept, a log is cut back to its header once it passes 16 MiB and a statistics file is emptied once it passes 64 MiB. Outside the sessions (one per device): `preview.sock` (the video copy for the preview) and `preview.log` (the preview program's stderr and events, cut back like the others; the previous instance's is kept as `preview.log.1`). |
 | `state_dir` | `~/.local/state/ctrld` | `settings.json` (0600, replaced atomically) |
 | `archive_dir` | unset | when set, session directories are created here and kept, for `bufctrl_analyze.py` and the like. `archive_video = true` (rx) also keeps the received stream. |
 
@@ -70,6 +70,25 @@ None of these logs is shown in the UI.
   the 5-minute totals grow with it) and `video_stalled{seconds}` is sent with its whole length
   once the picture moves again. Stops shorter than 0.2 s (one late or missing source frame)
   are not reported.
+- **preview** (both roles, `[preview]`, on by default): the bridge gets
+  `PREVIEW_SOCK=<run_dir>/preview.sock` and the player `--preview-sock <run_dir>/preview.sock`;
+  they copy the stream they send / show to that socket only while something reads it, and
+  never wait for it. The preview program (`python3 -u <repo>/preview/preview_webrtc.py --sock …
+  --width --height --h265-kbps --h264-kbps --keyint --delay-ms --max-viewers --idle-exit-s`,
+  cwd `run_dir`) is started on the first preview request, not with the link, and is not part
+  of the link's state machine: whether it runs, fails or is missing never changes the
+  transmission. The daemon talks to it in JSON lines (stdin: `offer` / `close` / `quit`;
+  stdout: `ready` / `answer` / `error` / `closed` / `stats`; `src/preview.rs`), waits 10 s for
+  `ready` and `answer_timeout_s` for each answer, counts viewers (offers still waiting
+  included) against `max_viewers`, and closes a viewer whose request went away or timed out.
+  The program exits by itself `idle_exit_s` after the last viewer left; the next request starts
+  it again (also after a crash). An offer that reached it just as it left by itself (exit 0)
+  gets one more try on a new program; after a crash it is refused. A ready program that writes
+  nothing for 20 s (it writes stats every 5 s) is taken as hung and stopped like at shutdown,
+  so the next request starts a new one. Daemon shutdown: `quit`, SIGTERM after 2 s, SIGKILL
+  after 4 s, at the same time as the media programs are stopped (a second signal exits at once). The preview needs media programs that
+  know the socket (an older copy of the player refuses the unknown argument): set
+  `[preview] enabled = false` for one.
 - Every child has its own process group and `PR_SET_PDEATHSIG=SIGTERM`; the runtime is
   single-threaded so the forking thread lives as long as the daemon. During the daemon's own
   shutdown start and retry requests are ignored.
@@ -78,9 +97,18 @@ Phase 1 API: everything in the contract is answered. Settings can be applied whi
 (the next start uses them); while running a `PUT` answers `409 busy` (the settings screens
 then tell the operator to stop first; the check endpoint still shows the live impacts phase 2
 will have). An input must be chosen: an empty camera or file is a field error, and with no
-file chosen yet the first file offered is the default. `/preview.mjpeg` is 404
-until phase 3, `/network-tests` answers `409 busy` until phase 4, `/transport/compare` has
-no peer data yet (`verdict: unknown`).
+file chosen yet the first file offered is the default. `/network-tests` answers `409 busy`
+until phase 4, `/transport/compare` has no peer data yet (`verdict: unknown`).
+
+Preview (phase 3): `POST /preview/sessions {"offer": "<sdp>"}` (offer ≤ 64 KB) → `201 {id, answer}`.
+The checks in order: a body that is not JSON, has no or an empty `offer`, does not start with
+`v=0` or is over 64 KB (also a body over the server's 2 MB limit) → `400 bad_offer`; preview turned off → `503 preview_unavailable`; the
+link not live → `409 not_live`; viewers (and offers waiting) at `max_viewers` →
+`429 too_many_viewers`; then the program's verdict: `400 no_common_codec`, `400 bad_offer`, or
+`503 preview_unavailable` (it did not start, was not ready or did not answer in time, or
+failed). The first request may take up to 10 s plus `answer_timeout_s` while the program
+starts. `DELETE /preview/sessions/{id}` → `204`, also for an unknown id. The old
+`/preview.mjpeg` is gone (404) and `Media` has no `preview_fps`.
 
 ## User service (systemd)
 
@@ -122,10 +150,16 @@ bridge's curve file under `sender/output/...`), apart from the experiment script
 
 `cargo test` covers the check rules (table tests, the mock as the oracle), the state machine
 against a fake media backend (`src/supervisor.rs`), the statistics parsers on rows in the
-programs' formats (`tests/fixtures/*.jsonl`), the history buckets, the event ring, the profile
-and the settings store.
+programs' formats (`tests/fixtures/*.jsonl`), the history buckets, the event ring, the profile,
+the settings store and the preview (with the stub program, below).
+
+`src/preview.rs` and `src/api.rs` run `tests/fixtures/stub_preview.py` (canned answers, the
+real program's arguments only, markers in an offer make it fail, stay silent, answer late, hang or
+exit; see its docstring) for the preview manager's lifecycle, id matching, timeouts, the
+viewer limit, restarts and the HTTP codes.
 
 `tests/fixtures/stub_*.py` stand in for the four media programs (they print the known stderr
 lines and write statistics rows), for a smoke test of the real process handling without a
 camera, encoder or network: point `[media]` at them (`repo = ".../daemon/tests/fixtures"`,
-`sender = "stub_sender.py"`, …) and drive them with the control files described in each stub.
+`sender = "stub_sender.py"`, …, `[preview] program = "stub_preview.py"`) and drive them with the
+control files described in each stub.

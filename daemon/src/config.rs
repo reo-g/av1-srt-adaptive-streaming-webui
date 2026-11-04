@@ -37,6 +37,8 @@ pub struct Config {
     pub rx: Rx,
     #[serde(default)]
     pub profile: ProfileConfig,
+    #[serde(default)]
+    pub preview: Preview,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -130,6 +132,58 @@ impl Default for Rx {
     }
 }
 
+/// The browser preview (preview.rs): a program started on demand that shows the browser the
+/// picture being sent (tx) or shown (rx). Relative `program` paths are taken from `media.repo`;
+/// it runs with `media.python`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Preview {
+    pub enabled: bool,
+    pub program: PathBuf,
+    /// Scale the preview to this size (0 = the size of the video).
+    pub width: u32,
+    pub height: u32,
+    /// Bitrates of the two forms the preview is offered in (the browser picks one).
+    pub h265_kbps: u32,
+    pub h264_kbps: u32,
+    /// Frames between keyframes of the preview.
+    pub keyint: u32,
+    pub max_viewers: u32,
+    /// Smoothing delay before frames are shown (default 800 ms tx, 300 ms rx).
+    pub delay_ms: Option<u32>,
+    /// The program exits this long after the last viewer left.
+    pub idle_exit_s: u32,
+    /// How long an offer may wait for the program's answer.
+    pub answer_timeout_s: u32,
+}
+
+impl Default for Preview {
+    fn default() -> Self {
+        Preview {
+            enabled: true,
+            program: "preview/preview_webrtc.py".into(),
+            width: 0,
+            height: 0,
+            h265_kbps: 16000,
+            h264_kbps: 24000,
+            keyint: 30,
+            max_viewers: 3,
+            delay_ms: None,
+            idle_exit_s: 30,
+            answer_timeout_s: 10,
+        }
+    }
+}
+
+impl Preview {
+    pub fn delay_ms(&self, role: Role) -> u32 {
+        self.delay_ms.unwrap_or(match role {
+            Role::Tx => 800,
+            Role::Rx => 300,
+        })
+    }
+}
+
 /// Changes to the standard profile. In the env maps a value replaces the default and an
 /// empty string removes the variable; numbers and booleans are written as text (true = 1).
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -163,12 +217,16 @@ impl Config {
         if c.role == Role::Tx && c.tx.peer_host.trim().is_empty() {
             return Err("tx.peer_host is required when role = \"tx\"".into());
         }
+        if c.preview.enabled && (c.preview.max_viewers == 0 || c.preview.answer_timeout_s == 0) {
+            return Err("preview.max_viewers and preview.answer_timeout_s must be at least 1".into());
+        }
         c.media.repo = expand(&c.media.repo);
         c.media.bridge_cwd = c.media.bridge_cwd.as_deref().map(expand);
         c.run_dir = c.run_dir.as_deref().map(expand);
         c.state_dir = c.state_dir.as_deref().map(expand);
         c.archive_dir = c.archive_dir.as_deref().map(expand);
         c.tx.media_dir = c.tx.media_dir.as_deref().map(expand);
+        c.preview.program = expand(&c.preview.program);
         Ok(c)
     }
 
@@ -184,6 +242,11 @@ impl Config {
             Some(d) => PathBuf::from(d).join("ctrld"),
             None => home().join(".local/state/ctrld"),
         })
+    }
+
+    /// The socket the media programs copy the video to for the preview (one per device).
+    pub fn preview_sock(&self) -> PathBuf {
+        self.run_dir().join("preview.sock")
     }
 
     /// Where session directories are created: the archive if there is one, else the run dir.
@@ -222,6 +285,25 @@ mod tests {
         assert_eq!(c.http.port, 8080);
         assert_eq!(c.tx.peer_port, 60021);
         assert!(c.media.repo.is_absolute());
+        assert!(c.preview.enabled);
+        assert_eq!(c.preview.program, PathBuf::from("preview/preview_webrtc.py"));
+        assert_eq!((c.preview.h265_kbps, c.preview.h264_kbps, c.preview.max_viewers), (16000, 24000, 3));
+        assert_eq!(c.preview.delay_ms(c.role), 800);
+    }
+
+    #[test]
+    fn preview_section() {
+        let base = "id = \"RX-02\"\nrole = \"rx\"\nrun_dir = \"/run/c\"\n[media]\nrepo = \"/opt/m\"\n";
+        let c = Config::parse(base).unwrap();
+        assert!(c.preview.enabled, "on by default");
+        assert_eq!(c.preview.delay_ms(Role::Rx), 300);
+        assert_eq!(c.preview.delay_ms(Role::Tx), 800);
+        assert_eq!(c.preview_sock(), PathBuf::from("/run/c/preview.sock"));
+        let c = Config::parse(&format!("{base}[preview]\ndelay_ms = 500\nmax_viewers = 1\nwidth = 1920\nheight = 1080\n")).unwrap();
+        assert_eq!((c.preview.delay_ms(Role::Rx), c.preview.max_viewers, c.preview.width), (500, 1, 1920));
+        assert!(Config::parse(&format!("{base}[preview]\nmax_viewers = 0\n")).is_err());
+        assert!(Config::parse(&format!("{base}[preview]\nenabled = false\nmax_viewers = 0\n")).is_ok());
+        assert!(Config::parse(&format!("{base}[preview]\nfps = 5\n")).is_err());
     }
 
     #[test]

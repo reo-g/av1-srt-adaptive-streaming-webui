@@ -37,6 +37,21 @@ peer_port = 60021
 [rx]
 listen_port = 60021
 
+# The browser preview: a copy of the picture being sent (tx) / shown (rx), started on demand
+# (src/preview.rs). The media programs copy their video to <run_dir>/preview.sock while it runs.
+[preview]
+enabled = true
+# program = "preview/preview_webrtc.py"   # relative to media.repo, run with media.python
+# width = 0                    # scale to this size; 0 = the video's size
+# height = 0
+# h265_kbps = 16000            # bitrates of the two forms the browser can pick from
+# h264_kbps = 24000
+# keyint = 30                  # frames between keyframes
+# max_viewers = 3
+# delay_ms = 800               # smoothing delay; default 800 (tx), 300 (rx)
+# idle_exit_s = 30             # the program exits this long after the last viewer left
+# answer_timeout_s = 10
+
 # The profile: environment and arguments of each child. The built-in defaults are the standard
 # profile (the current automatic mode, see daemon/src/profile.rs). Entries here replace a
 # default; an empty string removes it. The daemon adds the session file paths itself.

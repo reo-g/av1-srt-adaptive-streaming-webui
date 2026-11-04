@@ -241,6 +241,10 @@ pub fn bridge(cfg: &Config, p: &Profile, plan: &Plan, dir: &Path) -> Spec {
     // Only the tick and event logs: no BUFCTRL_RUN_DIR, so the other per-frame logs are not written.
     env.insert("BUFCTRL_TICKS_JSONL".into(), path_str(dir.join(TICKS)));
     env.insert("BRIDGE_EVENTS_JSONL".into(), path_str(dir.join(EVENTS)));
+    // A copy of what is sent, for the preview (only while the preview program reads it).
+    if cfg.preview.enabled {
+        env.insert("PREVIEW_SOCK".into(), path_str(cfg.preview_sock()));
+    }
     Spec {
         program: PathBuf::from(&cfg.media.python),
         args: vec!["-u".into(), path_str(cfg.media.path(&cfg.media.bridge))],
@@ -266,7 +270,35 @@ pub fn receiver(cfg: &Config, p: &Profile, plan: &Plan, dir: &Path) -> Spec {
 pub fn player(cfg: &Config, p: &Profile, dir: &Path) -> Spec {
     let mut args = vec!["-u".into(), path_str(cfg.media.path(&cfg.media.player))];
     args.extend(p.player_args.iter().cloned());
+    // A copy of what is shown, for the preview (always while enabled: a viewer can come at any time).
+    if cfg.preview.enabled {
+        args.push("--preview-sock".into());
+        args.push(path_str(cfg.preview_sock()));
+    }
     Spec { program: PathBuf::from(&cfg.media.python), args, env: Env::new(), cwd: dir.into() }
+}
+
+/// The preview program (one per device, started on demand; preview.rs). It listens on the
+/// socket the bridge or the player copies the video to.
+pub fn preview(cfg: &Config) -> Spec {
+    let p = &cfg.preview;
+    let mut args = vec!["-u".into(), path_str(cfg.media.path(&p.program))];
+    let opts = [
+        ("--sock", path_str(cfg.preview_sock())),
+        ("--width", p.width.to_string()),
+        ("--height", p.height.to_string()),
+        ("--h265-kbps", p.h265_kbps.to_string()),
+        ("--h264-kbps", p.h264_kbps.to_string()),
+        ("--keyint", p.keyint.to_string()),
+        ("--delay-ms", p.delay_ms(cfg.role).to_string()),
+        ("--max-viewers", p.max_viewers.to_string()),
+        ("--idle-exit-s", p.idle_exit_s.to_string()),
+    ];
+    for (k, v) in opts {
+        args.push(k.into());
+        args.push(v);
+    }
+    Spec { program: PathBuf::from(&cfg.media.python), args, env: Env::new(), cwd: cfg.run_dir() }
 }
 
 /// The fd the player writes its per-second stats to (`--stats-fd N`), if any.
@@ -283,7 +315,10 @@ mod tests {
     use super::*;
 
     fn cfg() -> Config {
-        Config::parse("id = \"TX-01\"\nrole = \"tx\"\n[tx]\npeer_host = \"10.0.0.2\"\n[media]\nrepo = \"/opt/media\"\n").unwrap()
+        Config::parse(
+            "id = \"TX-01\"\nrole = \"tx\"\nrun_dir = \"/run/ctrld\"\n[tx]\npeer_host = \"10.0.0.2\"\n[media]\nrepo = \"/opt/media\"\n",
+        )
+        .unwrap()
     }
 
     fn plan() -> Plan {
@@ -328,6 +363,8 @@ mod tests {
         assert_eq!(b.env["BUFCTRL_TICKS_JSONL"], "/run/s1/ticks.jsonl");
         assert_eq!(b.env["SRT_MAXBW_CTL"], s.env["SRT_MAXBW_CTL"]);
         assert!(!b.env.contains_key("BUFCTRL_RUN_DIR"));
+        assert_eq!(b.env["PREVIEW_SOCK"], "/run/ctrld/preview.sock");
+        assert!(!s.env.contains_key("PREVIEW_SOCK"), "only the bridge copies the video");
 
         let mut fixed = plan();
         fixed.input = Input::File("/srv/a.y4m".into());
@@ -352,5 +389,51 @@ mod tests {
         assert_eq!(stats_fd(&pl.args), Some(4));
         assert_eq!(stats_fd(&["--stats-fd=5".to_string()]), Some(5));
         assert_eq!(stats_fd(&["--out".to_string()]), None);
+        assert_eq!(pl.args[pl.args.len() - 2..], ["--preview-sock", "/run/ctrld/preview.sock"]);
+    }
+
+    #[test]
+    fn preview_command() {
+        let c = cfg();
+        let s = preview(&c);
+        assert_eq!(s.program, PathBuf::from("python3"));
+        assert_eq!(s.cwd, PathBuf::from("/run/ctrld"));
+        let want = [
+            "-u",
+            "/opt/media/preview/preview_webrtc.py",
+            "--sock",
+            "/run/ctrld/preview.sock",
+            "--width",
+            "0",
+            "--height",
+            "0",
+            "--h265-kbps",
+            "16000",
+            "--h264-kbps",
+            "24000",
+            "--keyint",
+            "30",
+            "--delay-ms",
+            "800",
+            "--max-viewers",
+            "3",
+            "--idle-exit-s",
+            "30",
+        ];
+        assert_eq!(s.args, want);
+        let mut rx = c.clone();
+        rx.role = crate::config::Role::Rx;
+        assert!(preview(&rx).args.windows(2).any(|w| w == ["--delay-ms", "300"]));
+    }
+
+    #[test]
+    fn no_preview_no_copy() {
+        let mut c = cfg();
+        c.preview.enabled = false;
+        let (p, dir) = (Profile::standard(), Path::new("/run/s3"));
+        assert!(!bridge(&c, &p, &plan(), dir).env.contains_key("PREVIEW_SOCK"));
+        let pl = player(&c, &p, dir);
+        assert!(!pl.args.iter().any(|a| a == "--preview-sock"));
+        assert_eq!(pl.args.last().map(String::as_str), Some("4"), "exactly the old command line");
     }
 }

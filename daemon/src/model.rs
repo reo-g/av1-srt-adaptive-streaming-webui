@@ -61,7 +61,6 @@ pub struct Media {
     pub kind: &'static str,
     pub label: String,
     pub format: Option<String>,
-    pub preview_fps: f64,
     pub audio: &'static str,
     pub black: bool,
 }

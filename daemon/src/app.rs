@@ -8,6 +8,7 @@ use crate::media::{self, Real};
 use crate::model::{
     Alert, Device, InputKind, LinkState, Media, Mode, Peer, Settings, Stats, Status, SIGNAL_FORMAT, TIMEZONE,
 };
+use crate::preview::{self, Preview};
 use crate::profile::{Input, Plan, Profile};
 use crate::stats::{Ctx, Sampler};
 use crate::store;
@@ -49,6 +50,8 @@ pub struct App {
     pub cfg: Config,
     pub prof: Profile,
     pub firmware: String,
+    /// The browser preview (independent of the link; preview.rs).
+    pub preview: Preview,
     inner: Mutex<Inner>,
     live: broadcast::Sender<Arc<str>>,
     cmd: mpsc::Sender<Cmd>,
@@ -158,7 +161,6 @@ impl App {
                 kind: "output",
                 label: "OUT 1".into(),
                 format: (!black).then(|| SIGNAL_FORMAT.into()),
-                preview_fps: 5.0,
                 audio: "none",
                 black,
             };
@@ -169,7 +171,7 @@ impl App {
             InputKind::Camera => ("camera", media::camera_label(&v.camera)),
             InputKind::File => ("file", base_name(&v.file)),
         };
-        Media { kind, label, format: (!lost).then(|| SIGNAL_FORMAT.into()), preview_fps: 5.0, audio: "none", black: lost }
+        Media { kind, label, format: (!lost).then(|| SIGNAL_FORMAT.into()), audio: "none", black: lost }
     }
 
     /// The bitrate automatic mode aims at now (its first target while nothing is measured).
@@ -265,6 +267,10 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let (media_tx, media_rx) = mpsc::unbounded_channel();
     let (live, _) = broadcast::channel(256);
     let backend = Real::new(cfg.clone(), prof.clone(), media_tx);
+    if cfg.preview.enabled && cfg.preview_sock().as_os_str().len() >= 108 {
+        dlog!("preview: {} is too long for a socket path; set a shorter run_dir", cfg.preview_sock().display());
+    }
+    let preview = Preview::start(preview::Launch::from_config(&cfg));
     let machine = Machine::new(cfg.role, backend, placeholder_plan(&cfg), sessions, now);
     let inner = Inner {
         link: machine.link.clone(),
@@ -278,6 +284,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         cfg,
         prof,
         firmware,
+        preview,
         inner: Mutex::new(inner),
         live,
         cmd: cmd_tx,
@@ -332,6 +339,7 @@ async fn supervise<B: MediaBackend>(
     let mut published = u64::MAX;
     let mut kept: Option<PathBuf> = None;
     let mut shutdown: Option<Instant> = None;
+    let mut preview_done = None;
     loop {
         tokio::select! {
             Some(cmd) = cmds.recv() => {
@@ -394,18 +402,26 @@ async fn supervise<B: MediaBackend>(
                 app.push_status(&i);
             }
             _ = next_signal(&mut term) => {
-                if shutdown.is_some() { break; }
+                // a second signal: exit now (the children get SIGTERM from PDEATHSIG)
+                if shutdown.is_some() { preview_done = None; break; }
                 dlog!("SIGTERM: stopping the media programs");
                 m.stop(Instant::now());
+                preview_done = Some(app.preview.stop());
                 shutdown = Some(Instant::now());
             }
             _ = next_signal(&mut int) => {
-                if shutdown.is_some() { break; }
+                if shutdown.is_some() { preview_done = None; break; }
                 dlog!("SIGINT: stopping the media programs");
                 m.stop(Instant::now());
+                preview_done = Some(app.preview.stop());
                 shutdown = Some(Instant::now());
             }
         }
+    }
+    // The preview program was asked to quit with the media programs (SIGKILL after 4 s); not
+    // waited for after a second signal.
+    if let (Some(done), Some(t)) = (preview_done, shutdown) {
+        let _ = tokio::time::timeout_at((t + Duration::from_millis(4500)).into(), done).await;
     }
     dlog!("exit");
 }
@@ -435,4 +451,36 @@ fn publish<B: MediaBackend>(app: &App, m: &mut Machine<B>, published: &mut u64, 
             }
         }
     }
+}
+
+/// An App for the HTTP tests: no supervisor loop, the link in `state`.
+#[cfg(test)]
+pub fn test_app(cfg: Config, preview: Preview, state: LinkState) -> Arc<App> {
+    use crate::supervisor::Link;
+    let now = Instant::now();
+    let link = Link {
+        state,
+        since: now,
+        attempt: None,
+        next_try: None,
+        last_live_until: None,
+        peer_addr: None,
+        alerts: Vec::new(),
+        rx_black: false,
+        rev: 0,
+    };
+    let settings = store::defaults(&cfg);
+    let inner = Inner { link, stats: Stats::default(), history: History::default(), events: EventRing::new(0), settings };
+    let (cmd, _) = mpsc::channel(1);
+    let (live, _) = broadcast::channel(16);
+    Arc::new(App {
+        prof: Profile::standard(),
+        firmware: "test".into(),
+        preview,
+        inner: Mutex::new(inner),
+        live,
+        cmd,
+        settings_path: cfg.state_dir().join("settings.json"),
+        cfg,
+    })
 }

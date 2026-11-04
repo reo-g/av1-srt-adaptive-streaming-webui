@@ -63,7 +63,7 @@ const PASS_ENV: &[&str] = &[
 
 /// Without an archive a child's log is cut back to its header (environment and command line)
 /// once it passes this size (tmpfs; the sender alone writes about 0.8 MB an hour).
-const LOG_CAP: u64 = 16 << 20;
+pub const LOG_CAP: u64 = 16 << 20;
 
 fn passes(name: &str, extra: &[String]) -> bool {
     PASS_ENV.iter().copied().chain(extra.iter().map(String::as_str)).any(|p| match p.strip_suffix('*') {
@@ -79,13 +79,13 @@ pub fn child_env(inherited: impl IntoIterator<Item = (String, String)>, extra: &
     env
 }
 
-fn inherited() -> impl Iterator<Item = (String, String)> {
+pub fn inherited() -> impl Iterator<Item = (String, String)> {
     std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
 }
 
 /// Cut a log back to its first `keep` bytes once it is over `cap` (it is opened for appending,
 /// so every writer, the player's stdout included, carries on at the new end).
-fn cap_log(log: &mut File, limit: Option<(u64, u64)>) {
+pub fn cap_log(log: &mut File, limit: Option<(u64, u64)>) {
     let Some((cap, keep)) = limit else { return };
     if log.metadata().is_ok_and(|m| m.len() > cap) && log.set_len(keep).is_ok() {
         let _ = writeln!(log, "# older lines dropped (the log passed {} MiB)", cap >> 20);
@@ -254,7 +254,7 @@ impl MediaBackend for Real {
 }
 
 /// Runs in the child between fork and exec: async-signal-safe calls only.
-fn child_setup(parent: u32, extra: &[(RawFd, RawFd)]) -> io::Result<()> {
+pub fn child_setup(parent: u32, extra: &[(RawFd, RawFd)]) -> io::Result<()> {
     // SAFETY: plain syscalls on fds this process owns.
     unsafe {
         if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0 {

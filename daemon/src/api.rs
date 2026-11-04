@@ -11,8 +11,10 @@ use crate::events::Ev;
 use crate::history::INTERVAL_S;
 use crate::media;
 use crate::model::{DelayProfile, LinkState, TransportStored, SIGNAL_FORMAT};
+use crate::preview::{Refusal, OFFER_LIMIT};
 use crate::util::{iso_jst, now_ms};
 use axum::body::{Body, Bytes};
+use axum::extract::rejection::BytesRejection;
 use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
@@ -83,8 +85,25 @@ fn query(uri: &Uri, key: &str) -> Option<f64> {
 
 // ------------------------------------------------------------------ the API
 
-async fn api(State(app): State<Arc<App>>, method: Method, uri: Uri, body: Bytes) -> Response {
+async fn api(State(app): State<Arc<App>>, method: Method, uri: Uri, body: Result<Bytes, BytesRejection>) -> Response {
     let Some(path) = uri.path().strip_prefix("/api/v1") else { return not_found() };
+    if path == "/preview/sessions" && method == Method::POST {
+        // a body over the server's limit (2 MB) is a bad offer too, not a bare 413
+        return match body {
+            Ok(b) => start_preview(&app, &b).await,
+            Err(_) => error(StatusCode::BAD_REQUEST, "bad_offer"),
+        };
+    }
+    let body = match body {
+        Ok(b) => b,
+        Err(e) => return e.into_response(),
+    };
+    if let Some(id) = path.strip_prefix("/preview/sessions/").filter(|id| !id.is_empty() && !id.contains('/')) {
+        if method == Method::DELETE {
+            app.preview.close(id);
+            return (StatusCode::NO_CONTENT, [(CACHE_CONTROL, "no-store")]).into_response();
+        }
+    }
     let command = match (method.as_str(), path) {
         ("POST", "/transport/start") => Some(CmdKind::Start),
         ("POST", "/transport/stop") => Some(CmdKind::Stop),
@@ -114,7 +133,6 @@ fn request(app: &App, method: &str, path: &str, uri: &Uri, body: &Bytes) -> Resp
             let limit = query(uri, "limit").map_or(20, |l| (l as usize).min(crate::events::CAPACITY));
             ok(&app.lock().events.latest(limit))
         }
-        // GET /preview.mjpeg comes in phase 3 (not_found until then)
         // the network test comes in phase 4
         ("POST", "/network-tests") => error(StatusCode::CONFLICT, if tx { "busy" } else { "unsupported_role" }),
         (m, p) if p.starts_with("/settings/") || p == "/transport/compare" => {
@@ -124,6 +142,35 @@ fn request(app: &App, method: &str, path: &str, uri: &Uri, body: &Bytes) -> Resp
             settings(app, m, p, body)
         }
         _ => not_found(),
+    }
+}
+
+/// A browser asks for the preview with its offer; the answer comes from the preview program
+/// (it may have to start first: up to its ready time plus the answer timeout).
+async fn start_preview(app: &App, body: &Bytes) -> Response {
+    // the body is larger than the offer it carries (every line break is escaped)
+    let offer = Some(body)
+        .filter(|b| b.len() <= 4 * OFFER_LIMIT)
+        .and_then(|b| serde_json::from_slice::<Value>(b).ok())
+        .and_then(|v| v.get("offer")?.as_str().map(str::to_owned))
+        .filter(|s| s.len() <= OFFER_LIMIT && s.trim_start().starts_with("v=0"));
+    let Some(offer) = offer else { return error(StatusCode::BAD_REQUEST, "bad_offer") };
+    if !app.preview.enabled() {
+        return error(StatusCode::SERVICE_UNAVAILABLE, "preview_unavailable");
+    }
+    if app.lock().link.state != LinkState::Live {
+        return error(StatusCode::CONFLICT, "not_live");
+    }
+    match app.preview.offer(offer).await {
+        Ok(a) => json_response(StatusCode::CREATED, &json!({ "id": a.id, "answer": a.sdp })),
+        Err(r) => {
+            let status = match r {
+                Refusal::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+                Refusal::TooManyViewers => StatusCode::TOO_MANY_REQUESTS,
+                Refusal::BadOffer | Refusal::NoCommonCodec => StatusCode::BAD_REQUEST,
+            };
+            error(status, r.code())
+        }
     }
 }
 
@@ -381,5 +428,118 @@ fn mime(name: &str) -> &'static str {
         Some("woff") => "font/woff",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_app;
+    use crate::config::Config;
+    use crate::preview::{stub_launch, Preview};
+    use axum::http::HeaderMap;
+
+    const H264: &str = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 102\r\na=rtpmap:102 H264/90000\r\na=fmtp:102 packetization-mode=1\r\n";
+    const VP8: &str = "v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\n";
+
+    /// The request through the same body extractor as the router (its 2 MB limit included).
+    async fn call(app: &Arc<App>, method: Method, path: &str, body: impl Into<Bytes>) -> (StatusCode, HeaderMap, Value) {
+        let req = axum::http::Request::builder().method(method.clone()).uri(path).body(Body::from(body.into())).unwrap();
+        let body = <Result<Bytes, BytesRejection> as axum::extract::FromRequest<()>>::from_request(req, &()).await;
+        let r = api(State(app.clone()), method, path.parse().unwrap(), body.unwrap()).await;
+        let (status, headers) = (r.status(), r.headers().clone());
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        (status, headers, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    }
+
+    async fn offer(app: &Arc<App>, sdp: &str) -> (StatusCode, Value) {
+        let (s, _, v) = call(app, Method::POST, "/api/v1/preview/sessions", json!({ "offer": sdp }).to_string()).await;
+        (s, v)
+    }
+
+    fn code(v: &Value) -> &str {
+        v["error"]["code"].as_str().unwrap_or_default()
+    }
+
+    fn stub_app(name: &str, state: LinkState) -> (Arc<App>, Preview, std::path::PathBuf) {
+        let mut cfg = None;
+        let (l, dir) = stub_launch(name, "", |c| cfg = Some(c.clone()), 2);
+        let preview = Preview::start(Some(l));
+        (test_app(cfg.unwrap(), preview.clone(), state), preview, dir)
+    }
+
+    #[tokio::test]
+    async fn preview_sessions() {
+        let (app, preview, dir) = stub_app("http", LinkState::Live);
+        let path = "/api/v1/preview/sessions";
+        for body in [
+            "".to_string(),
+            "not json".into(),
+            "{}".into(),
+            json!({ "offer": "" }).to_string(),
+            json!({ "offer": 5 }).to_string(),
+            json!({ "offer": "m=video 9 RTP/AVP 96" }).to_string(),
+            json!({ "offer": format!("{H264}{}", "a=x\r\n".repeat(14_000)) }).to_string(),
+            // over the server's own body limit (2 MB)
+            json!({ "offer": format!("{H264}{}", "a=x\r\n".repeat(500_000)) }).to_string(),
+        ] {
+            let (s, _, v) = call(&app, Method::POST, path, body.clone()).await;
+            assert_eq!((s, code(&v)), (StatusCode::BAD_REQUEST, "bad_offer"), "{}", &body[..body.len().min(40)]);
+        }
+        assert_eq!(offer(&app, VP8).await, (StatusCode::BAD_REQUEST, json!({ "error": { "code": "no_common_codec" } })));
+        let (s, h, v) = call(&app, Method::POST, path, json!({ "offer": H264 }).to_string()).await;
+        assert_eq!(s, StatusCode::CREATED);
+        assert_eq!(h[CACHE_CONTROL], "no-store");
+        let id = v["id"].as_str().unwrap().to_string();
+        assert!(v["answer"].as_str().unwrap().starts_with("v=0\r\n"));
+        assert_eq!(v.as_object().unwrap().len(), 2, "{v}");
+        // just under the limit: the body itself is larger (escaped line breaks)
+        let long = format!("{H264}{}", "a=x\r\n".repeat(12_000));
+        assert!(long.len() < OFFER_LIMIT && json!({ "offer": long }).to_string().len() > OFFER_LIMIT);
+        let (s, _) = offer(&app, &long).await;
+        assert_eq!(s, StatusCode::CREATED);
+        let (s, v) = offer(&app, H264).await;
+        assert_eq!((s, code(&v)), (StatusCode::TOO_MANY_REQUESTS, "too_many_viewers"));
+
+        let (s, h, _) = call(&app, Method::DELETE, &format!("{path}/{id}"), "").await;
+        assert_eq!((s, &h[CACHE_CONTROL]), (StatusCode::NO_CONTENT, &"no-store".parse::<axum::http::HeaderValue>().unwrap()));
+        assert_eq!(call(&app, Method::DELETE, &format!("{path}/unknown"), "").await.0, StatusCode::NO_CONTENT);
+        assert_eq!(offer(&app, H264).await.0, StatusCode::CREATED, "the closed session's place is free");
+        assert_eq!(call(&app, Method::GET, path, "").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&app, Method::DELETE, path, "").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&app, Method::GET, "/api/v1/preview.mjpeg", "").await.0, StatusCode::NOT_FOUND);
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/status", "").await;
+        assert_eq!(s, StatusCode::OK);
+        assert!(v["media"].get("preview_fps").is_none(), "{}", v["media"]);
+
+        // the program fails on an offer, then is gone
+        preview.stop().await.unwrap();
+        let (s, v) = offer(&app, H264).await;
+        assert_eq!((s, code(&v)), (StatusCode::SERVICE_UNAVAILABLE, "preview_unavailable"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn preview_needs_a_live_link_and_the_program() {
+        let (app, preview, dir) = stub_app("http-idle", LinkState::Listening);
+        let (s, v) = offer(&app, H264).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "not_live"));
+        assert!(!dir.join("stub.jsonl").exists(), "the program is not started for it");
+        preview.stop().await.unwrap();
+
+        let (app, preview, dir2) = stub_app("http-fail", LinkState::Live);
+        let (s, v) = offer(&app, &format!("{H264}a=x-stub:fail\r\n")).await;
+        assert_eq!((s, code(&v)), (StatusCode::SERVICE_UNAVAILABLE, "preview_unavailable"));
+        preview.stop().await.unwrap();
+
+        let mut cfg = Config::parse("id = \"RX-01\"\nrole = \"rx\"\n[media]\nrepo = \"/m\"\n[preview]\nenabled = false\n").unwrap();
+        cfg.state_dir = Some(dir.clone());
+        let app = test_app(cfg, Preview::start(None), LinkState::Live);
+        let (s, v) = offer(&app, H264).await;
+        assert_eq!((s, code(&v)), (StatusCode::SERVICE_UNAVAILABLE, "preview_unavailable"));
+        let (s, _, _) = call(&app, Method::DELETE, "/api/v1/preview/sessions/abc", "").await;
+        assert_eq!(s, StatusCode::NO_CONTENT);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&dir2).unwrap();
     }
 }
