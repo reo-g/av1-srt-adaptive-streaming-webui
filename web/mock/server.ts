@@ -21,6 +21,11 @@
  * The produced video rate follows a new target over a few seconds.
  *   error   the receiver cannot be reached: tx keeps reconnecting, rx waits for a caller
  *
+ * 途中の無線機 (GET/PUT /settings/network, both roles): starts with the two radios of the real
+ * installation (the one next to this device first) at version 1, checks drafts with the device's
+ * rules and stores them like the device (also while live; nothing else changes). つながりの確認 checks
+ * the applied list.
+ *
  * The preview cannot be imitated: POST /preview/sessions answers 503 preview_unavailable while
  * live, so the screens show their "cannot show the preview" overlay.
  *
@@ -40,11 +45,14 @@ import type {
   DeviceEvent,
   EventCode,
   FieldError,
+  Hop,
   Impact,
   Level,
   LiveMessage,
   Media,
   Metric,
+  NetworkSettings,
+  NetworkSettingsInput,
   NetworkTest,
   NetworkTestDirection,
   NetworkTestList,
@@ -147,6 +155,7 @@ let switchRamp: { at: number; from: number } | null = null;
 
 let video: VideoSettings;
 let transport: TransportSettings;
+let network: NetworkSettings;
 
 const modelT = (ms = now()) => (ms - t0) / 1000;
 
@@ -296,6 +305,8 @@ function reset() {
     encryption: { cipher: 'none', passphrase_set: false, passphrase_rejected_at: null },
     send_limit: { mbps: SEND_LIMIT_DEFAULT, source: 'default', measured_at: null, test_id: null },
   };
+  // What the device's configuration file lists, until the operator applies a list.
+  network = { version: 1, hops: defaultHops() };
   lastAutoTarget = autoTarget(0);
   wasMarginLow = scenario === 'warn' && marginLowSince(0) !== null;
   lastTickT = 0;
@@ -638,11 +649,95 @@ function compare(): CompareResult {
   };
 }
 
+// ------------------------------------------------------------------ network settings (途中の無線機)
+
+const HOPS_MAX = 4;
+const HOP_LABEL_MAX = 24;
+/** A dotted quad without leading zeros (as the device parses it). */
+const DOTTED_QUAD = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
+const usableHopAddress = (a: string) =>
+  DOTTED_QUAD.test(a) && a !== '0.0.0.0' && a !== '255.255.255.255' && !a.startsWith('127.');
+
+/** The device's configured list: the radio next to this device first, then the one next to the peer. */
+const defaultHops = (): Hop[] =>
+  role === 'tx'
+    ? [
+        { label: '無線機（送信機側）', address: RADIO_TX_SIDE },
+        { label: '無線機（受信機側）', address: RADIO_RX_SIDE },
+      ]
+    : [
+        { label: '無線機（受信機側）', address: RADIO_RX_SIDE },
+        { label: '無線機（送信機側）', address: RADIO_TX_SIDE },
+      ];
+
+const sameHops = (a: Hop[], b: Hop[]) =>
+  a.length === b.length && a.every((h, i) => h.label === b[i].label && h.address === b[i].address);
+
+/**
+ * A label trimmed as the device trims it (Unicode White_Space): like String.prototype.trim,
+ * except that U+0085 is trimmed and U+FEFF is not.
+ */
+const WS = '\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000';
+const EDGE_WS = new RegExp(`^[${WS}]+|[${WS}]+$`, 'g');
+const trimLabel = (s: string) => s.replace(EDGE_WS, '');
+
+/** The list as the device would store it (labels trimmed), or null when the body has no list. */
+function hopsOf(input: Partial<NetworkSettingsInput>): Hop[] | null {
+  if (!Array.isArray(input.hops)) return null;
+  return input.hops.map((h) => ({
+    label: typeof h?.label === 'string' ? trimLabel(h.label) : '',
+    address: typeof h?.address === 'string' ? h.address : '',
+  }));
+}
+
+/**
+ * The body as the device reads it: empty → {}; not JSON → null (400 invalid without field
+ * errors); JSON that is not an object (null, a string, a list) → {} (its fields are missing).
+ */
+async function readNetworkInput(req: IncomingMessage): Promise<Partial<NetworkSettingsInput> | null> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  const text = Buffer.concat(chunks).toString('utf8');
+  if (/^[ \t\n\f\r]*$/.test(text)) return {};
+  try {
+    const v: unknown = JSON.parse(text);
+    return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Partial<NetworkSettingsInput>) : {};
+  } catch {
+    return null;
+  }
+}
+
+/** The device's rules: one code per field, the address codes in the documented order. */
+function checkNetwork(input: Partial<NetworkSettingsInput>): CheckResult {
+  const errors: FieldError[] = [];
+  const impacts: Impact[] = [];
+  const hops = hopsOf(input);
+  if (hops === null) return { ok: false, errors: [{ field: 'hops', code: 'required' }], impacts };
+  if (hops.length > HOPS_MAX) errors.push({ field: 'hops', code: 'too_many', params: { max: HOPS_MAX } });
+  const self = device().address;
+  const peerAddress = peer().address;
+  const seen = new Set<string>();
+  hops.forEach((h, i) => {
+    const n = [...h.label].length;
+    if (n === 0) errors.push({ field: `hops[${i}].label`, code: 'required' });
+    else if (n > HOP_LABEL_MAX) errors.push({ field: `hops[${i}].label`, code: 'too_long', params: { max: HOP_LABEL_MAX } });
+    const field = `hops[${i}].address`;
+    if (!usableHopAddress(h.address)) errors.push({ field, code: 'invalid' });
+    else if (h.address === self) errors.push({ field, code: 'is_self' });
+    else if (h.address === peerAddress) errors.push({ field, code: 'is_peer' });
+    else if (seen.has(h.address)) errors.push({ field, code: 'duplicate' });
+    seen.add(h.address);
+  });
+  if (!sameHops(hops, network.hops)) impacts.push({ level: 'info', code: 'hops_changed' });
+  return { ok: errors.length === 0, errors, impacts };
+}
+
 // ------------------------------------------------------------------ network test
 
 /**
  * The line of the real installation: a radio link with a round trip of about 75 ms, a radio next
  * to each device. tx: the near radio is on the transmitter side, rx the other way round.
+ * つながりの確認 checks the applied 途中の無線機; an address where neither radio is does not answer.
  * The line-speed test sends saturate_mbps (6) and measures what arrives, as on the device:
  *   normal  everything answers; towards the receiver 5.26 Mbps arrive (5.8 % lost, the line is
  *           full), back 1.15 Mbps
@@ -693,15 +788,15 @@ function reachTargets(): ReachabilityTarget[] {
   const down = scenario === 'error';
   const lossy = scenario === 'warn';
   const far = down ? 0 : lossy ? 9 : 10;
-  const [near, other] =
-    role === 'tx'
-      ? [['無線機（送信機側）', RADIO_TX_SIDE], ['無線機（受信機側）', RADIO_RX_SIDE]]
-      : [['無線機（受信機側）', RADIO_RX_SIDE], ['無線機（送信機側）', RADIO_TX_SIDE]];
-  return [
-    target('peer', null, peer().address, lossy ? 78.6 : 75.4, far),
-    target('hop', near[0], near[1], 0.42, 10),
-    target('hop', other[0], other[1], lossy ? 77.9 : 74.8, far),
-  ];
+  const near = role === 'tx' ? RADIO_TX_SIDE : RADIO_RX_SIDE;
+  const other = role === 'tx' ? RADIO_RX_SIDE : RADIO_TX_SIDE;
+  const hop = (h: Hop) =>
+    h.address === near
+      ? target('hop', h.label, h.address, 0.42, 10)
+      : h.address === other
+        ? target('hop', h.label, h.address, lossy ? 77.9 : 74.8, far)
+        : target('hop', h.label, h.address, 1, 0); // nothing there
+  return [target('peer', null, peer().address, lossy ? 78.6 : 75.4, far), ...network.hops.map(hop)];
 }
 
 /** What arrives when the test sends saturate_mbps (tx view: to_peer = towards the receiver). */
@@ -1015,6 +1110,26 @@ const server = http.createServer(async (req, res) => {
       broadcast({ type: 'status', status: status() });
       const out: ApplyResult<TransportSettings> = { settings: transport, applied_at: iso(now()), impacts: c.impacts };
       return send(res, 200, out);
+    }
+
+    // 途中の無線機 (both roles; allowed while live: the transmission is not touched)
+    if (m === 'GET' && path === '/settings/network') return send(res, 200, network);
+    if (m === 'POST' && path === '/settings/network/check') {
+      const input = await readNetworkInput(req);
+      if (!input) return send(res, 400, { error: { code: 'invalid', errors: [] } });
+      return send(res, 200, checkNetwork(input));
+    }
+    if (m === 'PUT' && path === '/settings/network') {
+      const input = await readNetworkInput(req);
+      if (!input) return send(res, 400, { error: { code: 'invalid', errors: [] } });
+      if (input.version !== network.version) return send(res, 409, { error: { code: 'version_conflict' } });
+      const c = checkNetwork(input);
+      if (!c.ok) return send(res, 400, { error: { code: 'invalid', errors: c.errors } });
+      await sleep(300); // stored; what the radio line may carry follows the new list
+      network = { version: network.version + 1, hops: hopsOf(input)! };
+      addEvent('info', 'network_settings_applied');
+      broadcast({ type: 'settings', section: 'network', version: network.version });
+      return send(res, 200, network);
     }
 
     // network test

@@ -3,10 +3,19 @@
 //! rules (a throughput test needs a stopped link, and the link is not started while one runs).
 //!
 //! reachability (both roles, any time, one at a time): the echo program (`network_test.ping`) to
-//!   the peer and to the configured hops, all at once: `ping -n -q -c 10 -i 0.2 -W 1 <addr>`
-//!   with LC_ALL=C (about 3 s). Its summary lines give the packets sent and received and the
-//!   round-trip times. A run that prints no summary (unknown host, no route) or does not end in
-//!   `ping_timeout` counts as nothing back.
+//!   the peer and to 途中の無線機 (the applied network settings, else device.toml's hops), all at
+//!   once: `ping -n -c 10 -i 0.2 -W 1 -w 4 <addr>` with LC_ALL=C (about 2 s, at most 4 s). Without
+//!   `-w` iputils waits only two round trips after the last request once replies came, so a late
+//!   last reply was counted lost; `-w 4` waits up to 4 s for ten replies. With a deadline iputils
+//!   also goes on sending past the count while replies are missing (`20 packets transmitted` from
+//!   a silent address, 11 for one lost reply) and stops early at an error (`6 packets
+//!   transmitted, +5 errors`), so the test is the first ten requests: `sent` is always 10 and
+//!   `received` the number of distinct requests (icmp_seq 1..10) that got a reply line
+//!   (duplicates, `DUP!`, ignored; replies to the extra requests not counted); the summary line
+//!   gives the round-trip times. A run with a request missing, a reply slower than twice the
+//!   median or a duplicate gets one developer-log line with the missing requests and every time,
+//!   so that a late reply and a lost one can be told apart. A run that prints no summary (unknown
+//!   host, no route) or does not end in `ping_timeout` counts as nothing back.
 //! throughput (tx only, link stopped, one at a time): one saturation test. The video travels in
 //!   UDP, so the test does too: the bandwidth tool's client (`network_test.iperf`) sends to its
 //!   server on the receiver at more than the line carries (`network_test.saturate_mbps`, default
@@ -38,7 +47,7 @@
 //!   seconds so far / duration); the result comes with the end.
 
 use crate::app::App;
-use crate::config::{address_ok, Config, Hop, Role};
+use crate::config::{address_ok, Config, Role};
 use crate::events::Ev;
 use crate::media;
 use crate::model::{params, FieldError, LinkState, SEND_LIMIT_RANGE};
@@ -69,7 +78,8 @@ pub const SATURATED_LOSS_PCT: f64 = 1.0;
 /// A shorter interval (the last sliver of a test) says nothing about the line.
 const MIN_INTERVAL_S: f64 = 0.25;
 const PING_COUNT: u32 = 10;
-/// About how long one echo run takes (10 × 0.2 s, then up to 1 s for the last answer).
+/// About how long one echo run takes (10 × 0.2 s and the last answer; with a reply missing it
+/// ends at its 4 s deadline).
 const PING_EXPECT: Duration = Duration::from_millis(3000);
 const SERVER_BACKOFF_S: [u64; 5] = [1, 2, 5, 10, 30];
 /// A server that ran this long starts its backoff from the first step again.
@@ -210,7 +220,7 @@ impl Default for Timing {
 // ------------------------------------------------------------------ requests
 
 fn fe(field: &'static str, code: &'static str, p: Value) -> FieldError {
-    FieldError { field, code, params: params(p) }
+    FieldError { field: field.into(), code, params: params(p) }
 }
 
 /// A POST body, checked in the contract's order: kind → role → fields. Missing or null fields
@@ -270,31 +280,79 @@ pub fn client_args(peer: &str, port: u16, saturate_mbps: f64, r: &Request) -> Ve
     a
 }
 
+/// Per reply lines (no -q) and a 4 s deadline for all ten (see the module comment).
 fn ping_args(addr: &str) -> Vec<String> {
-    let mut a: Vec<String> = ["-n", "-q", "-c", "10", "-i", "0.2", "-W", "1"].map(String::from).to_vec();
-    debug_assert_eq!(a[3], PING_COUNT.to_string());
+    let mut a: Vec<String> = ["-n", "-c", "10", "-i", "0.2", "-W", "1", "-w", "4"].map(String::from).to_vec();
+    debug_assert_eq!(a[2], PING_COUNT.to_string());
     a.push(addr.to_string());
     a
 }
 
 // ------------------------------------------------------------------ parsing the programs' output
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PingSummary {
+    /// The test's requests: always PING_COUNT (see parse_ping).
     pub sent: u32,
+    /// Distinct requests (1..=sent) that got a reply; the summary's count when the output has no
+    /// reply lines.
     pub received: u32,
     /// min / avg / max in ms (only when something came back)
     pub rtt: Option<(f64, f64, f64)>,
+    /// (icmp_seq, ms) of the first reply to each request 1..=sent, by seq.
+    pub replies: Vec<(u32, f64)>,
+    /// Requests 1..=sent that got more than one reply (`DUP!`), by seq.
+    pub dups: Vec<u32>,
+    /// (icmp_seq, ms) of the replies to requests past the count (sent because of -w), by seq.
+    pub extra: Vec<(u32, f64)>,
 }
 
-/// The summary of `ping -q` (iputils, LC_ALL=C):
-///   10 packets transmitted, 9 received, 10% packet loss, time 1834ms   (also "+N errors", "+N duplicates")
-///   rtt min/avg/max/mdev = 74.912/75.334/76.021/0.301 ms                (busybox: "round-trip min/avg/max = …")
+/// One reply line (iputils, LC_ALL=C), in the order the replies arrived:
+///   64 bytes from 192.168.0.56: icmp_seq=4 ttl=64 time=612 ms
+///   64 bytes from 192.168.0.56: icmp_seq=3 ttl=64 time=1.02 ms (DUP!)
+/// busybox numbers its requests from 0 (`seq=0`): taken as 1.. as well. Error lines ("From …
+/// icmp_seq=3 Destination Host Unreachable") have no time and are not replies.
+fn reply_line(line: &str) -> Option<(u32, f64)> {
+    if !line.contains(" bytes from ") {
+        return None;
+    }
+    let value = |key: &str| {
+        let (_, rest) = line.split_once(key)?;
+        rest.split(|c: char| c.is_whitespace()).next()
+    };
+    let seq = match value(" icmp_seq=") {
+        Some(q) => q.parse::<u32>().ok()?,
+        None => value(" seq=")?.parse::<u32>().ok()? + 1,
+    };
+    let ms = value(" time=")?.parse::<f64>().ok()?;
+    Some((seq, ms))
+}
+
+/// The output of `ping` without -q (iputils, LC_ALL=C): the reply lines (reply_line), then
+///   11 packets transmitted, 10 received, 9.09091% packet loss, time 2003ms   (also "+N errors", "+N duplicates")
+///   rtt min/avg/max/mdev = 74.600/128.890/612.000/161.037 ms                  (busybox: "round-trip min/avg/max = …")
+/// The test is the first PING_COUNT requests. With a deadline (-w) iputils does not stop sending
+/// at the count while replies are missing: it goes on until it has that many replies or the
+/// deadline passes (a silent address: 20 transmitted in 4 s; one lost reply: an 11th request whose
+/// reply ends the run), and an error ends it early (6 transmitted, +5 errors). So `sent` is
+/// PING_COUNT whatever the summary says, `received` counts the requests 1..=PING_COUNT answered,
+/// and the replies to the extra requests are kept apart (`extra`, for the log line only). The
+/// round-trip times are the summary's (the extra replies are samples of the same path).
 pub fn parse_ping(out: &str) -> Option<PingSummary> {
     let mut counts = None;
     let mut rtt = None;
+    let mut replies: Vec<(u32, f64)> = Vec::new();
+    let mut dups: Vec<u32> = Vec::new();
     for line in out.lines().map(str::trim) {
-        if let Some((sent, rest)) = line.split_once(" packets transmitted, ") {
+        if let Some((seq, ms)) = reply_line(line) {
+            if replies.iter().any(|r| r.0 == seq) {
+                if !dups.contains(&seq) {
+                    dups.push(seq);
+                }
+            } else {
+                replies.push((seq, ms));
+            }
+        } else if let Some((sent, rest)) = line.split_once(" packets transmitted, ") {
             let received = rest.split([' ', ',']).next()?.parse::<u32>().ok()?;
             counts = Some((sent.trim().parse::<u32>().ok()?, received));
         } else if let Some((name, values)) = line.split_once(" = ") {
@@ -307,9 +365,56 @@ pub fn parse_ping(out: &str) -> Option<PingSummary> {
             }
         }
     }
-    let (sent, received) = counts?;
-    let received = received.min(sent);
-    Some(PingSummary { sent, received, rtt: rtt.filter(|_| received > 0) })
+    let (_transmitted, summary_received) = counts?;
+    let sent = PING_COUNT;
+    let had_replies = !replies.is_empty();
+    let (mut replies, mut extra): (Vec<(u32, f64)>, Vec<(u32, f64)>) =
+        replies.into_iter().partition(|r| (1..=sent).contains(&r.0));
+    replies.sort_by_key(|r| r.0);
+    extra.sort_by_key(|r| r.0);
+    dups.retain(|q| (1..=sent).contains(q));
+    dups.sort_unstable();
+    let received = if had_replies { replies.len() as u32 } else { summary_received.min(sent) };
+    Some(PingSummary { sent, received, rtt: rtt.filter(|_| received > 0), replies, dups, extra })
+}
+
+/// The developer-log line for a run with a request missing, a reply slower than twice the median
+/// or a duplicate (None for a clean run, or output without reply lines that says nothing more):
+///   reach 192.168.0.56: 9/10 missing seq [7] late seq [4] rtt_ms [75.2, 74.8, 76.1, 612.0, …] extra seq [11] extra_rtt_ms [75.1]
+/// rtt_ms lists every reply's time by seq (the first reply of each request 1..10); the replies to
+/// requests past the count come last (an answered extra request after a missing one: the line was
+/// up, so that one was lost, or later than the extra reply).
+pub fn reply_note(addr: &str, s: &PingSummary) -> Option<String> {
+    if s.replies.is_empty() && s.received > 0 {
+        return None;
+    }
+    let missing: Vec<u32> = (1..=s.sent).filter(|q| !s.replies.iter().any(|r| r.0 == *q)).collect();
+    let mut times: Vec<f64> = s.replies.iter().map(|r| r.1).collect();
+    times.sort_by(f64::total_cmp);
+    let median = match times.len() {
+        0 => 0.0,
+        n if n % 2 == 1 => times[n / 2],
+        n => (times[n / 2 - 1] + times[n / 2]) / 2.0,
+    };
+    let late: Vec<u32> = s.replies.iter().filter(|r| r.1 > 2.0 * median).map(|r| r.0).collect();
+    if missing.is_empty() && late.is_empty() && s.dups.is_empty() {
+        return None;
+    }
+    let mut line = format!("reach {addr}: {}/{} missing seq {missing:?}", s.received, s.sent);
+    if !late.is_empty() {
+        line.push_str(&format!(" late seq {late:?}"));
+    }
+    if !s.dups.is_empty() {
+        line.push_str(&format!(" dup seq {:?}", s.dups));
+    }
+    let rtts: Vec<f64> = s.replies.iter().map(|r| r.1).collect();
+    line.push_str(&format!(" rtt_ms {rtts:?}"));
+    if !s.extra.is_empty() {
+        let seqs: Vec<u32> = s.extra.iter().map(|r| r.0).collect();
+        let times: Vec<f64> = s.extra.iter().map(|r| r.1).collect();
+        line.push_str(&format!(" extra seq {seqs:?} extra_rtt_ms {times:?}"));
+    }
+    Some(line)
 }
 
 /// What the client's JSON-stream lines said so far.
@@ -566,7 +671,6 @@ pub struct NetTests {
     enabled: bool,
     port: u16,
     saturate_mbps: f64,
-    hops: Vec<Hop>,
     rx_peer: Option<String>,
     /// The programs: args empty (made per run), the environment with LC_ALL=C, cwd run_dir.
     ping: Spec,
@@ -592,7 +696,6 @@ impl NetTests {
             enabled: n.enabled,
             port: n.port,
             saturate_mbps: n.saturate_mbps,
-            hops: n.hops.clone(),
             rx_peer: cfg.rx.peer_host.clone(),
             ping: program(cfg, &n.ping, Vec::new()),
             iperf: program(cfg, &n.iperf, Vec::new()),
@@ -684,7 +787,14 @@ struct Aim {
 
 impl Aim {
     fn target(self, s: Option<PingSummary>) -> Target {
-        let s = s.unwrap_or(PingSummary { sent: PING_COUNT, received: 0, rtt: None });
+        let s = s.unwrap_or(PingSummary {
+            sent: PING_COUNT,
+            received: 0,
+            rtt: None,
+            replies: Vec::new(),
+            dups: Vec::new(),
+            extra: Vec::new(),
+        });
         let ms = |v: f64| round(v, 2);
         Target {
             kind: self.kind,
@@ -704,14 +814,15 @@ pub fn start(app: &Arc<App>, body: &Value) -> Result<NetworkTest, Refusal> {
     let n = &app.nettest;
     let req = parse(body, app.cfg.role, n.enabled)?;
     // Read from the link before the book is locked (the two locks are never held together). The
-    // link leaves `stopped` only by a start, and a start holds the book's `starting` count.
-    let (state, peer) = {
+    // link leaves `stopped` only by a start, and a start holds the book's `starting` count. The
+    // hops are the list applied now (a later change does not touch a running test).
+    let (state, peer, hops) = {
         let i = app.lock();
         let peer = match app.cfg.role {
             Role::Tx => Some(i.settings.transport.peer_host.clone()),
             Role::Rx => n.rx_peer.clone().or_else(|| i.link.peer_addr.as_ref().map(|(a, _)| a.clone())),
         };
-        (i.link.state, peer.filter(|p| !p.is_empty()))
+        (i.link.state, peer.filter(|p| !p.is_empty()), app.network(&i).hops)
     };
     let now = Instant::now();
     let mut book = n.book();
@@ -747,8 +858,7 @@ pub fn start(app: &Arc<App>, body: &Value) -> Result<NetworkTest, Refusal> {
                 Some(p) => dlog!("network test {id}: the peer's address {p:?} is not usable; left out"),
                 None => {}
             }
-            let hops = n.hops.iter().map(|h| Aim { kind: "hop", label: Some(h.label.clone()), address: h.address.clone() });
-            aims.extend(hops);
+            aims.extend(hops.into_iter().map(|h| Aim { kind: "hop", label: Some(h.label), address: h.address }));
             let list: Vec<&str> = aims.iter().map(|a| a.address.as_str()).collect();
             let what = if list.is_empty() { "nothing (no address known)".to_string() } else { list.join(", ") };
             dlog!("network test {id}: reachability of {what}");
@@ -840,9 +950,16 @@ async fn ping(spec: Spec, addr: String, timeout: Duration) -> io::Result<Option<
                 dlog!("reachability {addr}: {}", err.trim().replace('\n', " / "));
             }
             let s = parse_ping(&String::from_utf8_lossy(&out.stdout));
-            if s.is_none() {
-                let code = out.status.code().map_or("signal".into(), |c| c.to_string());
-                dlog!("reachability {addr}: no summary (exit {code})");
+            match &s {
+                Some(s) => {
+                    if let Some(note) = reply_note(&addr, s) {
+                        dlog!("{note}");
+                    }
+                }
+                None => {
+                    let code = out.status.code().map_or("signal".into(), |c| c.to_string());
+                    dlog!("reachability {addr}: no summary (exit {code})");
+                }
             }
             Ok(s)
         }
@@ -1258,25 +1375,107 @@ mod tests {
             .collect()
     }
 
+    /// The list of 途中の無線機 as if applied (any address: the stub picks its case by it).
+    fn set_hops(app: &App, hops: &[(&str, &str)]) {
+        let hops = hops.iter().map(|(l, a)| crate::config::Hop { label: l.to_string(), address: a.to_string() }).collect();
+        app.lock().settings.network = Some(crate::model::NetworkStored { version: 2, hops });
+    }
+
     #[test]
-    fn ping_summaries() {
+    fn ping_outputs() {
+        let seqs = |s: &PingSummary| s.replies.iter().map(|r| r.0).collect::<Vec<_>>();
+        // the real capture: a reply line each
         let ok = parse_ping(&fixture("ping_ok.txt")).unwrap();
-        assert_eq!(ok, PingSummary { sent: 10, received: 10, rtt: Some((0.004, 0.013, 0.030)) });
+        assert_eq!((ok.sent, ok.received, ok.rtt), (10, 10, Some((0.005, 0.024, 0.046))));
+        assert_eq!(seqs(&ok), (1..=10).collect::<Vec<_>>());
+        assert_eq!((ok.replies[0], ok.replies[9], ok.dups.len()), ((1, 0.027), (10, 0.043), 0));
+        assert_eq!(reply_note("127.0.0.1", &ok), None, "nothing to say");
+        // real captures with the daemon's arguments: a silent address (iputils goes on sending until
+        // the deadline: "20 packets transmitted") and one that is not there (an error ends the run
+        // early: "6 packets transmitted, +5 errors"); either way the test's ten requests, none back
         let lost = parse_ping(&fixture("ping_lost.txt")).unwrap();
-        assert_eq!(lost, PingSummary { sent: 10, received: 0, rtt: None });
+        assert!(fixture("ping_lost.txt").contains("20 packets transmitted, 0 received"));
+        assert_eq!(lost, PingSummary { sent: 10, received: 0, rtt: None, replies: vec![], dups: vec![], extra: vec![] });
+        assert_eq!(reply_note("10.0.0.9", &lost).unwrap(), "reach 10.0.0.9: 0/10 missing seq [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] rtt_ms []");
+        let unreachable = fixture("ping_unreachable.txt");
+        assert!(unreachable.contains("6 packets transmitted, 0 received, +5 errors"));
+        let s = parse_ping(&unreachable).unwrap();
+        assert_eq!(s, PingSummary { sent: 10, received: 0, rtt: None, replies: vec![], dups: vec![], extra: vec![] });
+        // three lost: iputils sends three more (11–13) whose replies make up its count of ten and
+        // end the run; they are not the test's
         let part = parse_ping(&fixture("ping_partial.txt")).unwrap();
-        assert_eq!((part.sent, part.received), (10, 7));
-        assert_eq!(part.rtt, Some((0.006, 0.021, 0.047)));
-        // no answer from a neighbour on the LAN: iputils adds the errors
+        assert_eq!((part.sent, part.received, part.rtt), (10, 7, Some((0.005, 0.025, 0.046))));
+        assert_eq!(part.extra, [(11, 0.031), (12, 0.022), (13, 0.019)]);
+        assert_eq!(
+            reply_note("10.0.0.9", &part).unwrap(),
+            "reach 10.0.0.9: 7/10 missing seq [3, 6, 9] rtt_ms [0.027, 0.015, 0.014, 0.005, 0.046, 0.033, 0.043] \
+             extra seq [11, 12, 13] extra_rtt_ms [0.031, 0.022, 0.019]"
+        );
+
+        // the radio line: a late reply (printed out of order) is received, the lost one is not;
+        // the log line tells them apart
+        let late = parse_ping(&fixture("ping_late.txt")).unwrap();
+        assert_eq!((late.sent, late.received), (10, 9), "not 10/11 (the summary's count includes the 11th)");
+        assert_eq!(seqs(&late), [1, 2, 3, 4, 5, 6, 8, 9, 10]);
+        assert_eq!(late.replies[3], (4, 612.0));
+        assert_eq!(late.rtt, Some((74.6, 128.89, 612.0)));
+        assert_eq!(
+            reply_note("192.168.0.56", &late).unwrap(),
+            "reach 192.168.0.56: 9/10 missing seq [7] late seq [4] rtt_ms [75.2, 74.8, 76.1, 612.0, 75.0, 74.6, 75.9, 74.9, 75.3] \
+             extra seq [11] extra_rtt_ms [75.1]"
+        );
+        // late alone (nothing missing) is said too; twice the median exactly is not late
+        let lines = |times: &[(u32, &str)], received: u32| {
+            let mut out = String::from("PING 10.0.0.9 (10.0.0.9) 56(84) bytes of data.\n");
+            for (q, t) in times {
+                out.push_str(&format!("64 bytes from 10.0.0.9: icmp_seq={q} ttl=64 time={t} ms\n"));
+            }
+            out + &format!("\n--- 10.0.0.9 ping statistics ---\n10 packets transmitted, {received} received, 0% packet loss, time 1803ms\nrtt min/avg/max/mdev = 1.000/2.000/3.000/0.500 ms\n")
+        };
+        let all: Vec<(u32, &str)> = (1..=10).map(|q| (q, if q == 5 { "151" } else { "75.0" })).collect();
+        let s = parse_ping(&lines(&all, 10)).unwrap();
+        assert!(reply_note("10.0.0.9", &s).unwrap().contains(": 10/10 missing seq [] late seq [5] rtt_ms [75.0, 75.0, 75.0, 75.0, 151.0,"));
+        let all: Vec<(u32, &str)> = (1..=10).map(|q| (q, if q == 5 { "150" } else { "75.0" })).collect();
+        assert_eq!(reply_note("10.0.0.9", &parse_ping(&lines(&all, 10)).unwrap()), None);
+
+        // duplicates count once and are noted; error lines and other noise are not replies
+        let dup = "PING 192.168.0.65 (192.168.0.65) 56(84) bytes of data.\n\
+                   64 bytes from 192.168.0.65: icmp_seq=1 ttl=64 time=1.02 ms\n\
+                   64 bytes from 192.168.0.65: icmp_seq=1 ttl=64 time=1.40 ms (DUP!)\n\
+                   64 bytes from 192.168.0.65: icmp_seq=2 ttl=64 time=0.98 ms\n\
+                   64 bytes from 192.168.0.65: icmp_seq=2 ttl=64 time=1.10 ms (DUP!)\n\
+                   64 bytes from 192.168.0.65: icmp_seq=2 ttl=64 time=1.30 ms (DUP!)\n\
+                   From 192.168.0.220 icmp_seq=3 Destination Host Unreachable\n\
+                   ping: Warning: time of day goes back (-12us), taking countermeasures\n\
+                   64 bytes from 192.168.0.65: icmp_seq=11 ttl=64 time=0.9 ms\n\n\
+                   --- 192.168.0.65 ping statistics ---\n\
+                   10 packets transmitted, 2 received, +3 duplicates, +1 errors, 80% packet loss, time 1803ms\n\
+                   rtt min/avg/max/mdev = 0.980/1.160/1.400/0.160 ms\n";
+        let s = parse_ping(dup).unwrap();
+        assert_eq!((s.received, s.replies.clone(), s.dups.clone()), (2, vec![(1, 1.02), (2, 0.98)], vec![1, 2]));
+        assert_eq!(
+            reply_note("192.168.0.65", &s).unwrap(),
+            "reach 192.168.0.65: 2/10 missing seq [3, 4, 5, 6, 7, 8, 9, 10] dup seq [1, 2] rtt_ms [1.02, 0.98] extra seq [11] extra_rtt_ms [0.9]"
+        );
+        // only the extra requests answered (the line came up during the test): nothing of the test's
+        let s = parse_ping(&lines(&[(11, "75.0"), (12, "75.1")], 2)).unwrap();
+        assert_eq!((s.received, s.rtt, s.extra.len()), (0, None, 2));
+        // the summary's count alone (output without reply lines, e.g. -q): nothing to say about them
+        let quiet = "10 packets transmitted, 10 received, +2 duplicates, 0% packet loss, time 1800ms\n\
+                     rtt min/avg/max/mdev = 74.912/75.334/76.021/0.301 ms\n";
+        let s = parse_ping(quiet).unwrap();
+        assert_eq!((s.received, s.rtt, reply_note("x", &s)), (10, Some((74.912, 75.334, 76.021)), None));
         let errs = "\n--- 192.168.0.65 ping statistics ---\n10 packets transmitted, 0 received, +10 errors, 100% packet loss, time 9001ms\npipe 3\n";
-        assert_eq!(parse_ping(errs), Some(PingSummary { sent: 10, received: 0, rtt: None }));
-        let dup = "10 packets transmitted, 10 received, +2 duplicates, 0% packet loss, time 1800ms\n\
-                   rtt min/avg/max/mdev = 74.912/75.334/76.021/0.301 ms\n";
-        assert_eq!(parse_ping(dup).unwrap().rtt, Some((74.912, 75.334, 76.021)));
-        let busybox = "3 packets transmitted, 3 packets received, 0% packet loss\nround-trip min/avg/max = 0.1/0.2/0.3 ms\n";
-        assert_eq!(parse_ping(busybox), Some(PingSummary { sent: 3, received: 3, rtt: Some((0.1, 0.2, 0.3)) }));
+        assert_eq!(parse_ping(errs).map(|s| (s.sent, s.received, s.rtt)), Some((10, 0, None)));
+        // busybox: seq from 0
+        let busybox = "64 bytes from 10.0.0.1: seq=0 ttl=64 time=0.100 ms\n64 bytes from 10.0.0.1: seq=2 ttl=64 time=0.300 ms\n\
+                       10 packets transmitted, 2 packets received, 80% packet loss\nround-trip min/avg/max = 0.1/0.2/0.3 ms\n";
+        let s = parse_ping(busybox).unwrap();
+        assert_eq!((s.sent, s.received, s.rtt, s.replies.clone()), (10, 2, Some((0.1, 0.2, 0.3)), vec![(1, 0.1), (3, 0.3)]));
         assert_eq!(parse_ping(""), None);
         assert_eq!(parse_ping("ping: nosuchhost.invalid: Name or service not known\n"), None);
+        // reply lines without a summary (cut off): nothing
+        assert_eq!(parse_ping("64 bytes from 10.0.0.1: icmp_seq=1 ttl=64 time=0.1 ms\n"), None);
     }
 
     #[test]
@@ -1479,7 +1678,7 @@ mod tests {
             client_args("192.168.0.210", 60022, 7.5, &r).join(" "),
             "-c 192.168.0.210 -p 60022 -u -b 7.5M -l 1316 -t 20 -i 1 --json-stream --forceflush --get-server-output --connect-timeout 3000 -R"
         );
-        assert_eq!(ping_args("192.168.0.65").join(" "), "-n -q -c 10 -i 0.2 -W 1 192.168.0.65");
+        assert_eq!(ping_args("192.168.0.65").join(" "), "-n -c 10 -i 0.2 -W 1 -w 4 192.168.0.65");
 
         let cfg = Config::parse("id = \"RX\"\nrole = \"rx\"\nrun_dir = \"/run/c\"\n[media]\nrepo = \"/m\"\n").unwrap();
         let l = ServerLaunch::from_config(&cfg).unwrap();
@@ -1677,7 +1876,8 @@ mod tests {
 
     #[tokio::test]
     async fn busy_rules() {
-        let (app, dir) = stub_app("busy", Role::Tx, LinkState::Live, "[[network_test.hops]]\nlabel = \"遠い\"\naddress = \"slow.example\"\n");
+        let (app, dir) = stub_app("busy", Role::Tx, LinkState::Live, "");
+        set_hops(&app, &[("遠い", "slow.example")]);
         assert_eq!(start(&app, &json!({ "kind": "throughput" })).unwrap_err(), Refusal::Busy, "the link is live");
         let reach = start(&app, &json!({ "kind": "reachability" })).unwrap();
         assert_eq!(start(&app, &json!({ "kind": "reachability" })).unwrap_err(), Refusal::Busy, "one at a time");
@@ -1701,16 +1901,20 @@ mod tests {
 
     #[tokio::test]
     async fn reachability_of_the_peer_and_the_hops() {
-        let hops = [
-            ("無線機（送信機側）", "10.0.0.65"),
-            ("無線機（受信機側）", "partial.example"),
-            ("止まった機器", "lost.example"),
-            ("名前違い", "unknown.invalid"),
-            ("応答なし", "hang.example"),
-        ];
-        let extra: String =
-            hops.iter().map(|(l, a)| format!("[[network_test.hops]]\nlabel = \"{l}\"\naddress = \"{a}\"\n")).collect();
-        let (app, dir) = stub_app("reach", Role::Tx, LinkState::Live, &extra);
+        // device.toml's list until one is applied; then the applied one (the stub picks its case by
+        // the address, so these are set as if applied)
+        let (app, dir) = stub_app("reach", Role::Tx, LinkState::Live, "[[network_test.hops]]\nlabel = \"設定の無線機\"\naddress = \"10.0.0.65\"\n");
+        set_hops(
+            &app,
+            &[
+                ("無線機（送信機側）", "10.0.0.65"),
+                ("無線機（受信機側）", "partial.example"),
+                ("止まった機器", "lost.example"),
+                ("名前違い", "unknown.invalid"),
+                ("応答なし", "hang.example"),
+                ("遅れて届く", "late.example"),
+            ],
+        );
         let t0 = Instant::now();
         let t = start(&app, &json!({ "kind": "reachability", "mode": "bogus" })).unwrap();
         assert_eq!(serde_json::to_value(&t.request).unwrap(), json!({ "kind": "reachability", "direction": null, "duration_s": null }));
@@ -1728,21 +1932,27 @@ mod tests {
         assert_eq!(
             got,
             [
-                ("peer", None, "10.0.0.2", 10, 10, Some(0.01)),
-                ("hop", Some("無線機（送信機側）"), "10.0.0.65", 10, 10, Some(0.01)),
-                ("hop", Some("無線機（受信機側）"), "partial.example", 10, 7, Some(0.02)),
+                ("peer", None, "10.0.0.2", 10, 10, Some(0.02)),
+                ("hop", Some("無線機（送信機側）"), "10.0.0.65", 10, 10, Some(0.02)),
+                ("hop", Some("無線機（受信機側）"), "partial.example", 10, 7, Some(0.03)),
                 ("hop", Some("止まった機器"), "lost.example", 10, 0, None),
                 ("hop", Some("名前違い"), "unknown.invalid", 10, 0, None),
                 ("hop", Some("応答なし"), "hang.example", 10, 0, None),
+                ("hop", Some("遅れて届く"), "late.example", 10, 9, Some(128.89)),
             ]
         );
-        // two decimals (ping writes three): 0.004 / 0.030 ms
-        assert_eq!((targets[0].rtt_min_ms, targets[0].rtt_max_ms), (Some(0.0), Some(0.03)));
+        // two decimals (ping writes three): 0.005 / 0.046 ms
+        assert_eq!((targets[0].rtt_min_ms, targets[0].rtt_max_ms), (Some(0.01), Some(0.05)));
         assert_eq!((targets[3].rtt_min_ms, targets[3].rtt_max_ms), (None, None));
         let mut args: Vec<String> = starts(&dir, "stub_ping").iter().map(|a| a.join(" ")).collect();
         args.sort();
-        assert_eq!(args.len(), 6);
-        assert_eq!(args[0], "-n -q -c 10 -i 0.2 -W 1 10.0.0.2");
+        assert_eq!(args.len(), 7);
+        assert_eq!(args[0], "-n -c 10 -i 0.2 -W 1 -w 4 10.0.0.2");
+        // the developer log has the late and the missing replies
+        let log = crate::util::log_dump();
+        assert!(log.contains("reach late.example: 9/10 missing seq [7] late seq [4] rtt_ms [75.2, 74.8, 76.1, 612.0,"), "{log}");
+        assert!(log.contains("reach partial.example: 7/10 missing seq [3, 6, 9] rtt_ms ["));
+        assert!(!log.contains("reach 10.0.0.65:"), "a clean run says nothing");
         assert!(app.lock().events.latest(5).iter().all(|e| e.code != "network_test_done"));
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -1754,10 +1964,18 @@ mod tests {
             Some(Outcome::Reachability { targets }) => targets.iter().map(|t| format!("{}:{}", t.kind, t.address)).collect::<Vec<_>>(),
             _ => panic!("{t:?}"),
         };
-        // no transmitter known: only the hops
+        // no transmitter known: only the hops (device.toml's, nothing applied yet)
         let (app, dir) = stub_app("rx-reach", Role::Rx, LinkState::Listening, hop);
         let t = start(&app, &json!({ "kind": "reachability" })).unwrap();
         assert_eq!(peers(&wait_done(&app, &t.id).await), ["hop:10.0.0.56"]);
+        // an applied list wins, an empty one too
+        set_hops(&app, &[]);
+        let t = start(&app, &json!({ "kind": "reachability" })).unwrap();
+        assert_eq!(peers(&t), Vec::<String>::new(), "nothing to check: done at once");
+        set_hops(&app, &[("無線機", "10.0.0.57")]);
+        let t = start(&app, &json!({ "kind": "reachability" })).unwrap();
+        assert_eq!(peers(&wait_done(&app, &t.id).await), ["hop:10.0.0.57"]);
+        set_hops(&app, &[("無線機", "10.0.0.56")]);
         // the last transmitter that connected
         app.lock().link.peer_addr = Some(("192.168.0.220".into(), 51234));
         let t = start(&app, &json!({ "kind": "reachability" })).unwrap();

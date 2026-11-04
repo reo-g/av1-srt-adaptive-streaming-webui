@@ -144,6 +144,8 @@ export const eventText = (role: Role, e: DeviceEvent, peerId: string | null): st
         ? `送り出しの上限を ${step} Mbps にしました（回線の速さを測った値）`
         : `送り出しの上限を ${step} Mbps に変更しました`;
     }
+    case 'network_settings_applied':
+      return '途中の無線機の設定を適用しました';
   }
 };
 
@@ -182,6 +184,8 @@ export const impactText = (i: Impact): string => {
       return '設定を保存します。伝送は停止したままです';
     case 'takes_effect_next_start':
       return '送り出しの上限は、次に伝送を始めたときから使います。いまの伝送は、これまでの上限のまま続けます';
+    case 'hops_changed':
+      return 'つながりの確認で確かめる機器と、無線の回線で通信してよい機器が、この内容に変わります。';
   }
 };
 
@@ -362,6 +366,84 @@ export const capProblem = (code: string | undefined) =>
     : code === 'not_applicable'
       ? 'この結果は上限に使えません。送信機 → 受信機の向きで測った結果を使ってください。'
       : '上限を変えられませんでした。もう一度お試しください。';
+
+// ---------------------------------------------------------------- 途中の無線機 (network settings)
+
+export const hopsHelp =
+  'つながりの確認で、相手の機器の手前で確かめる無線機です。無線機のアドレスが変わったら、ここを直してください。' +
+  '無線の回線には、映像とここに書いた無線機との通信だけを流します。';
+export const hopsEmpty = (role: Role) =>
+  `登録している無線機はありません。つながりの確認では、${peerName(role)}だけを確かめます。`;
+/** Every row removed in the draft, not applied yet. */
+export const hopsEmptyDraft = (role: Role) =>
+  `適用すると、登録している無線機はなくなります。つながりの確認では、${peerName(role)}だけを確かめます。`;
+export const hopsFull = (max: number) => `無線機は ${max} 台まで登録できます。`;
+/** Description of the confirmation dialog. */
+export const hopsContext = '途中の無線機を変えます。映像の伝送には影響しません。';
+export const hopsDone = (at: string) => `${at} JST に適用しました。つながりの確認は、この内容で確かめます。`;
+/** A new row whose fields have not been filled in yet (their errors are not shown until then). */
+export const hopsFillIn = '追加した無線機の名前とアドレスを入力してください。';
+export const hopsRebased = 'ほかの画面で途中の無線機が変わったため、変更内容を最新の値と比べ直しました。';
+/** The list changed elsewhere while the confirmation was open: it is closed, nothing was applied. */
+export const hopsRebasedWhileConfirming =
+  'ほかの画面で途中の無線機が変わったため、確認を閉じて、変更内容を最新の値と比べ直しました。確かめてからもう一度適用してください。';
+/** The list applied elsewhere is the same as the draft: nothing is left to apply. */
+export const hopsSameApplied = 'ほかの画面で、同じ内容の途中の無線機が適用されました。';
+export const hopsConflict =
+  'ほかの画面で途中の無線機が変わったため、適用しませんでした。変更内容を最新の値と比べ直したので、確かめてからもう一度適用してください。';
+export const hopsInvalid = '入力に誤りがあるため、適用しませんでした。欄の下の説明を見て直してください。';
+export const hopsApplyFailed = '適用できませんでした。もう一度お試しください。';
+/** The last つながりの確認 checked another list than the one applied now. */
+export const reachStale =
+  '途中の無線機が変わったため、この結果は前の内容で確かめたものです。新しい内容で確かめるには「確かめる」を押してください。';
+export const reachHelp = (role: Role, hops: number) =>
+  hops > 0
+    ? `${peerName(role)}と、途中の無線機まで届くかを確かめます。伝送中でも使えます。`
+    : `${peerName(role)}まで届くかを確かめます。伝送中でも使えます。`;
+
+/** "hops[1].address" → { index: 1, key: 'address' }; null for any other field. */
+export const hopField = (field: string): { index: number; key: 'label' | 'address' } | null => {
+  const m = /^hops\[(\d+)\]\.(label|address)$/.exec(field);
+  return m ? { index: Number(m[1]), key: m[2] as 'label' | 'address' } : null;
+};
+
+/** Addresses written correctly that still cannot be a radio (no device, everyone, this device itself). */
+const unusableAddress = (v: string) => v === '0.0.0.0' || v === '255.255.255.255' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(v);
+
+/** Digits and dots only, with a leading zero in a part ("192.168.000.065"): the device refuses those. */
+const leadingZero = (v: string) => /^\d+(\.\d+){3}$/.test(v) && v.split('.').some((o) => o.length > 1 && o.startsWith('0'));
+
+/**
+ * A field error of the list, shown at its field. `value` is what is typed there: the device only
+ * says `invalid`, the text tells an empty field, a name instead of an address, a mistyped address
+ * and an address that cannot be used apart. `sameAs`: for duplicate, the number of the earlier row.
+ */
+export const hopErrorText = (role: Role, e: FieldError, value = '', sameAs?: number): string => {
+  const p = e.params ?? {};
+  if (e.field === 'hops')
+    return e.code === 'too_many' ? `無線機は ${p.max ?? 4} 台までです。どれかを削除してください` : '入力内容を確認してください';
+  const f = hopField(e.field);
+  if (f?.key === 'label') return e.code === 'too_long' ? `名前は ${p.max ?? 24} 文字までにしてください` : '名前を入力してください';
+  if (f?.key === 'address') {
+    switch (e.code) {
+      case 'is_self':
+        return `この${roleName(role)}のアドレスです。無線機のアドレスを入力してください`;
+      case 'is_peer':
+        return `${peerName(role)}のアドレスです。無線機のアドレスを入力してください`;
+      case 'duplicate':
+        return sameAs ? `${sameAs} 番目の無線機と同じアドレスです` : 'ほかの無線機と同じアドレスです';
+      default: {
+        const v = value.trim();
+        if (v === '') return 'アドレスを入力してください（例 192.168.0.65）';
+        if (unusableAddress(v)) return 'このアドレスは無線機には使えません';
+        if (leadingZero(v)) return '先頭に 0 を付けずに入力してください（例 192.168.0.65）';
+        if (/^[\d.]+$/.test(v)) return '0〜255 の数を 4 つ、点で区切って入力してください（例 192.168.0.65）';
+        return '数字の IP アドレスで入力してください（例 192.168.0.65）';
+      }
+    }
+  }
+  return '入力内容を確認してください';
+};
 
 /** ● 届く ▲ 一部届かない ■ 届かない (with the shape, never by colour alone). */
 export type ReachLevel = 'ok' | 'partial' | 'none';

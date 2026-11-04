@@ -1,14 +1,16 @@
-//! Check rules for settings drafts: a port of checkVideo / checkTransport in web/mock/server.ts
-//! (the oracle), plus a check that the chosen input is one the device offers, because the
-//! device really opens it. Request bodies are read leniently: a missing, null or mistyped
-//! value becomes a FieldError, never a 422.
+//! Check rules for settings drafts: a port of checkVideo / checkTransport / checkNetwork in
+//! web/mock/server.ts (the oracle), plus a check that the chosen input is one the device offers,
+//! because the device really opens it. Request bodies are read leniently: a missing, null or
+//! mistyped value becomes a FieldError, never a 422.
 
+use crate::config::Hop;
 use crate::model::{
-    params, CheckResult, DelayProfile, FieldError, Impact, InputKind, LinkState, Mode, SendLimit, TransportStored,
-    VideoInput, VideoStored, SEND_LIMIT_RANGE,
+    params, CheckResult, DelayProfile, FieldError, Impact, InputKind, LinkState, Mode, NetworkStored, SendLimit,
+    TransportStored, VideoInput, VideoStored, SEND_LIMIT_RANGE,
 };
 use crate::util::round;
 use serde_json::{json, Value};
+use std::net::Ipv4Addr;
 
 pub const BITRATE_RANGE: (f64, f64) = (1.5, 4.0);
 pub const MODES: [&str; 1] = ["outbound"];
@@ -33,8 +35,8 @@ fn flag(v: &Value, path: &str) -> Option<bool> {
     at(v, path)?.as_bool()
 }
 
-fn fe(field: &'static str, code: &'static str, p: Value) -> FieldError {
-    FieldError { field, code, params: params(p) }
+fn fe(field: impl Into<String>, code: &'static str, p: Value) -> FieldError {
+    FieldError { field: field.into(), code, params: params(p) }
 }
 fn im(level: &'static str, code: &'static str, p: Value) -> Impact {
     Impact { level, code, params: params(p) }
@@ -374,6 +376,100 @@ pub fn apply_transport(d: &TransportDraft, a: &TransportStored) -> TransportStor
         // a new value is the operator's; the same value keeps where it came from
         send_limit: d.limit_changed(a).map_or_else(|| a.send_limit.clone(), SendLimit::manual),
     }
+}
+
+// ------------------------------------------------------------------ network (途中の無線機)
+
+pub const HOPS_MAX: usize = 4;
+/// Characters (code points) of a label after trimming.
+pub const HOP_LABEL_MAX: usize = 24;
+
+/// The address of a device on the way: a dotted-quad IPv4 address without leading zeros (no host
+/// names: the radio line's filter needs addresses), not 0.0.0.0, 255.255.255.255 or 127.x.x.x.
+pub fn hop_address(s: &str) -> Option<Ipv4Addr> {
+    s.parse::<Ipv4Addr>().ok().filter(|a| !a.is_unspecified() && !a.is_broadcast() && !a.is_loopback())
+}
+
+/// A stored list that keeps the rules that do not depend on the moment (a settings.json edited by
+/// hand may not): at most 4, trimmed labels of 1–24 characters, usable addresses, no duplicates.
+pub fn hops_sane(hops: &[Hop]) -> bool {
+    hops.len() <= HOPS_MAX
+        && hops.iter().enumerate().all(|(i, h)| {
+            let n = h.label.chars().count();
+            h.label.trim() == h.label
+                && (1..=HOP_LABEL_MAX).contains(&n)
+                && hop_address(&h.address).is_some()
+                && !hops[..i].iter().any(|e| e.address == h.address)
+        })
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct NetworkDraft {
+    pub version: Option<f64>,
+    /// The list as it would be stored (labels trimmed; a missing or mistyped label or address is
+    /// empty); None when the body has no list.
+    pub hops: Option<Vec<Hop>>,
+}
+
+impl NetworkDraft {
+    pub fn parse(v: &Value) -> Self {
+        let hop = |h: &Value| Hop {
+            label: text(h, "label").map(|l| l.trim().to_string()).unwrap_or_default(),
+            address: text(h, "address").unwrap_or_default(),
+        };
+        NetworkDraft { version: num(v, "version"), hops: at(v, "hops").and_then(Value::as_array).map(|a| a.iter().map(hop).collect()) }
+    }
+}
+
+pub struct NetworkCtx<'a> {
+    pub applied: &'a NetworkStored,
+    /// This device's own addresses (every interface).
+    pub own: &'a [Ipv4Addr],
+    /// The peer's address as known now (tx: the transport settings' host and what it resolved to;
+    /// rx: the configured or the last connected transmitter); host names are ignored.
+    pub peers: &'a [String],
+}
+
+/// One code per field; an address gets the first that applies: invalid → is_self → is_peer →
+/// duplicate (of an earlier item). Allowed in every link state: nothing is set up again.
+pub fn check_network(d: &NetworkDraft, c: &NetworkCtx) -> CheckResult {
+    let mut errors = Vec::new();
+    let mut impacts = Vec::new();
+    let Some(hops) = &d.hops else {
+        errors.push(fe("hops", "required", json!({})));
+        return CheckResult { ok: false, errors, impacts };
+    };
+    if hops.len() > HOPS_MAX {
+        errors.push(fe("hops", "too_many", json!({ "max": HOPS_MAX })));
+    }
+    let peers: Vec<Ipv4Addr> = c.peers.iter().filter_map(|p| p.parse().ok()).collect();
+    for (i, h) in hops.iter().enumerate() {
+        let n = h.label.chars().count();
+        if n == 0 {
+            errors.push(fe(format!("hops[{i}].label"), "required", json!({})));
+        } else if n > HOP_LABEL_MAX {
+            errors.push(fe(format!("hops[{i}].label"), "too_long", json!({ "max": HOP_LABEL_MAX })));
+        }
+        let code = match hop_address(&h.address) {
+            None => Some("invalid"),
+            Some(a) if c.own.contains(&a) => Some("is_self"),
+            Some(a) if peers.contains(&a) => Some("is_peer"),
+            Some(_) if hops[..i].iter().any(|e| e.address == h.address) => Some("duplicate"),
+            Some(_) => None,
+        };
+        if let Some(code) = code {
+            errors.push(fe(format!("hops[{i}].address"), code, json!({})));
+        }
+    }
+    if *hops != c.applied.hops {
+        impacts.push(im("info", "hops_changed", json!({})));
+    }
+    CheckResult { ok: errors.is_empty(), errors, impacts }
+}
+
+/// The settings a valid draft gives (call only when check_network found no errors).
+pub fn apply_network(d: &NetworkDraft, a: &NetworkStored) -> NetworkStored {
+    NetworkStored { version: a.version + 1, hops: d.hops.clone().unwrap_or_else(|| a.hops.clone()) }
 }
 
 // ------------------------------------------------------------------ tests (the mock is the oracle)
@@ -747,6 +843,140 @@ mod tests {
         let mut port = only(json!(5.26));
         port["listen_port"] = json!(9000);
         assert!(!d(port).only_send_limit(&a));
+    }
+
+    fn network_applied() -> NetworkStored {
+        NetworkStored {
+            version: 3,
+            hops: vec![
+                Hop { label: "無線機（送信機側）".into(), address: "192.168.0.65".into() },
+                Hop { label: "無線機（受信機側）".into(), address: "192.168.0.56".into() },
+            ],
+        }
+    }
+
+    fn ndraft(hops: &[(&str, &str)]) -> Value {
+        let hops: Vec<Value> = hops.iter().map(|(l, a)| json!({ "label": l, "address": a })).collect();
+        json!({ "version": 3, "hops": hops })
+    }
+
+    /// (case, draft, errors, impacts); this device is 192.168.0.220, the peer 192.168.0.210.
+    #[test]
+    fn network_rules() {
+        let applied = network_applied();
+        let own = [Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 0, 220), Ipv4Addr::new(100, 64, 1, 2)];
+        let peers = ["192.168.0.210".to_string(), "rx-01.local".to_string()];
+        let ctx = NetworkCtx { applied: &applied, own: &own, peers: &peers };
+        let tx = "無線機（送信機側）";
+        let rx = "無線機（受信機側）";
+        let long = "長".repeat(25);
+        let edge = "長".repeat(24);
+        let five: Vec<(&str, &str)> = vec![("a", "10.0.0.1"), ("b", "10.0.0.2"), ("c", "10.0.0.3"), ("d", "10.0.0.4"), ("e", "10.0.0.5")];
+        let cases: Vec<(&str, Value, &[&str], &[&str])> = vec![
+            ("the applied list", ndraft(&[(tx, "192.168.0.65"), (rx, "192.168.0.56")]), &[], &[]),
+            ("labels are trimmed", ndraft(&[(" 無線機（送信機側）\u{3000}", "192.168.0.65"), (rx, "192.168.0.56")]), &[], &[]),
+            ("a new address", ndraft(&[(tx, "192.168.0.66"), (rx, "192.168.0.56")]), &[], &["info:hops_changed"]),
+            ("another order", ndraft(&[(rx, "192.168.0.56"), (tx, "192.168.0.65")]), &[], &["info:hops_changed"]),
+            ("a new label", ndraft(&[("MS", "192.168.0.65"), (rx, "192.168.0.56")]), &[], &["info:hops_changed"]),
+            ("none", ndraft(&[]), &[], &["info:hops_changed"]),
+            ("four, 24 characters", ndraft(&[(&edge, "10.0.0.1"), ("b", "10.0.0.2"), ("c", "10.0.0.3"), ("d", "10.0.0.4")]), &[], &["info:hops_changed"]),
+            ("five", ndraft(&five), &["hops:too_many"], &["info:hops_changed"]),
+            (
+                "labels",
+                ndraft(&[("", "10.0.0.1"), ("  ", "10.0.0.2"), (&long, "10.0.0.3")]),
+                &["hops[0].label:required", "hops[1].label:required", "hops[2].label:too_long"],
+                &["info:hops_changed"],
+            ),
+            (
+                "not addresses",
+                ndraft(&[("a", "radio.local"), ("b", "192.168.0.300"), ("c", "10.0.0.01"), ("d", " 10.0.0.1"), ("e", ""), ("f", "fe80::1")]),
+                &[
+                    "hops:too_many",
+                    "hops[0].address:invalid",
+                    "hops[1].address:invalid",
+                    "hops[2].address:invalid",
+                    "hops[3].address:invalid",
+                    "hops[4].address:invalid",
+                    "hops[5].address:invalid",
+                ],
+                &["info:hops_changed"],
+            ),
+            (
+                "not a device",
+                ndraft(&[("a", "0.0.0.0"), ("b", "255.255.255.255"), ("c", "127.0.0.1"), ("d", "127.1.2.3")]),
+                &["hops[0].address:invalid", "hops[1].address:invalid", "hops[2].address:invalid", "hops[3].address:invalid"],
+                &["info:hops_changed"],
+            ),
+            (
+                "this device, the peer",
+                ndraft(&[("a", "192.168.0.220"), ("b", "100.64.1.2"), ("c", "192.168.0.210")]),
+                &["hops[0].address:is_self", "hops[1].address:is_self", "hops[2].address:is_peer"],
+                &["info:hops_changed"],
+            ),
+            (
+                "twice: the later one",
+                ndraft(&[(tx, "192.168.0.65"), (rx, "192.168.0.65"), ("c", "192.168.0.210"), ("d", "192.168.0.210")]),
+                &["hops[1].address:duplicate", "hops[2].address:is_peer", "hops[3].address:is_peer"],
+                &["info:hops_changed"],
+            ),
+            (
+                "a label and an address",
+                ndraft(&[("", "x")]),
+                &["hops[0].label:required", "hops[0].address:invalid"],
+                &["info:hops_changed"],
+            ),
+            ("no list", json!({ "version": 3 }), &["hops:required"], &[]),
+            ("null", json!({ "version": 3, "hops": null }), &["hops:required"], &[]),
+            ("not a list", json!({ "version": 3, "hops": { "label": "a", "address": "10.0.0.1" } }), &["hops:required"], &[]),
+            (
+                "mistyped items",
+                json!({ "version": 3, "hops": [5, { "label": 1, "address": 10 }, { "label": "a" }] }),
+                &[
+                    "hops[0].label:required",
+                    "hops[0].address:invalid",
+                    "hops[1].label:required",
+                    "hops[1].address:invalid",
+                    "hops[2].address:invalid",
+                ],
+                &["info:hops_changed"],
+            ),
+        ];
+        for (name, body, errs, imps) in cases {
+            let r = check_network(&NetworkDraft::parse(&body), &ctx);
+            let (e, i) = codes(&r);
+            assert_eq!(e, errs, "{name}: errors");
+            assert_eq!(i, imps, "{name}: impacts");
+            assert_eq!(r.ok, errs.is_empty(), "{name}: ok");
+        }
+        // the params, as the contract has them
+        let r = check_network(&NetworkDraft::parse(&ndraft(&[(&long, "10.0.0.1"), ("b", "10.0.0.2"), ("c", "10.0.0.3"), ("d", "10.0.0.4"), ("e", "10.0.0.5")])), &ctx);
+        assert_eq!(
+            serde_json::to_value(&r.errors).unwrap(),
+            json!([{ "field": "hops", "code": "too_many", "params": { "max": 4 } },
+                   { "field": "hops[0].label", "code": "too_long", "params": { "max": 24 } }])
+        );
+        assert_eq!(serde_json::to_value(&r.impacts).unwrap(), json!([{ "level": "info", "code": "hops_changed" }]));
+        // nothing known about the peer (rx before a transmitter connected)
+        let ctx = NetworkCtx { applied: &applied, own: &[], peers: &[] };
+        assert!(check_network(&NetworkDraft::parse(&ndraft(&[("a", "192.168.0.210")])), &ctx).ok);
+    }
+
+    #[test]
+    fn network_apply() {
+        let applied = network_applied();
+        let d = NetworkDraft::parse(&ndraft(&[(" MS ", "192.168.0.66")]));
+        assert_eq!(d.version, Some(3.0));
+        let next = apply_network(&d, &applied);
+        assert_eq!(next, NetworkStored { version: 4, hops: vec![Hop { label: "MS".into(), address: "192.168.0.66".into() }] });
+        let next = apply_network(&NetworkDraft::parse(&ndraft(&[])), &next);
+        assert_eq!((next.version, next.hops.len()), (5, 0));
+        // what may be stored
+        assert!(hops_sane(&applied.hops) && hops_sane(&[]));
+        assert!(!hops_sane(&[Hop { label: "a".into(), address: "radio.local".into() }]));
+        assert_eq!(hop_address("192.168.0.65"), Some(Ipv4Addr::new(192, 168, 0, 65)));
+        for bad in ["0.0.0.0", "255.255.255.255", "127.0.0.53", "10.0.0.01", "1.2.3", "::1", "localhost"] {
+            assert_eq!(hop_address(bad), None, "{bad}");
+        }
     }
 
     #[test]

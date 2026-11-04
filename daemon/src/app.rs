@@ -4,9 +4,11 @@
 use crate::config::{Config, Role};
 use crate::events::{Ev, EventRing};
 use crate::history::History;
+use crate::link_filter::{self, LinkFilter};
 use crate::media::{self, Real};
 use crate::model::{
-    Alert, Device, InputKind, LinkState, Media, Mode, Peer, Settings, Stats, Status, SIGNAL_FORMAT, TIMEZONE,
+    Alert, Device, InputKind, LinkState, Media, Mode, NetworkStored, Peer, Settings, Stats, Status, SIGNAL_FORMAT,
+    TIMEZONE,
 };
 use crate::nettest::{NetTests, Server, ServerLaunch};
 use crate::preview::{self, Preview};
@@ -55,6 +57,9 @@ pub struct App {
     pub preview: Preview,
     /// The network tests and, on rx, the bandwidth tool's server (independent of the link; nettest.rs).
     pub nettest: NetTests,
+    /// state_dir/link_filter.json for the radio line's filter (link_filter.rs). Its lock is taken
+    /// after the state's, never the other way round.
+    pub link_filter: Arc<LinkFilter>,
     inner: Mutex<Inner>,
     live: broadcast::Sender<Arc<str>>,
     cmd: mpsc::Sender<Cmd>,
@@ -209,6 +214,49 @@ impl App {
         }
     }
 
+    /// 途中の無線機 in effect: the applied list, else device.toml's (version 1).
+    pub fn network(&self, i: &Inner) -> NetworkStored {
+        i.settings.network.clone().unwrap_or_else(|| store::network_defaults(&self.cfg))
+    }
+
+    /// The peer as the radio line's filter and the network check rules see it: tx the transport
+    /// settings' peer host, rx the configured transmitter, else the last one that connected.
+    fn peer_source(&self, i: &Inner) -> Option<String> {
+        let p = match self.cfg.role {
+            Role::Tx => Some(i.settings.transport.peer_host.clone()),
+            Role::Rx => self.cfg.rx.peer_host.clone().or_else(|| i.link.peer_addr.as_ref().map(|(a, _)| a.clone())),
+        };
+        p.filter(|p| !p.is_empty())
+    }
+
+    /// The peer's addresses for the is_peer rule: as given, and what the filter file has (a host
+    /// name looked up, or rx's transmitter from before a restart).
+    pub fn peer_addresses(&self, i: &Inner) -> Vec<String> {
+        let mut v: Vec<String> = self.peer_source(i).into_iter().collect();
+        v.extend(self.link_filter.peer());
+        v
+    }
+
+    /// What link_filter.json is made of now.
+    pub fn filter_inputs(&self, i: &Inner) -> link_filter::Inputs {
+        let video_port = match self.cfg.role {
+            Role::Tx => i.settings.transport.peer_port,
+            Role::Rx => self.cfg.rx.listen_port,
+        };
+        link_filter::Inputs {
+            role: self.cfg.role,
+            peer: self.peer_source(i),
+            video_port,
+            test_port: self.cfg.network_test.port,
+            hosts: self.network(i).hops.into_iter().map(|h| h.address).collect(),
+        }
+    }
+
+    /// Writes link_filter.json if what it is made of changed (the first call always writes).
+    pub fn update_link_filter(&self, i: &Inner) {
+        self.link_filter.update(self.filter_inputs(i));
+    }
+
     /// The developer log line at each start: the send cap the sender gets.
     fn log_send_cap(&self, i: &Inner, plan: &Plan) {
         if self.cfg.role != Role::Tx {
@@ -292,6 +340,8 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     }
     let preview = Preview::start(preview::Launch::from_config(&cfg));
     let nettest = NetTests::new(&cfg, Server::start(ServerLaunch::from_config(&cfg)));
+    let link_filter =
+        Arc::new(LinkFilter::new(Some(state_dir.join(link_filter::FILE_NAME)), cfg.role, link_filter::system_resolver));
     let machine = Machine::new(cfg.role, backend, placeholder_plan(&cfg), sessions, now);
     let inner = Inner {
         link: machine.link.clone(),
@@ -307,12 +357,14 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         firmware,
         preview,
         nettest,
+        link_filter,
         inner: Mutex::new(inner),
         live,
         cmd: cmd_tx,
         settings_path,
     });
     app.emit(&mut app.lock(), Ev::info("device_started"));
+    app.update_link_filter(&app.lock());
 
     let listener = tokio::net::TcpListener::bind(&bind).await.map_err(|e| format!("{bind}: {e}"))?;
     dlog!("{} ({:?}) serving http://{bind}, sessions in {}", app.cfg.id, app.cfg.role, app.cfg.sessions_dir().display());
@@ -474,6 +526,10 @@ fn publish<B: MediaBackend>(app: &App, m: &mut Machine<B>, published: &mut u64, 
         if m.link.rev != *published {
             *published = m.link.rev;
             app.push_status(&i);
+            // rx: a transmitter connected (the filter lets it through); unchanged content is not rewritten
+            if app.cfg.role == Role::Rx {
+                app.update_link_filter(&i);
+            }
         }
     }
     for dir in m.finished.drain(..) {
@@ -519,15 +575,21 @@ pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: N
     let inner = Inner { link, stats: Stats::default(), history: History::default(), events: EventRing::new(0), settings };
     let (cmd, _) = mpsc::channel(1);
     let (live, _) = broadcast::channel(16);
-    Arc::new(App {
+    // written as at a start, only into a state_dir the test chose
+    let filter_path = cfg.state_dir.as_ref().map(|d| d.join(link_filter::FILE_NAME));
+    let link_filter = Arc::new(LinkFilter::new(filter_path, cfg.role, link_filter::system_resolver));
+    let app = Arc::new(App {
         prof: Profile::standard(),
         firmware: "test".into(),
         preview,
         nettest,
+        link_filter,
         inner: Mutex::new(inner),
         live,
         cmd,
         settings_path: cfg.state_dir().join("settings.json"),
         cfg,
-    })
+    });
+    app.update_link_filter(&app.lock());
+    app
 }

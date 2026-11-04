@@ -123,9 +123,11 @@ export function useLive(): LiveState {
  * Unapplied edits survive navigation between screens, so the menu can show
  * "未適用の変更 n 件" badges and nothing typed is lost by opening another page.
  */
+type DraftKey = 'video' | 'transport' | 'network';
+
 interface Drafts {
-  counts: Record<'video' | 'transport', number>;
-  setCount: (key: 'video' | 'transport', n: number) => void;
+  counts: Record<DraftKey, number>;
+  setCount: (key: DraftKey, n: number) => void;
   store: Record<string, unknown>;
   put: (key: string, v: unknown) => void;
 }
@@ -133,16 +135,16 @@ interface Drafts {
 const DraftContext = createContext<Drafts | null>(null);
 
 export function DraftProvider({ children }: { children: ReactNode }) {
-  const [counts, setCounts] = useState<Drafts['counts']>({ video: 0, transport: 0 });
+  const [counts, setCounts] = useState<Drafts['counts']>({ video: 0, transport: 0, network: 0 });
   const [store, setStore] = useState<Record<string, unknown>>({});
-  const setCount = useCallback((key: 'video' | 'transport', n: number) => {
+  const setCount = useCallback((key: DraftKey, n: number) => {
     setCounts((c) => (c[key] === n ? c : { ...c, [key]: n }));
   }, []);
   const put = useCallback((key: string, v: unknown) => setStore((s) => ({ ...s, [key]: v })), []);
 
   // Warn before closing the tab with unapplied edits.
   useEffect(() => {
-    const any = counts.video + counts.transport > 0;
+    const any = counts.video + counts.transport + counts.network > 0;
     if (!any) return;
     const h = (e: BeforeUnloadEvent) => {
       e.preventDefault();

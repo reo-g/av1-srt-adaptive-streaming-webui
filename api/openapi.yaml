@@ -18,6 +18,12 @@ tags:
     description: Transmitter only. A receiver answers 409 unsupported_role.
   - name: transport settings
     description: Transmitter only. A receiver answers 409 unsupported_role.
+  - name: network settings
+    description: |
+      The devices on the way to the peer (途中の無線機), both roles. They are checked by
+      reachability (つながりの確認) after the peer, and the radio line carries, besides the video,
+      only the traffic with them. Allowed any time, also while live: applying does not touch the
+      transmission.
   - name: network test
     description: |
       Checks of the line to the peer, started from the UI. reachability (つながりの確認): both roles,
@@ -180,6 +186,36 @@ paths:
       tags: [transport settings]
       summary: Validate a draft and describe the impact of applying it. Changes nothing.
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/TransportSettingsInput' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CheckResult' } } } }
+  /settings/network:
+    get:
+      tags: [network settings]
+      summary: The devices on the way (途中の無線機)
+      description: |
+        Until the list is first applied, the device's configured list (network_test.hops in its
+        configuration file) is returned; once applied, the stored list is (kept across restarts).
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkSettings' } } } }
+    put:
+      tags: [network settings]
+      summary: Apply. Stored at once; the transmission is not touched (also while live).
+      description: |
+        Checks, in this order: 409 version_conflict → 400 invalid (the same field errors as
+        /check). On success the list is stored, the version goes up, the event
+        network_settings_applied is added and a `settings` message (section network) is pushed.
+        The next reachability test checks the new list, and what the radio line may carry
+        follows it. Returns the new settings.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkSettingsInput' } } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkSettings' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '409': { description: version_conflict, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+  /settings/network/check:
+    post:
+      tags: [network settings]
+      summary: Validate a draft and describe the impact of applying it. Changes nothing.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkSettingsInput' } } } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CheckResult' } } } }
   /network-tests:
@@ -366,7 +402,7 @@ components:
         level: { $ref: '#/components/schemas/Level' }
         code:
           type: string
-          enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done, send_limit_changed]
+          enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done, send_limit_changed, network_settings_applied]
         params:
           $ref: '#/components/schemas/Params'
           description: |
@@ -375,6 +411,7 @@ components:
             listening_started: port. input_detected: format.
             network_test_done: mbps (what arrived, ThroughputResult.throughput_mbps with two decimals), direction (to_peer | from_peer); only after a throughput test that finished.
             send_limit_changed (tx): mbps, from_mbps, source (measured: POST /network-tests/{id}/use; manual: PUT /settings/transport).
+            network_settings_applied: no params (PUT /settings/network).
     BitrateReason:
       type: string
       enum: [loss, delay, recovered, manual]
@@ -386,8 +423,14 @@ components:
       type: object
       required: [field, code]
       properties:
-        field: { type: string, examples: [encode.manual.bitrate_mbps, delay.profile, send_limit.mbps] }
-        code: { type: string, enum: [out_of_range, required, too_short, too_long, invalid] }
+        field: { type: string, description: 'dotted path of the input field; list items by index from 0', examples: [encode.manual.bitrate_mbps, delay.profile, send_limit.mbps, 'hops[1].address'] }
+        code:
+          type: string
+          enum: [out_of_range, required, too_short, too_long, too_many, invalid, duplicate, is_self, is_peer]
+          description: |
+            too_many: a list is longer than params.max. duplicate: the same value as an earlier item.
+            is_self: an address of this device. is_peer: the peer's address. (The last three for
+            hops[i].address, see NetworkSettingsInput.)
         params: { $ref: '#/components/schemas/Params' }
     Impact:
       type: object
@@ -396,7 +439,7 @@ components:
         level: { type: string, enum: [warn, ok, info] }
         code:
           type: string
-          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, takes_effect_next_start]
+          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, takes_effect_next_start, hops_changed]
         params:
           $ref: '#/components/schemas/Params'
           description: |
@@ -405,6 +448,7 @@ components:
             switch_no_gap: a new bitrate or mode is taken over without a gap.
             bitrate_near_bandwidth: bandwidth_mbps (the fixed bitrate is above 0.8 × the estimated capacity).
             takes_effect_next_start (info): send_limit changes and nothing else does, while the link is not stopped (live, connecting, reconnecting); it is stored and used from the next start (retries keep the cap they started with).
+            hops_changed (info, network settings): the list differs from the applied one; reachability and what the radio line may carry follow the new list. Nothing else is affected (the transmission is not touched).
     CheckResult:
       type: object
       required: [ok, errors, impacts]
@@ -640,6 +684,36 @@ components:
         received_at: { type: [string, 'null'], format: date-time }
         peer_id: { type: [string, 'null'] }
         rows: { type: array, items: { $ref: '#/components/schemas/CompareRow' } }
+    Hop:
+      type: object
+      description: A device on the way to the peer (途中の無線機), named by the operator.
+      required: [label, address]
+      properties:
+        label: { type: string, minLength: 1, maxLength: 24, description: 'shown in つながりの確認; 1–24 characters (Unicode code points) after trimming', examples: ['無線機（送信機側）'] }
+        address: { type: string, description: 'IPv4 address, dotted quad; no host names', examples: [192.168.0.65] }
+    NetworkSettings:
+      type: object
+      required: [version, hops]
+      properties:
+        version: { type: integer }
+        hops: { type: array, maxItems: 4, items: { $ref: '#/components/schemas/Hop' }, description: 'in the order つながりの確認 shows them, after the peer' }
+    NetworkSettingsInput:
+      type: object
+      description: |
+        The whole list (it replaces the applied one). Rules, as field errors (index i from 0):
+        hops: more than 4 → too_many (params max 4).
+        hops[i].label: empty after trimming → required; more than 24 characters → too_long (params max 24).
+        The device stores the label trimmed.
+        hops[i].address: one code per field, the first that applies, in this order:
+        invalid (not a dotted-quad IPv4 address, or 0.0.0.0, 255.255.255.255, 127.0.0.0/8; a host
+        name is invalid too) → is_self (an address of this device) → is_peer (the peer's address:
+        on tx the transport settings' peer host, on rx the configured or the last connected
+        transmitter) → duplicate (the same address as an earlier item; the later item gets it).
+        Impact: hops_changed (info) when the list differs from the applied one.
+      required: [version, hops]
+      properties:
+        version: { type: integer }
+        hops: { type: array, items: { $ref: '#/components/schemas/Hop' } }
     NetworkTestKind:
       type: string
       enum: [reachability, throughput]
@@ -678,8 +752,8 @@ components:
       type: object
       required: [kind, label, address, sent, received, rtt_min_ms, rtt_avg_ms, rtt_max_ms]
       properties:
-        kind: { type: string, enum: [peer, hop], description: 'peer: the other device (the UI names it 受信機 / 送信機); hop: a device on the way, named by label' }
-        label: { type: [string, 'null'], description: 'hop: the name set on the device; peer: null', examples: ['無線機（送信機側）'] }
+        kind: { type: string, enum: [peer, hop], description: 'peer: the other device (the UI names it 受信機 / 送信機); hop: a device on the way (NetworkSettings.hops), named by label' }
+        label: { type: [string, 'null'], description: 'hop: Hop.label; peer: null', examples: ['無線機（送信機側）'] }
         address: { type: string, examples: [192.168.0.65] }
         sent: { type: integer, examples: [10] }
         received: { type: integer, examples: [10] }
@@ -689,7 +763,8 @@ components:
     ReachabilityResult:
       type: object
       description: |
-        The peer first, then the devices on the way in their configured order. The peer is left out
+        The peer first, then the devices on the way in the order of NetworkSettings.hops (the list
+        applied when the test started). The peer is left out
         when its address is not known (rx before any transmitter connected, no address configured);
         the list can be empty.
       required: [targets]

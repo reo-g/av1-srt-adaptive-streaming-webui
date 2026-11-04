@@ -1244,6 +1244,170 @@ a:hover {
 .nt-sum .chip-outline {
   white-space: nowrap;
 }
+/* 途中の無線機: editable rows (number, name, address, delete), a header on wide screens */
+.hops {
+  max-width: 760px;
+}
+.hops-head,
+.hop {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) auto;
+  column-gap: 12px;
+}
+.hops-head {
+  padding: 0 12px 6px;
+  border-bottom: 2px solid var(--ink);
+  font-size: 13px;
+  color: var(--sub);
+}
+.hop {
+  grid-template-areas:
+    'no label address act'
+    '. applied applied applied';
+  align-items: start;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--rule);
+}
+.hop.changed {
+  background: var(--accent-tint);
+}
+.hop.invalid {
+  background: var(--err-tint);
+}
+.hop-no {
+  grid-area: no;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding-top: 8px;
+  font-weight: 600;
+  line-height: 24px;
+}
+.hop-no .chip-changed {
+  white-space: nowrap;
+}
+.hop-label {
+  grid-area: label;
+  min-width: 0;
+}
+.hop-address {
+  grid-area: address;
+  min-width: 0;
+}
+.hop-act {
+  grid-area: act;
+  padding-top: 4px;
+}
+.hop-applied {
+  grid-area: applied;
+}
+.hop .input {
+  width: 100%;
+}
+/* the field names: the header says them on wide screens */
+.hop-lab {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  margin: -1px;
+  white-space: nowrap;
+}
+.hop-empty {
+  max-width: 760px;
+  margin: 0;
+  padding: 12px 16px;
+  border-radius: 4px;
+  background: var(--side);
+  color: var(--sub);
+}
+.hop-gone {
+  max-width: 760px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.hop-gone li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 10px 12px 10px 68px;
+  border-bottom: 1px solid var(--rule);
+  background: var(--accent-tint);
+  color: var(--sub);
+}
+.hop-add {
+  margin-top: 12px;
+}
+.hop-pending {
+  max-width: 760px;
+  margin-top: 16px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+.hop-pending-title {
+  margin: 0;
+  font-weight: 600;
+}
+.hop-pending h3 {
+  margin: 14px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.hop-pending .pending-actions {
+  max-width: 480px;
+  margin-top: 16px;
+}
+.hop-invalid {
+  margin: 14px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--err-text);
+}
+@media (max-width: 640px) {
+  .hops-head {
+    display: none;
+  }
+  .hops {
+    border-top: 1px solid var(--rule);
+  }
+  .hop {
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    grid-template-areas:
+      'no label act'
+      'no address address'
+      '. applied applied';
+    row-gap: 10px;
+    column-gap: 8px;
+    padding: 12px 8px;
+  }
+  .hop-no {
+    padding-top: 0;
+  }
+  /* level with the name field, under its label */
+  .hop-act {
+    padding-top: 27px;
+  }
+  .hop-lab {
+    position: static;
+    display: block;
+    width: auto;
+    height: auto;
+    overflow: visible;
+    clip: auto;
+    margin: 0 0 2px;
+    white-space: normal;
+    font-size: 13px;
+    color: var(--sub);
+  }
+  .hop-gone li {
+    padding-left: 52px;
+  }
+}
 
 /* ------------------------------------------------------------ full screen */
 .fs {

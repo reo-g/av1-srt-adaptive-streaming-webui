@@ -1,7 +1,9 @@
 //! Applied settings on disk: settings.json, mode 0600, replaced atomically (tmp + fsync + rename).
 
 use crate::config::Config;
-use crate::model::{DelayProfile, InputKind, Mode, SendLimit, Settings, TransportStored, VideoInput, VideoStored};
+use crate::model::{
+    DelayProfile, InputKind, Mode, NetworkStored, SendLimit, Settings, TransportStored, VideoInput, VideoStored,
+};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -26,12 +28,23 @@ pub fn defaults(cfg: &Config) -> Settings {
             cipher: "none".into(),
             send_limit: SendLimit::default(),
         },
+        // device.toml's list until one is applied (network_defaults)
+        network: None,
     }
+}
+
+/// 途中の無線機 before a list was applied: device.toml's `[[network_test.hops]]`, version 1.
+pub fn network_defaults(cfg: &Config) -> NetworkStored {
+    NetworkStored { version: 1, hops: cfg.network_test.hops.clone() }
 }
 
 pub fn load(path: &Path) -> Option<Settings> {
     let mut s: Settings = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
     s.transport.send_limit = s.transport.send_limit.sane();
+    // a list edited by hand that breaks the rules: device.toml's instead
+    if s.network.as_ref().is_some_and(|n| !crate::check::hops_sane(&n.hops)) {
+        s.network = None;
+    }
     Some(s)
 }
 
@@ -70,6 +83,53 @@ mod tests {
         assert_eq!(load(&path), Some(s.clone()));
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(!path.with_extension("json.tmp").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn network_on_disk() {
+        use crate::config::Hop;
+        let dir = std::env::temp_dir().join(format!("ctrld-store-network-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let cfg = Config::parse(
+            "id = \"TX\"\nrole = \"tx\"\n[tx]\npeer_host = \"10.1.1.1\"\n[media]\nrepo = \"/m\"\n\
+             [[network_test.hops]]\nlabel = \" 無線機 \"\naddress = \"192.168.0.65\"\n",
+        )
+        .unwrap();
+        let hop = |l: &str, a: &str| Hop { label: l.into(), address: a.into() };
+        assert_eq!(network_defaults(&cfg), NetworkStored { version: 1, hops: vec![hop("無線機", "192.168.0.65")] });
+        // nothing applied yet: not written, so device.toml's list stays in effect
+        let mut s = defaults(&cfg);
+        assert_eq!(s.network, None);
+        save(&path, &s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v.get("network").is_none(), "{v}");
+        assert_eq!(load(&path).unwrap().network, None);
+        // applied: kept as it is, an empty list too
+        for hops in [vec![hop("無線機（送信機側）", "192.168.0.65"), hop("BS", "192.168.0.56")], vec![]] {
+            s.network = Some(NetworkStored { version: 4, hops });
+            save(&path, &s).unwrap();
+            assert_eq!(load(&path), Some(s.clone()));
+        }
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["network"], serde_json::json!({ "version": 4, "hops": [] }));
+        // edited by hand against the rules: device.toml's list again (the rest is kept)
+        for bad in [
+            vec![hop("x", "radio.local")],
+            vec![hop("", "192.168.0.65")],
+            vec![hop(" x", "192.168.0.65")],
+            vec![hop("x", "127.0.0.1")],
+            vec![hop("x", "192.168.0.65"), hop("y", "192.168.0.65")],
+            vec![hop(&"長".repeat(25), "192.168.0.65")],
+            (1..=5).map(|i| hop("x", &format!("10.0.0.{i}"))).collect(),
+        ] {
+            s.network = Some(NetworkStored { version: 4, hops: bad.clone() });
+            s.video.version = 9;
+            save(&path, &s).unwrap();
+            let back = load(&path).unwrap();
+            assert_eq!((back.network, back.video.version), (None, 9), "{bad:?}");
+        }
         fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -206,15 +206,19 @@ pub struct NetworkTest {
     /// The rate of the steady mode that is gone (read so that an older device.toml still loads; not used).
     #[serde(rename = "steady_rate_mbps")]
     pub old_steady_rate_mbps: Option<toml::Value>,
-    /// Devices on the way to the peer (e.g. the radios), checked after the peer in this order.
+    /// Devices on the way to the peer (e.g. the radios), checked after the peer in this order:
+    /// the initial 途中の無線機 until a list is applied in the UI (then the stored one is used).
+    /// The same rules as the screen's: at most 4, a label of 1–24 characters, an IPv4 address.
     pub hops: Vec<Hop>,
 }
 
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// One device on the way (device.toml and settings.json; the contract's Hop).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hop {
-    /// Shown in the UI as it is (e.g. "無線機（送信機側）").
+    /// Shown in the UI as it is (e.g. "無線機（送信機側）"), trimmed.
     pub label: String,
+    /// A dotted-quad IPv4 address (no host names: the radio line's filter needs addresses).
     pub address: String,
 }
 
@@ -298,10 +302,24 @@ impl Config {
         if !(lo..=hi).contains(&n.saturate_mbps) {
             return Err(format!("network_test.saturate_mbps must be {lo}–{hi}"));
         }
-        for h in &n.hops {
-            if h.label.trim().is_empty() || !address_ok(&h.address) {
-                return Err(format!("network_test.hops: \"{}\" needs a label and a host name or address", h.address));
+        let (max_hops, max_label) = (crate::check::HOPS_MAX, crate::check::HOP_LABEL_MAX);
+        if n.hops.len() > max_hops {
+            return Err(format!("network_test.hops: at most {max_hops}"));
+        }
+        for h in &mut c.network_test.hops {
+            h.label = h.label.trim().to_string();
+            let len = h.label.chars().count();
+            if len == 0 || len > max_label || crate::check::hop_address(&h.address).is_none() {
+                return Err(format!(
+                    "network_test.hops: \"{}\" needs a label of 1–{max_label} characters and an IPv4 address \
+                     (not 0.0.0.0, 255.255.255.255 or 127.x.x.x; no host names)",
+                    h.address
+                ));
             }
+        }
+        let hops = &c.network_test.hops;
+        if let Some(h) = hops.iter().enumerate().find(|(i, h)| hops[..*i].iter().any(|e| e.address == h.address)) {
+            return Err(format!("network_test.hops: \"{}\" is listed twice", h.1.address));
         }
         c.media.repo = expand(&c.media.repo);
         c.media.bridge_cwd = c.media.bridge_cwd.as_deref().map(expand);
@@ -430,6 +448,12 @@ mod tests {
         }
         let labels: Vec<_> = c.network_test.hops.iter().map(|h| (h.label.as_str(), h.address.as_str())).collect();
         assert_eq!(labels, [("無線機（送信機側）", "192.168.0.65"), ("無線機（受信機側）", "192.168.0.56")]);
+        // labels are trimmed; 24 characters and four hops are fine
+        let four: String = (1..=4)
+            .map(|i| format!("[[network_test.hops]]\nlabel = \" {} \"\naddress = \"10.0.0.{i}\"\n", "長".repeat(24)))
+            .collect();
+        let c = Config::parse(&format!("{rx}{four}")).unwrap();
+        assert_eq!((c.network_test.hops.len(), c.network_test.hops[0].label.chars().count()), (4, 24));
         assert!(Config::parse(&format!("{rx}[rx]\npeer_host = \"\"\n")).unwrap().rx.peer_host.is_none());
 
         for bad in [
@@ -442,6 +466,17 @@ mod tests {
             "[[network_test.hops]]\nlabel = \"\"\naddress = \"192.168.0.65\"\n",
             "[[network_test.hops]]\nlabel = \"x\"\naddress = \"-c 5\"\n",
             "[[network_test.hops]]\nlabel = \"x\"\n",
+            // the screen's rules: IPv4 addresses (the radio line's filter needs them), labels of 1–24
+            // characters, at most 4, no duplicates
+            "[[network_test.hops]]\nlabel = \"x\"\naddress = \"radio.local\"\n",
+            "[[network_test.hops]]\nlabel = \"x\"\naddress = \"127.0.0.1\"\n",
+            "[[network_test.hops]]\nlabel = \"x\"\naddress = \"0.0.0.0\"\n",
+            "[[network_test.hops]]\nlabel = \"  \"\naddress = \"10.0.0.1\"\n",
+            "[[network_test.hops]]\nlabel = \"1234567890123456789012345\"\naddress = \"10.0.0.1\"\n",
+            "[[network_test.hops]]\nlabel = \"a\"\naddress = \"10.0.0.1\"\n[[network_test.hops]]\nlabel = \"b\"\naddress = \"10.0.0.1\"\n",
+            "[[network_test.hops]]\nlabel = \"a\"\naddress = \"10.0.0.1\"\n[[network_test.hops]]\nlabel = \"b\"\naddress = \"10.0.0.2\"\n\
+             [[network_test.hops]]\nlabel = \"c\"\naddress = \"10.0.0.3\"\n[[network_test.hops]]\nlabel = \"d\"\naddress = \"10.0.0.4\"\n\
+             [[network_test.hops]]\nlabel = \"e\"\naddress = \"10.0.0.5\"\n",
             "[network_test]\nduration_s = 10\n",
         ] {
             assert!(Config::parse(&format!("{rx}{bad}")).is_err(), "{bad}");

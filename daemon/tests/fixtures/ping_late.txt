@@ -1,0 +1,15 @@
+PING 192.168.0.56 (192.168.0.56) 56(84) bytes of data.
+64 bytes from 192.168.0.56: icmp_seq=1 ttl=64 time=75.2 ms
+64 bytes from 192.168.0.56: icmp_seq=2 ttl=64 time=74.8 ms
+64 bytes from 192.168.0.56: icmp_seq=3 ttl=64 time=76.1 ms
+64 bytes from 192.168.0.56: icmp_seq=5 ttl=64 time=75.0 ms
+64 bytes from 192.168.0.56: icmp_seq=6 ttl=64 time=74.6 ms
+64 bytes from 192.168.0.56: icmp_seq=4 ttl=64 time=612 ms
+64 bytes from 192.168.0.56: icmp_seq=8 ttl=64 time=75.9 ms
+64 bytes from 192.168.0.56: icmp_seq=9 ttl=64 time=74.9 ms
+64 bytes from 192.168.0.56: icmp_seq=10 ttl=64 time=75.3 ms
+64 bytes from 192.168.0.56: icmp_seq=11 ttl=64 time=75.1 ms
+
+--- 192.168.0.56 ping statistics ---
+11 packets transmitted, 10 received, 9.09091% packet loss, time 2003ms
+rtt min/avg/max/mdev = 74.600/128.890/612.000/161.037 ms

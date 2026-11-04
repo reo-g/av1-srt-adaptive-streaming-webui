@@ -3,14 +3,14 @@
 
 use crate::app::{base_name, App, CmdKind, Inner};
 use crate::check::{
-    apply_transport, apply_video, check_transport, check_video, gap_s, TransportCtx, TransportDraft, VideoCtx,
-    VideoDraft, BITRATE_RANGE, CIPHERS, MODES,
+    apply_network, apply_transport, apply_video, check_network, check_transport, check_video, gap_s, NetworkCtx,
+    NetworkDraft, TransportCtx, TransportDraft, VideoCtx, VideoDraft, BITRATE_RANGE, CIPHERS, MODES,
 };
 use crate::config::Role;
 use crate::events::Ev;
 use crate::history::INTERVAL_S;
 use crate::media;
-use crate::model::{DelayProfile, LimitSource, LinkState, SendLimit, TransportStored, SIGNAL_FORMAT};
+use crate::model::{DelayProfile, LimitSource, LinkState, NetworkStored, SendLimit, TransportStored, SIGNAL_FORMAT};
 use crate::nettest;
 use crate::preview::{Refusal, OFFER_LIMIT};
 use crate::util::{iso_jst, now_ms};
@@ -207,6 +207,8 @@ fn request(app: &App, method: &str, path: &str, uri: &Uri, body: &Bytes) -> Resp
             let limit = query(uri, "limit").map_or(20, |l| (l as usize).min(crate::events::CAPACITY));
             ok(&app.lock().events.latest(limit))
         }
+        // 途中の無線機: both roles
+        (m, p) if p == "/settings/network" || p.starts_with("/settings/network/") => network_settings(app, m, p, body),
         (m, p) if p.starts_with("/settings/") || p == "/transport/compare" => {
             if !tx {
                 return error(StatusCode::CONFLICT, "unsupported_role");
@@ -269,6 +271,57 @@ fn settings(app: &App, method: &str, path: &str, body: &Bytes) -> Response {
         ("GET", "/transport/compare") => ok(&compare(&app.lock().settings.transport)),
         _ => not_found(),
     }
+}
+
+/// 途中の無線機 (both roles). Allowed in every link state: applying stores the list, the next
+/// reachability test checks it and link_filter.json follows it; the transmission is not touched.
+fn network_settings(app: &App, method: &str, path: &str, body: &Bytes) -> Response {
+    match (method, path) {
+        ("GET", "/settings/network") => ok(&network_view(&app.network(&app.lock()))),
+        ("POST", "/settings/network/check") => {
+            let Some(v) = body_json(body) else { return bad_body() };
+            let own = crate::util::local_ipv4s();
+            let i = app.lock();
+            let (applied, peers) = (app.network(&i), app.peer_addresses(&i));
+            ok(&check_network(&NetworkDraft::parse(&v), &NetworkCtx { applied: &applied, own: &own, peers: &peers }))
+        }
+        ("PUT", "/settings/network") => put_network(app, body),
+        _ => not_found(),
+    }
+}
+
+fn network_view(n: &NetworkStored) -> Value {
+    json!({ "version": n.version, "hops": n.hops })
+}
+
+/// 409 version_conflict → 400 invalid; answers the new NetworkSettings.
+fn put_network(app: &App, body: &Bytes) -> Response {
+    let Some(v) = body_json(body) else { return bad_body() };
+    let d = NetworkDraft::parse(&v);
+    let own = crate::util::local_ipv4s();
+    let mut i = app.lock();
+    let applied = app.network(&i);
+    if d.version != Some(applied.version as f64) {
+        return error(StatusCode::CONFLICT, "version_conflict");
+    }
+    let peers = app.peer_addresses(&i);
+    let result = check_network(&d, &NetworkCtx { applied: &applied, own: &own, peers: &peers });
+    if !result.ok {
+        return json_response(StatusCode::BAD_REQUEST, &json!({ "error": { "code": "invalid", "errors": result.errors } }));
+    }
+    let mut next = i.settings.clone();
+    next.network = Some(apply_network(&d, &applied));
+    if let Err(e) = app.save_settings(&next) {
+        dlog!("settings: cannot save: {e}");
+    }
+    i.settings = next;
+    let n = app.network(&i);
+    let list: Vec<String> = n.hops.iter().map(|h| format!("{} {}", h.label, h.address)).collect();
+    dlog!("network settings v{}: [{}]", n.version, list.join(", "));
+    app.emit(&mut i, Ev::info("network_settings_applied"));
+    app.send(&json!({ "type": "settings", "section": "network", "version": n.version }));
+    app.update_link_filter(&i);
+    ok(&network_view(&n))
 }
 
 /// The inputs the device offers now (read from the system, outside the state lock).
@@ -438,6 +491,8 @@ fn put_transport(app: &App, body: &Bytes) -> Response {
     }
     app.send(&json!({ "type": "settings", "section": "transport", "version": i.settings.transport.version }));
     app.push_status(&i);
+    // the radio line's filter follows the peer (host and port)
+    app.update_link_filter(&i);
     ok(&json!({ "settings": transport_view(&i.settings.transport), "applied_at": iso_jst(now_ms()), "impacts": result.impacts }))
 }
 
@@ -635,7 +690,7 @@ mod tests {
         assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("done")));
         assert_eq!(v["result"]["targets"][0], json!({
             "kind": "peer", "label": null, "address": "10.0.0.2", "sent": 10, "received": 10,
-            "rtt_min_ms": 0.0, "rtt_avg_ms": 0.01, "rtt_max_ms": 0.03,
+            "rtt_min_ms": 0.01, "rtt_avg_ms": 0.02, "rtt_max_ms": 0.05,
         }));
         assert_eq!(v["finished_at"].as_str(), t.finished_at.as_deref());
 
@@ -827,6 +882,164 @@ mod tests {
         body.as_object_mut().unwrap().remove("send_limit");
         let (s, _, v) = put(body).await;
         assert_eq!((s, &v["settings"]["send_limit"]["mbps"]), (StatusCode::OK, &json!(4.0)), "left out: kept");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    const RADIOS: &str = "[[network_test.hops]]\nlabel = \"無線機（送信機側）\"\naddress = \"198.51.100.65\"\n\
+                          [[network_test.hops]]\nlabel = \"無線機（受信機側）\"\naddress = \"198.51.100.56\"\n";
+
+    fn filter_file(dir: &Path) -> Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.join("link_filter.json")).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn network_settings_on_the_transmitter() {
+        use crate::config::Role;
+        let (app, dir) = crate::nettest::stub_app("http-net", Role::Tx, LinkState::Live, RADIOS);
+        let check = |body: Value| call(&app, Method::POST, "/api/v1/settings/network/check", body.to_string());
+        let put = |body: Value| call(&app, Method::PUT, "/api/v1/settings/network", body.to_string());
+        let hops = |list: &[(&str, &str)]| -> Value { list.iter().map(|(l, a)| json!({ "label": l, "address": a })).collect() };
+        let configured = hops(&[("無線機（送信機側）", "198.51.100.65"), ("無線機（受信機側）", "198.51.100.56")]);
+
+        // nothing applied yet: device.toml's list, version 1; the filter file was written at the start
+        let (s, h, v) = call(&app, Method::GET, "/api/v1/settings/network", "").await;
+        assert_eq!((s, &h[CACHE_CONTROL]), (StatusCode::OK, &"no-store".parse::<axum::http::HeaderValue>().unwrap()));
+        assert_eq!(v, json!({ "version": 1, "hops": configured }));
+        assert_eq!(
+            filter_file(&dir),
+            json!({ "version": 1, "role": "tx", "peer": "10.0.0.2", "video_port": 60021, "test_port": 60022, "hosts": ["198.51.100.65", "198.51.100.56"] })
+        );
+
+        // check: changes nothing; the peer and this device's own addresses are refused
+        let (s, _, v) = check(json!({ "version": 1, "hops": configured })).await;
+        assert_eq!((s, v), (StatusCode::OK, json!({ "ok": true, "errors": [], "impacts": [] })));
+        let draft = hops(&[("MS", "198.51.100.66"), ("受信機", "10.0.0.2")]);
+        let (_, _, v) = check(json!({ "version": 1, "hops": draft })).await;
+        assert_eq!(
+            v,
+            json!({ "ok": false, "errors": [{ "field": "hops[1].address", "code": "is_peer" }], "impacts": [{ "level": "info", "code": "hops_changed" }] })
+        );
+        if let Some(own) = crate::util::local_ipv4s().into_iter().find(|a| !a.is_loopback()) {
+            let (_, _, v) = check(json!({ "version": 1, "hops": hops(&[("自分", &own.to_string())]) })).await;
+            assert_eq!(v["errors"], json!([{ "field": "hops[0].address", "code": "is_self" }]), "{own}");
+        }
+        let (s, _, v) = check(json!("x")).await;
+        assert_eq!((s, &v["errors"]), (StatusCode::OK, &json!([{ "field": "hops", "code": "required" }])));
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/settings/network/check", "not json").await;
+        assert_eq!((s, v), (StatusCode::BAD_REQUEST, json!({ "error": { "code": "invalid", "errors": [] } })));
+        assert_eq!(call(&app, Method::GET, "/api/v1/settings/network", "").await.2["version"], 1);
+
+        // apply while live: the transmission is not touched (no busy), the list is stored
+        let mut live = app.subscribe();
+        let (s, _, v) = put(json!({ "version": 1, "hops": draft })).await;
+        assert_eq!((s, code(&v)), (StatusCode::BAD_REQUEST, "invalid"));
+        assert_eq!(v["error"]["errors"], json!([{ "field": "hops[1].address", "code": "is_peer" }]));
+        let next = hops(&[(" MS ", "198.51.100.66"), ("BS", "198.51.100.56"), ("中継", "203.0.113.9")]);
+        let (s, _, v) = put(json!({ "version": 1, "hops": next })).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        let applied = json!({ "version": 2, "hops": hops(&[("MS", "198.51.100.66"), ("BS", "198.51.100.56"), ("中継", "203.0.113.9")]) });
+        assert_eq!(v, applied, "the new NetworkSettings, labels trimmed");
+        assert_eq!(call(&app, Method::GET, "/api/v1/settings/network", "").await.2, applied);
+        assert_eq!(app.lock().link.state, LinkState::Live);
+        let ev = app.lock().events.latest(1);
+        assert_eq!((ev[0].code, ev[0].level, ev[0].params.is_empty()), ("network_settings_applied", "info", true));
+        let mut msgs = Vec::new();
+        while let Ok(m) = live.try_recv() {
+            msgs.push(serde_json::from_str::<Value>(&m).unwrap());
+        }
+        assert!(msgs.contains(&json!({ "type": "settings", "section": "network", "version": 2 })), "{msgs:?}");
+        // the filter file follows
+        assert_eq!(filter_file(&dir)["hosts"], json!(["198.51.100.66", "198.51.100.56", "203.0.113.9"]));
+        // a draft made from the old version
+        let (s, _, v) = put(json!({ "version": 1, "hops": [] })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "version_conflict"));
+        let (s, _, v) = put(json!({ "hops": [] })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "version_conflict"), "the version first");
+
+        // kept across a restart: the stored list wins over device.toml's
+        let saved = crate::store::load(&dir.join("settings.json")).unwrap();
+        assert_eq!(serde_json::to_value(&saved.network).unwrap(), applied);
+        let again = crate::app::test_app_with(
+            app.cfg.clone(),
+            Preview::start(None),
+            LinkState::Stopped,
+            crate::nettest::NetTests::new(&app.cfg, crate::nettest::Server::start(None)),
+        );
+        assert_eq!(call(&again, Method::GET, "/api/v1/settings/network", "").await.2, applied);
+        assert_eq!(filter_file(&dir)["hosts"], json!(["198.51.100.66", "198.51.100.56", "203.0.113.9"]));
+        // the next reachability test checks the stored list
+        let (_, _, t) = call(&again, Method::POST, "/api/v1/network-tests", json!({ "kind": "reachability" }).to_string()).await;
+        let t = crate::nettest::wait_done(&again, t["id"].as_str().unwrap()).await;
+        let checked: Vec<String> = match serde_json::to_value(&t.result).unwrap()["targets"].as_array() {
+            Some(a) => a.iter().map(|t| t["address"].as_str().unwrap().to_string()).collect(),
+            None => panic!("{t:?}"),
+        };
+        assert_eq!(checked, ["10.0.0.2", "198.51.100.66", "198.51.100.56", "203.0.113.9"]);
+        // an empty list is a list too
+        let (s, _, v) = put(json!({ "version": 2, "hops": [] })).await;
+        assert_eq!((s, v), (StatusCode::OK, json!({ "version": 3, "hops": [] })));
+        assert_eq!(filter_file(&dir)["hosts"], json!([]));
+
+        // a new peer in the transport settings: the filter follows (host and port)
+        app.lock().link.state = LinkState::Stopped;
+        let (_, _, view) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        let body = json!({ "version": view["version"], "mode": "outbound", "peer": { "host": "10.0.0.3", "port": 60031 },
+                           "listen_port": view["listen_port"], "delay": { "profile": "standard" }, "encryption": { "cipher": "none" } });
+        let (s, _, v) = call(&app, Method::PUT, "/api/v1/settings/transport", body.to_string()).await;
+        assert_eq!(s, StatusCode::OK, "{v}");
+        assert_eq!(
+            filter_file(&dir),
+            json!({ "version": 1, "role": "tx", "peer": "10.0.0.3", "video_port": 60031, "test_port": 60022, "hosts": [] })
+        );
+        // and the check now refuses the new peer
+        let (_, _, v) = check(json!({ "version": 3, "hops": hops(&[("x", "10.0.0.3"), ("y", "10.0.0.2")]) })).await;
+        assert_eq!(v["errors"], json!([{ "field": "hops[0].address", "code": "is_peer" }]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn network_settings_on_the_receiver() {
+        use crate::config::Role;
+        let (app, dir) = crate::nettest::stub_app("http-net-rx", Role::Rx, LinkState::Listening, RADIOS);
+        // both roles (the transport settings stay the transmitter's)
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/settings/network", "").await;
+        assert_eq!((s, v["version"].clone(), v["hops"].as_array().map(Vec::len)), (StatusCode::OK, json!(1), Some(2)));
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/settings/transport", "").await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "unsupported_role"));
+        // no transmitter yet: no peer in the filter; the listen port is the video's
+        assert_eq!(
+            filter_file(&dir),
+            json!({ "version": 1, "role": "rx", "peer": null, "video_port": 60021, "test_port": 60022, "hosts": ["198.51.100.65", "198.51.100.56"] })
+        );
+        let put = |body: Value| call(&app, Method::PUT, "/api/v1/settings/network", body.to_string());
+        let (s, _, v) = put(json!({ "version": 1, "hops": [{ "label": "BS", "address": "192.168.0.220" }] })).await;
+        assert_eq!(s, StatusCode::OK, "nothing known about the transmitter yet: {v}");
+        // one connects (what publish does on a status change): the filter lets it through, and it is the peer
+        app.lock().link.peer_addr = Some(("192.168.0.221".into(), 51234));
+        app.update_link_filter(&app.lock());
+        assert_eq!((filter_file(&dir)["peer"].clone(), filter_file(&dir)["hosts"].clone()), (json!("192.168.0.221"), json!(["192.168.0.220"])));
+        let (s, _, v) = put(json!({ "version": 2, "hops": [{ "label": "TX", "address": "192.168.0.221" }] })).await;
+        assert_eq!((s, &v["error"]["errors"]), (StatusCode::BAD_REQUEST, &json!([{ "field": "hops[0].address", "code": "is_peer" }])));
+        // after a restart, before it connects again: still that one (from the previous file)
+        let again = crate::app::test_app_with(
+            app.cfg.clone(),
+            Preview::start(None),
+            LinkState::Listening,
+            crate::nettest::NetTests::new(&app.cfg, crate::nettest::Server::start(None)),
+        );
+        assert_eq!(filter_file(&dir)["peer"], "192.168.0.221");
+        let (_, _, v) = call(&again, Method::POST, "/api/v1/settings/network/check", json!({ "version": 2, "hops": [{ "label": "TX", "address": "192.168.0.221" }] }).to_string()).await;
+        assert_eq!(v["errors"][0]["code"], "is_peer");
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // the configured transmitter wins over the one that connected
+        let (app, dir) = crate::nettest::stub_app("http-net-rx-peer", Role::Rx, LinkState::Live, "[rx]\npeer_host = \"192.168.0.230\"\nlisten_port = 61000\n");
+        app.lock().link.peer_addr = Some(("192.168.0.221".into(), 51234));
+        app.update_link_filter(&app.lock());
+        assert_eq!(
+            filter_file(&dir),
+            json!({ "version": 1, "role": "rx", "peer": "192.168.0.230", "video_port": 61000, "test_port": 60022, "hosts": [] })
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

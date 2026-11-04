@@ -31,6 +31,8 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | POST | `/settings/transport/check` | 下書きの検証と影響 |
 | GET | `/settings/transport/options` | 接続方法・暗号化・遅延の選択肢（いまは接続方法 `outbound`、暗号化 `none`、遅延は標準のみ。低遅延は `available: false`） |
 | GET | `/transport/compare` | 送信機と受信機の設定の比較 |
+| GET / PUT | `/settings/network` | 途中の無線機（送信機・受信機）：つながりの確認で確かめ、無線の回線で通信してよい機器の一覧（名前とアドレス、4 台まで） |
+| POST | `/settings/network/check` | 下書きの検証と影響 |
 | POST / GET | `/network-tests` | 回線の確認を始める（つながりの確認・回線の速さ）／直近 20 件の結果（新しい順） |
 | GET | `/network-tests/{id}` | 1 件の進み具合と結果 |
 | GET | `/network-tests/options` | 回線の速さで送る量（`saturate_mbps`、6 Mbps。機器の設定で決まり、画面からは変えない）と時間の範囲（5〜30 秒） |
@@ -45,6 +47,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
    - 入力の変更：接続をやり直す（`input_switch_gap` と `reconnect_gap`、どちらも `gap_s`。受信側の映像が約 10 秒途切れる）。同じ途切れなので、画面では 1 行にまとめる。
    - 伝送設定：接続をやり直す（`reconnect_gap`。`gap_s` は新しい遅延の設定でおよそ決まる）。
    - 送り出しの上限だけの変更：接続はやり直さない。保存して、次に伝送を始めたときから使う。伝送中（接続中・再接続中も）でも適用できる（`takes_effect_next_start`。いまの伝送とその再試行はこれまでの上限のまま）。ほかの項目と一緒に変えたときは、ほかの項目の決まりに従う（機器は伝送中なら `409 busy`）。
+   - 途中の無線機：伝送には触れないので、いつでも（伝送中も）適用できる（`hops_changed`）。`PUT` は `ApplyResult` ではなく新しい `NetworkSettings` を返す。
 4. `409 version_conflict` なら最新の値を読み直して知らせる。`400 invalid` は check と同じ `errors` を返す。
 
 ## プレビュー
@@ -73,7 +76,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 
 | `kind` | 画面 | 役割 | いつ | 中身 |
 | --- | --- | --- | --- | --- |
-| `reachability` | つながりの確認 | 送信機・受信機 | いつでも（伝送中も。とても小さい） | 相手と、機器に設定した途中の機器（無線機など）が応答するか、往復時間。10 回ずつ、約 2〜3 秒 |
+| `reachability` | つながりの確認 | 送信機・受信機 | いつでも（伝送中も。とても小さい） | 相手と、途中の無線機（`/settings/network` で適用中の一覧）が応答するか、往復時間。10 回ずつ、約 2〜3 秒 |
 | `throughput` | 回線の速さ | 送信機だけ（受信機は `409 unsupported_role`） | 接続の状態が `stopped` のときだけ。1 度に 1 つ | 回線が受け止められる以上の量（`saturate_mbps`、6 Mbps）を送り、実際に届いた量を測る。5〜30 秒（既定 10 秒） |
 
 - 始める：`POST /network-tests {"kind": "reachability"}` または `{"kind": "throughput", "direction", "duration_s"}`。すぐに `202` で、`state: "running"` のテストを返す。画面は `GET /network-tests` を、走っている間は 1 秒ごと、それ以外は 5 秒ごとに読み直す（ほかの画面で始めたテストも出る）。前の版の `mode`・`rate_mbps` は送られても無視する。
@@ -97,10 +100,27 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 
 | 結果 | 項目 | 画面 |
 | --- | --- | --- |
-| `reachability` | `targets[]`：`kind`（`peer` / `hop`）、`label`（`hop` の名前。`peer` は `null`）、`address`、`sent`、`received`、`rtt_min_ms`・`rtt_avg_ms`・`rtt_max_ms`（届かなければ `null`）。相手が先、そのあと途中の機器を設定の順に。受信機で相手のアドレスがわからない（まだ一度もつながっていない、設定もない）ときは相手を入れない。空のこともある | 相手、アドレス、状態（● 届く ▲ 一部届かない ■ 届かない）、往復時間（平均と最小〜最大）、届いた数（9/10） |
+| `reachability` | `targets[]`：`kind`（`peer` / `hop`）、`label`（`hop` の名前。`peer` は `null`）、`address`、`sent`、`received`、`rtt_min_ms`・`rtt_avg_ms`・`rtt_max_ms`（届かなければ `null`）。相手が先、そのあと途中の無線機を、テストを始めたときに適用中の一覧の順に。受信機で相手のアドレスがわからない（まだ一度もつながっていない、設定もない）ときは相手を入れない。空のこともある | 相手、アドレス、状態（● 届く ▲ 一部届かない ■ 届かない）、往復時間（平均と最小〜最大）、届いた数（9/10） |
 | `throughput` | `throughput_mbps`（届いた速さ）、`sent_mbps`（送った速さ）、`loss_pct`（届かなかった割合）、`jitter_ms`（遅れのばらつき。画面には出さない）、`saturated`（`loss_pct` ≥ 1。回線がいっぱいだった）、`per_second_mbps`（1 秒ごとに届いた量） | 届いた速さ 5.26 Mbps（小数 2 桁）か「6 Mbps 以上」、送った速さ、届かなかった割合 |
 
 終わった `throughput` は、イベント `network_test_done`（`mbps`：`throughput_mbps` と同じ小数 2 桁、`direction`）を出す（「回線テストが終わりました（送信機 → 受信機、届いた速さ 5.26 Mbps）」）。
+
+## 途中の無線機（`/settings/network`）
+
+送信機と受信機の間にある無線機の一覧。両方の機器にあり、それぞれの機器で設定する（2026-11-04 のユーザーの依頼：無線機のアドレスは変わることがある）。
+
+- つながりの確認は、相手のあとにこの一覧の順で確かめる。機器は、無線の回線に流す通信を、映像とこの一覧の機器との通信だけに絞る（機器の側の仕組みは `daemon/README.md`）。
+- `GET /settings/network` → `NetworkSettings {version, hops: [{label, address}]}`。まだ一度も適用していないときは、機器の設定ファイルの一覧（`network_test.hops`）を返す。一度適用したら、保存した一覧を返す（再起動しても残る）。
+- `POST /settings/network/check`（本文 `NetworkSettingsInput {version, hops}`）→ `CheckResult`。一覧が適用中と違えば影響 `hops_changed`（info）。
+- `PUT /settings/network` → `200 NetworkSettings`、`400 invalid`（check と同じ `errors`）、`409 version_conflict`（調べる順も、この順）。どちらの役割でも、伝送中でも受け付ける。適用すると `version` が上がり、イベント `network_settings_applied` と `settings`（`section: "network"`）を出す。
+
+| 項目 | 決まり | エラー（`field`、`code`） |
+| --- | --- | --- |
+| `hops` | 0〜4 台。送った一覧が、適用中の一覧と丸ごと入れ替わる | `hops`、`too_many`（`max` 4） |
+| `hops[i].label` | 前後の空白を除いて 1〜24 文字（機器は除いた形で保存する） | `hops[i].label`、`required` / `too_long`（`max` 24） |
+| `hops[i].address` | 点で区切った IPv4 のアドレス（名前は不可）。`0.0.0.0`・`255.255.255.255`・`127.x.x.x` は不可 | `hops[i].address`。当てはまる最初の 1 つだけ：`invalid` → `is_self`（この機器のアドレス）→ `is_peer`（相手のアドレス。送信機では伝送設定の接続先、受信機では設定にある送信機か、最後につながった送信機）→ `duplicate`（前の行と同じアドレス。後ろの行に付く） |
+
+`i` は送った一覧の中の位置（0 から）。画面は、空の欄、名前を書いた欄、使えないアドレスを、入力された値で言い分ける（機器はどれも `invalid`）。
 
 ## 送り出しの上限（`TransportSettings.send_limit`）
 
@@ -165,7 +185,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `status` | 状態が変わったとき＋1 秒ごと | `status` |
 | `stats` | 1 秒ごと | `stats` |
 | `event` | イベントが起きたとき | `event` |
-| `settings` | 設定が適用されたとき | `section`（`video` / `transport`）, `version` |
+| `settings` | 設定が適用されたとき | `section`（`video` / `transport` / `network`）, `version` |
 
 切れたら画面は 0.5 秒から 10 秒まで間隔を延ばしながらつなぎ直す。推移のグラフは 5 秒ごとに `/stats/history` を読み直す。
 
@@ -197,6 +217,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `no_peer_effect` | ok | いまは未接続のため、受信側への追加の影響はありません |
 | `saved_while_stopped` | info | 設定を保存します。伝送は停止したままです |
 | `takes_effect_next_start` | info | 送り出しの上限は、次に伝送を始めたときから使います。いまの伝送は、これまでの上限のまま続けます（停止中以外で、送り出しの上限だけを変えるとき） |
+| `hops_changed` | info | つながりの確認で確かめる機器と、無線の回線で通信してよい機器が、この内容に変わります。（途中の無線機の一覧が適用中と違うとき） |
 
 ### イベント（`DeviceEvent.code`）
 
@@ -209,7 +230,11 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `recovered` | 回線に余裕が戻ったため、画質を 2.5 → 3.0 Mbps に上げました |
 | `manual` | 画質を 3.0 → 2.5 Mbps に変更しました |
 
-ほかに `delay_margin_low`（`margin_s`）、`video_stalled`（`seconds`：その停止の長さ）、`loss_high`（`loss_pct`）、`network_test_done`（`mbps`、`direction`）、`send_limit_changed`（`mbps`、`from_mbps`、`source`：`measured` / `manual`）など。
+ほかに `delay_margin_low`（`margin_s`）、`video_stalled`（`seconds`：その停止の長さ）、`loss_high`（`loss_pct`）、`network_test_done`（`mbps`、`direction`）、`send_limit_changed`（`mbps`、`from_mbps`、`source`：`measured` / `manual`）、`network_settings_applied`（途中の無線機を適用した。「途中の無線機の設定を適用しました」）など。
+
+### 入力の誤り（`FieldError.code`）
+
+`out_of_range`（`min`・`max`）、`required`、`too_short` / `too_long`（`min` / `max`）、`invalid`、`too_many`（一覧が長すぎる。`max`）、`duplicate`・`is_self`・`is_peer`（途中の無線機のアドレス。上の表）。
 
 ### エラー（`ApiError.code`）の追加
 
@@ -234,5 +259,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `normal` | 相手 約 75 ms、近い無線機 約 0.4 ms、遠い無線機 約 75 ms。すべて 10/10 | 送信機 → 受信機 届いた速さ 5.26 Mbps（届かなかった割合 5.8 %）、受信機 → 送信機 1.15 Mbps |
 | `warn` | 遠い無線機と相手が 9/10（▲ 一部届かない） | 3.18 Mbps と 0.86 Mbps |
 | `error` | 近い無線機だけ届き、遠い無線機と相手は届かない | 接続を試す 3 秒のあと `peer_unreachable`（送信機は再接続中なので、先に停止が要る） |
+
+途中の無線機は、実際の設置の 2 台（この機器の近くの無線機が先）を `version` 1 で持ち、機器と同じ決まりで調べて保存する（モックを切り替えると元に戻る）。つながりの確認は適用中の一覧を使い、どちらの無線機もいないアドレスは届かない（0/10）。
 
 `MOCK_LINE_FAST=1` で起動すると、回線が送る量より速い（ほぼすべて届く、`saturated: false`。画面は「6 Mbps 以上」）。送り出しの上限は初期値 5.00 Mbps から始まり、`/use` と伝送設定の適用で機器と同じように変わる（モックを切り替えると初期値に戻る）。

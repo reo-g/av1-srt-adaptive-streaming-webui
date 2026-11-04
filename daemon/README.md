@@ -31,6 +31,58 @@ daemon. The daemon adds the per-session file paths itself.
 `tx.peer_host` / `tx.peer_port` are only the initial transport settings; after the first apply
 the settings screen's values (in `state_dir/settings.json`) are used.
 
+**途中の無線機** (`NetworkSettings`, both roles): the devices on the way to the peer (the radios of
+the WRAN link). つながりの確認 checks them after the peer, and the radio line may carry, besides the
+video, only the traffic with them (`link_filter.json`, below). The `[[network_test.hops]]` of
+device.toml are the initial value while nothing is stored yet (`GET /settings/network` answers
+them with version 1, and a change in device.toml takes effect at the next start); once a list
+is applied in the UI it is stored in `settings.json` and **the stored list wins** over
+device.toml from then on (also across restarts; an empty list too). To go back to device.toml's
+list, remove the `network` member from `settings.json` while the daemon is stopped. The same
+rules apply to both: at most 4, a label of 1–24 characters after trimming (stored trimmed), an
+IPv4 address in dotted-quad form (no host names: the filter needs addresses), not 0.0.0.0,
+255.255.255.255 or 127.x.x.x, no address twice; a device.toml that breaks them does not load,
+and a `network` in `settings.json` edited by hand that breaks them is replaced by device.toml's
+list. The screen also refuses this device's own addresses (every interface) and the peer's.
+
+**Radio line filter** (`state_dir/link_filter.json`, `src/link_filter.rs`). The daemon keeps this
+file up to date for a root-owned helper on the device (not in this repo; installed separately)
+that watches it and reloads the packet filter of the WRAN port from it. The daemon itself never
+needs root and never touches the filter.
+
+```json
+{
+  "version": 1,
+  "role": "tx",
+  "peer": "192.168.0.210",
+  "video_port": 60021,
+  "test_port": 60022,
+  "hosts": ["192.168.0.65", "192.168.0.56"]
+}
+```
+
+- `version`: the file's format, 1. `role`: `tx` | `rx`.
+- `peer`: the other device's IPv4 address, or null. tx: the transport settings' peer host; an
+  IPv4 literal as it is, a host name (only possible from `tx.peer_host` in device.toml before
+  the first apply: the screen takes addresses only) is looked up once with the system resolver
+  in the background; until it answers, or when it fails (logged), the previous file's peer is
+  kept, and a failed lookup is tried again at the first update a minute or more later (e.g. a
+  resolver not ready yet at boot). rx: `rx.peer_host` from device.toml if set (a host name is
+  looked up the same way; rx updates come with every change of the link), else the address of
+  the last transmitter that connected (after a restart the previous file's, until one
+  connects), else null.
+- `video_port`: tx the peer port of the transport settings, rx `rx.listen_port`.
+- `test_port`: `network_test.port` (the line-speed test: UDP, and TCP for its control connection).
+- `hosts`: the addresses of 途中の無線機 (the applied list, else device.toml's), in their order.
+
+Written at start, and again whenever its content changes: after `PUT /settings/network`, after
+`PUT /settings/transport` (a new peer host or port), on rx when a transmitter connects, and when
+a peer host name was looked up. Unchanged content is not rewritten. The file is written to
+`link_filter.json.tmp` in the same directory, mode 0644 (whatever the umask), fsynced and renamed
+over `link_filter.json`, so a reader never sees half a file; a watcher should react to the rename
+(inotify `IN_MOVED_TO` on the directory, not `IN_MODIFY` on the file). Each write has a line in
+the developer log.
+
 **Send cap** (送り出しの上限, `TransportSettings.send_limit`, tx): the sender's MAXBW at the start of
 each transmission, the `{maxbw_kbps}` placeholder of `profile.sender_args` (its 7th argument;
 `round(mbps × 1000)`). The controller's pacing (`BUF_ND_PACE`) takes its nominal MAXBW from the
@@ -59,7 +111,7 @@ the profile instead.
 | Setting | Default | Holds |
 | --- | --- | --- |
 | `run_dir` | `$XDG_RUNTIME_DIR/ctrld` (tmpfs) | one directory per session: the children's stderr logs (`sender.log`, `bridge.log`, `receiver.log`, `player.log`, each starting with the environment and command line), the statistics files the daemon reads, `daemon.log` (the developer log ring when the session ended). Without an archive only the current and the last finished session are kept, a log is cut back to its header once it passes 16 MiB and a statistics file is emptied once it passes 64 MiB. Outside the sessions (one per device): `preview.sock` (the video copy for the preview) and `preview.log` (the preview program's stderr and events, cut back like the others; the previous instance's is kept as `preview.log.1`), and on rx `nettest-server.log` (the bandwidth tool server's stdout and stderr, cut back like the others; the previous instance's is kept as `nettest-server.log.1`). |
-| `state_dir` | `~/.local/state/ctrld` | `settings.json` (0600, replaced atomically) |
+| `state_dir` | `~/.local/state/ctrld` | `settings.json` (0600, replaced atomically), `link_filter.json` (0644, replaced atomically; see above) |
 | `archive_dir` | unset | when set, session directories are created here and kept, for `bufctrl_analyze.py` and the like. `archive_video = true` (rx) also keeps the received stream. |
 
 None of these logs is shown in the UI.
@@ -105,11 +157,29 @@ None of these logs is shown in the UI.
 - **network tests** (`[network_test]`, on by default; `src/nettest.rs`), started from the UI and
   not part of the link's state machine. Every program gets the inherited variables that pass
   (above) plus `LC_ALL=C`, cwd `run_dir`, its own process group and PDEATHSIG.
-  - *reachability* (both roles, any time, also while live): `ping -n -q -c 10 -i 0.2 -W 1 <addr>`
-    (`network_test.ping`) to the peer and to each `[[network_test.hops]]`, all at once (about
-    3 s). The peer is tx `transport.peer_host` (the applied setting); rx `rx.peer_host`, else the
-    last transmitter that connected, else left out. The summary lines (`N packets transmitted, M
-    received`, `rtt min/avg/max/mdev`) give `sent`, `received` and the times; a run without a
+  - *reachability* (both roles, any time, also while live): `ping -n -c 10 -i 0.2 -W 1 -w 4
+    <addr>` (`network_test.ping`) to the peer and to each of 途中の無線機 (the applied list, else
+    device.toml's hops; the list in effect when the test starts), all at once (about 2 s, at most
+    4 s). The peer is tx `transport.peer_host` (the applied setting); rx `rx.peer_host`, else the
+    last transmitter that connected, else left out. Why `-w 4` and no `-q`: once replies came,
+    iputils waits only two round trips after the last request (`-W` applies only while nothing
+    came back), so a late last reply on the radio line (RTT ≈ 75 ms, a reply now and then much
+    later) was counted lost and a target showed 9/10; `-w 4` waits up to 4 s for ten replies.
+    With a deadline iputils also goes on sending past the count while replies are missing (a
+    silent address: `20 packets transmitted, 0 received`; one lost reply: an 11th request whose
+    reply ends the run, `11 packets transmitted, 10 received`) and an error ends the run early
+    (`6 packets transmitted, 0 received, +5 errors`). So the test is the first ten requests:
+    `sent` is always 10, and `received` is the number of distinct requests (`icmp_seq` 1..10)
+    with a reply line (duplicates, `DUP!`, count once; error lines such as "Destination Host
+    Unreachable" are not replies; replies to the extra requests do not count). The times
+    (`rtt min/avg/max/mdev`) come from the summary. A late reply is still counted lost if the
+    reply to an extra request arrives before it (iputils then has its ten and stops); on a radio
+    queue that keeps the order this does not happen. A run with a request missing, a reply slower
+    than twice the median of its replies, or a duplicate gets one developer-log line, e.g. `reach
+    192.168.0.56: 9/10 missing seq [7] late seq [4] rtt_ms [75.2, 74.8, 76.1, 612.0, 75.0, 74.6,
+    75.9, 74.9, 75.3] extra seq [11] extra_rtt_ms [75.1]` (every reply's time by seq; `dup seq
+    [..]` when there were duplicates; the replies to the extra requests last), so that a late
+    reply and a lost one can be told apart; nothing changes in the API's result. A run without a
     summary (unknown host, no route) or not done in 10 s counts as 10 sent, 0 back. Times in ms
     with two decimals.
   - *throughput* (tx only): one saturation test. The video travels in UDP, so the test does too:
@@ -163,6 +233,23 @@ changed, the existing ones (`reconnect_gap` while live). Events: a new cap alone
 `transport_settings_applied` then `send_limit_changed`. An input must be chosen: an empty camera or file is a field error, and with no
 file chosen yet the first file offered is the default. `/transport/compare` has no peer data
 yet (`verdict: unknown`).
+
+Network settings (途中の無線機, both roles, allowed in every link state: applying does not touch
+the transmission): `GET /settings/network` → `{version, hops: [{label, address}]}`; `POST
+/settings/network/check` with `{version, hops}` (the whole list) → `CheckResult`; `PUT
+/settings/network` → `200` with the new `NetworkSettings`. Checks in order: not JSON → `400
+invalid` (no errors); PUT with another `version` → `409 version_conflict`; then the field errors
+(`400 invalid`, the same as /check): no list (missing, null, not an array) → `hops: required`;
+more than 4 → `hops: too_many {max: 4}`; `hops[i].label` (i from 0) empty after trimming →
+`required`, over 24 characters → `too_long {max: 24}`; `hops[i].address`, the first that
+applies: `invalid` (not a dotted quad, or 0.0.0.0, 255.255.255.255, 127.x.x.x; a host name too)
+→ `is_self` (an address of any of this device's interfaces) → `is_peer` (tx: the transport
+settings' peer host and what the filter file has for it; rx: the configured or the last
+connected transmitter) → `duplicate` (the same address as an earlier item). Impact: `info
+hops_changed` when the list (labels trimmed) differs from the applied one, in any order or
+content. A PUT bumps the version (also without a change), stores the list, adds the event
+`network_settings_applied` (no params), pushes `{type: settings, section: network, version}` on
+the live channel and updates `link_filter.json`.
 
 Network tests (phase 4): `POST /network-tests {kind, direction?, duration_s?}` → `202` with the
 running test (`mode` and `rate_mbps` of the old modes are ignored). Checks in order: not JSON →
@@ -247,15 +334,31 @@ on the dev machine: `iperf3_udp.jsonl` / `iperf3_udp_reverse.jsonl` (`-u -b 6M -
 (the same against a server started with `-J`), `iperf3_udp_lossy.jsonl` /
 `iperf3_udp_lossy_reverse.jsonl` (6 s, real loss of about 8 %: the same command with `-w 2K`
 while the receiving side was paused 12 ms in every 100 ms; parser tests only),
-`iperf3_refused.jsonl`, `iperf3_busy.jsonl`, `ping_ok.txt`, `ping_lost.txt` (100 % loss);
+`iperf3_refused.jsonl`, `iperf3_busy.jsonl`, and with iputils 20240905 and the daemon's
+arguments `ping_ok.txt` (127.0.0.1: a reply line each), `ping_lost.txt` (192.0.2.1, which nothing
+answers: 20 sent until the deadline, none back) and `ping_unreachable.txt` (an address that is
+not there: "Destination Host Unreachable", 6 sent, parser test only);
 edited captures, as the dev machine has no slow path without root:
 `iperf3_udp_saturated.jsonl` is the to_peer capture with the radio link's
-numbers in the server's report and `end` (6 Mbps sent, 5.26 Mbps arrived, 5.8 % lost) and
-`ping_partial.txt` the ok capture with its counts edited; the peer or hop address picks the
-case, see the docstrings) for the parsers, the field mapping, the busy rules (live, running, a
-start during a test), rx `unsupported_role`, the timeouts, the server's restarts and stop, the
-history cap, and `/use` (its rules, the settings version, the event, persistence across a
-restart and the sender's argument at the next start). The send cap's check rules and the live
+numbers in the server's report and `end` (6 Mbps sent, 5.26 Mbps arrived, 5.8 % lost),
+`ping_partial.txt` the ok capture without three replies, plus the three extra requests iputils
+sends for them, and its summary computed to match, and `ping_late.txt` the radio line in the
+same format (request 7 lost, the reply to 4 late and out of order, an 11th request answered);
+the peer or hop address picks the case, see the docstrings) for the parsers (reply
+lines, duplicates, error lines, the late/missing log line), the field mapping, the busy rules
+(live, running, a start during a test), rx `unsupported_role`, the timeouts, the server's
+restarts and stop, the history cap, and `/use` (its rules, the settings version, the event,
+persistence across a restart and the sender's argument at the next start).
+
+途中の無線機: the rules are table-tested in `src/check.rs` (the mock's checkNetwork is the
+oracle), device.toml's rules in `src/config.rs`, the stored list (and one edited by hand) in
+`src/store.rs`, and over HTTP in `src/api.rs` (both roles, while live, version conflict, the
+event and the live message, the defaults from device.toml, persistence across a restart, the
+reachability test using the stored list). `src/link_filter.rs` tests the file (content and field
+order, mode 0644 under any umask, the atomic replace, no rewrite without a change, the rx peer
+across a restart, a peer host name looked up once with a fake resolver, a failed lookup keeping
+the previous peer and tried again later); `src/api.rs` its content for tx and rx and its rewrite after `PUT
+/settings/network` and `PUT /settings/transport` (a new peer host and port). The send cap's check rules and the live
 `PUT` rule are table-tested in `src/check.rs` and over HTTP in `src/api.rs`; `{maxbw_kbps}`
 (and a literal in an overriding `sender_args`) in `src/profile.rs`.
 

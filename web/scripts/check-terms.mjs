@@ -11,6 +11,7 @@ const RULES = [
   /\bgst[-_]/i,
   /\biperf/i,
   /\bSRTO_/,
+  /maxbw/i, // 送り出しの上限 (docs/terms.md); also mbpsMaxBW
   /\bSRT_REJ/,
   /["'](caller|listener|rendezvous)["']/i,
   /\bpassphrase_len|pbkeylen\b/i,

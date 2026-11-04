@@ -114,22 +114,31 @@ pub fn local_ipv4(toward: &str) -> String {
 }
 
 fn first_interface_ipv4() -> Option<String> {
-    let mut out = None;
+    interface_ipv4s().into_iter().find(|(_, up, lo)| *up && !*lo).map(|(a, _, _)| a.to_string())
+}
+
+/// Every IPv4 address of this device's interfaces (up or down, loopback included), read now.
+pub fn local_ipv4s() -> Vec<Ipv4Addr> {
+    interface_ipv4s().into_iter().map(|(a, _, _)| a).collect()
+}
+
+/// (address, up, loopback) of each IPv4 interface address, in the system's order.
+fn interface_ipv4s() -> Vec<(Ipv4Addr, bool, bool)> {
+    let mut out = Vec::new();
     // SAFETY: getifaddrs/freeifaddrs on a list we own; every pointer is checked before use.
     unsafe {
         let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut list) != 0 {
-            return None;
+            return out;
         }
         let mut p = list;
         while !p.is_null() {
             let ifa = &*p;
             let up = ifa.ifa_flags & libc::IFF_UP as libc::c_uint != 0;
             let lo = ifa.ifa_flags & libc::IFF_LOOPBACK as libc::c_uint != 0;
-            if up && !lo && !ifa.ifa_addr.is_null() && i32::from((*ifa.ifa_addr).sa_family) == libc::AF_INET {
+            if !ifa.ifa_addr.is_null() && i32::from((*ifa.ifa_addr).sa_family) == libc::AF_INET {
                 let sin = &*(ifa.ifa_addr as *const libc::sockaddr_in);
-                out = Some(Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)).to_string());
-                break;
+                out.push((Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr)), up, lo));
             }
             p = ifa.ifa_next;
         }
@@ -160,6 +169,12 @@ mod tests {
         assert_eq!(floor1(6.43), 6.4);
         assert_eq!(round(3.6992, 2), 3.7);
         assert_eq!(round(2.9411, 1), 2.9);
+    }
+
+    #[test]
+    fn own_addresses() {
+        let own = local_ipv4s();
+        assert!(own.contains(&Ipv4Addr::LOCALHOST), "{own:?}");
     }
 
     #[test]

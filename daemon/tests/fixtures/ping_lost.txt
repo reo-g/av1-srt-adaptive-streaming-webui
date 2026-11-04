@@ -1,5 +1,5 @@
-PING 127.255.255.255 (127.255.255.255) 56(84) bytes of data.
+PING 192.0.2.1 (192.0.2.1) 56(84) bytes of data.
 
---- 127.255.255.255 ping statistics ---
-10 packets transmitted, 0 received, 100% packet loss, time 9193ms
+--- 192.0.2.1 ping statistics ---
+20 packets transmitted, 0 received, 100% packet loss, time 3951ms
 

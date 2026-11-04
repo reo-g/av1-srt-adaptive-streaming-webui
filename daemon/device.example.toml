@@ -36,7 +36,8 @@ peer_port = 60021
 
 [rx]
 listen_port = 60021
-# peer_host = "192.168.0.220"  # the transmitter's address for つながりの確認 (default: the last one that connected)
+# peer_host = "192.168.0.220"  # the transmitter's address for つながりの確認 and link_filter.json
+#                              # (default: the last one that connected)
 
 # The browser preview: a copy of the picture being sent (tx) / shown (rx), started on demand
 # (src/preview.rs). The media programs copy their video to <run_dir>/preview.sock while it runs.
@@ -66,8 +67,13 @@ port = 60022
 # ping = "ping"
 # saturate_mbps = 6            # what 回線の速さ sends, Mbps (2–50): set it above the line's speed
 
-# Devices on the way to the peer (e.g. the radios of a wireless link), checked after the peer in
-# this order; the label is shown in the UI as it is.
+# 途中の無線機: devices on the way to the peer (the radios of the WRAN link), checked after the peer
+# in this order, and the only hosts besides the peer that the radio line may carry traffic with
+# (state_dir/link_filter.json, read by a root helper; see README). This is only the initial list:
+# once a list is applied on the ネットワーク page it is stored in settings.json and wins over this
+# one (the screen is where a changed radio address is fixed). At most 4; a label of 1–24
+# characters, shown in the UI as it is; an IPv4 address (no host names, not 0.0.0.0,
+# 255.255.255.255 or 127.x.x.x), each once.
 [[network_test.hops]]
 label = "無線機（送信機側）"
 address = "192.168.0.65"

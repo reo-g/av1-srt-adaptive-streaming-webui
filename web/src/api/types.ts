@@ -151,7 +151,8 @@ export type EventCode =
   | 'transport_settings_applied'
   | 'passphrase_changed'
   | 'network_test_done' // params: mbps (throughput_mbps, two decimals), direction (NetworkTestDirection). Only after a throughput test that finished
-  | 'send_limit_changed'; // tx; params: mbps, from_mbps, source (SendLimitSource: measured or manual)
+  | 'send_limit_changed' // tx; params: mbps, from_mbps, source (SendLimitSource: measured or manual)
+  | 'network_settings_applied'; // PUT /settings/network (途中の無線機); no params
 
 /**
  * Why the video bitrate changed (bitrate_changed.reason).
@@ -178,16 +179,28 @@ export type LiveMessage =
   | { type: 'status'; status: Status }
   | { type: 'stats'; stats: Stats }
   | { type: 'event'; event: DeviceEvent }
-  | { type: 'settings'; section: 'video' | 'transport'; version: number };
+  | { type: 'settings'; section: 'video' | 'transport' | 'network'; version: number };
 
 // ---------------------------------------------------------------- shared settings types
 
 export interface FieldError {
-  /** Dotted path of the input field, e.g. "encode.manual.bitrate_mbps", "delay.profile". */
+  /** Dotted path of the input field, list items by index from 0: "encode.manual.bitrate_mbps", "hops[1].address". */
   field: string;
-  code: 'out_of_range' | 'required' | 'too_short' | 'too_long' | 'invalid';
+  code: FieldErrorCode;
   params?: Params; // min, max
 }
+
+export type FieldErrorCode =
+  | 'out_of_range'
+  | 'required'
+  | 'too_short'
+  | 'too_long'
+  | 'too_many' // a list is longer than params.max (hops)
+  | 'invalid'
+  // hops[i].address (NetworkSettingsInput)
+  | 'duplicate' // the same address as an earlier item (the later item gets it)
+  | 'is_self' // an address of this device
+  | 'is_peer'; // the peer's address
 
 export type ImpactCode =
   // video
@@ -204,7 +217,10 @@ export type ImpactCode =
   | 'saved_while_stopped'
   // transport: only send_limit changes while the link is not stopped. Stored now, used from the next
   // start (the running transmission and its retries keep their cap)
-  | 'takes_effect_next_start';
+  | 'takes_effect_next_start'
+  // network settings: the list of devices on the way differs from the applied one. つながりの確認 and
+  // what the radio line may carry follow the new list; the transmission is not touched
+  | 'hops_changed';
 
 export interface Impact {
   level: 'warn' | 'ok' | 'info';
@@ -393,11 +409,43 @@ export interface CompareResult {
   rows: CompareRow[];
 }
 
+// ---------------------------------------------------------------- network settings (both roles)
+
+/**
+ * A device on the way to the peer (途中の無線機). つながりの確認 checks them after the peer, in
+ * this order, and the radio line carries, besides the video, only the traffic with them.
+ */
+export interface Hop {
+  label: string; // 1–24 characters after trimming, e.g. "無線機（送信機側）"
+  address: string; // IPv4 address, dotted quad, e.g. "192.168.0.65" (no host names)
+}
+
+/**
+ * GET /settings/network. Until the list is first applied the device returns its configured list;
+ * once applied, the stored one (kept across restarts). Applying is allowed any time, also while
+ * live: it does not touch the transmission.
+ */
+export interface NetworkSettings {
+  version: number;
+  hops: Hop[]; // 0–4
+}
+
+/**
+ * POST /settings/network/check, PUT /settings/network (answers the new NetworkSettings).
+ * The whole list. Field errors (i from 0): `hops` too_many (max 4); `hops[i].label` required /
+ * too_long (max 24); `hops[i].address`, the first that applies: invalid (not a dotted quad, or
+ * 0.0.0.0, 255.255.255.255, 127.x.x.x) → is_self → is_peer → duplicate.
+ */
+export interface NetworkSettingsInput {
+  version: number;
+  hops: Hop[];
+}
+
 // ---------------------------------------------------------------- network test
 
 /**
- * reachability  つながりの確認: whether the peer and the devices on the way (configured on the
- *               device) answer, and their round-trip time. Both roles, any time (also while live).
+ * reachability  つながりの確認: whether the peer and the devices on the way (NetworkSettings.hops)
+ *               answer, and their round-trip time. Both roles, any time (also while live).
  * throughput    回線の速さ: how fast data gets through to or from the peer. tx only, only while the
  *               link is stopped (it would disturb the video), one at a time.
  */
@@ -434,7 +482,7 @@ export interface NetworkTestOptions {
 export interface ReachabilityTarget {
   /** peer: the other device (the UI names it 受信機 / 送信機). hop: a device on the way, named by `label`. */
   kind: 'peer' | 'hop';
-  label: string | null; // hop: the name set on the device, e.g. "無線機（送信機側）"; peer: null
+  label: string | null; // hop: Hop.label, e.g. "無線機（送信機側）"; peer: null
   address: string;
   sent: number; // e.g. 10
   received: number;
@@ -446,7 +494,8 @@ export interface ReachabilityTarget {
 
 /**
  * Peer first (left out when its address is not known: rx before any transmitter has connected and
- * without a configured address), then the devices on the way in their configured order. Can be empty.
+ * without a configured address), then the devices on the way in the order of NetworkSettings.hops
+ * (the list applied when the test started). Can be empty.
  */
 export interface ReachabilityResult {
   targets: ReachabilityTarget[];

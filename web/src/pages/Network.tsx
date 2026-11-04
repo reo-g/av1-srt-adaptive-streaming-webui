@@ -1,6 +1,8 @@
 /**
  * ネットワーク: checks of the line to the peer, started from the browser.
  *   つながりの確認  whether the peer and the devices on the way answer (both roles, also while live)
+ *   途中の無線機    the devices on the way, a setting of both roles (NetworkHops.tsx); つながりの確認
+ *                   checks the applied list and runs once more right after it was applied
  *   回線の速さ      how fast data arrives when more is sent than the line can carry (transmitter
  *                   only, while the link is stopped); a result towards the receiver can become the
  *                   send cap (送り出しの上限) of the next transmissions
@@ -12,6 +14,8 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { ApiFailure, api } from '../api/client';
 import { useLive } from '../api/live';
 import type {
+  Hop,
+  NetworkSettings,
   NetworkTest,
   NetworkTestDirection,
   NetworkTestOptions,
@@ -34,7 +38,9 @@ import {
   reachFailed,
   reachLabel,
   reachLevel,
+  reachHelp,
   reachNoPeer,
+  reachStale,
   targetName,
   testStartProblem,
   throughputBlocked,
@@ -55,6 +61,7 @@ import {
 } from '../i18n/ja';
 import { fixed1, fixed2, timeOf } from '../lib/format';
 import { href } from '../lib/router';
+import { HopsSection } from './NetworkHops';
 
 type Reach = Extract<NetworkTest, { kind: 'reachability' }>;
 type Tput = Extract<NetworkTest, { kind: 'throughput' }>;
@@ -80,6 +87,11 @@ const paramsOf = (t: Tput) => ({
 });
 
 const isReach = (t: NetworkTest): t is Reach => t.kind === 'reachability';
+
+/** The devices on the way a finished つながりの確認 checked, to tell whether it is about the applied list. */
+const checkedHops = (t: Reach): Hop[] =>
+  (t.result?.targets ?? []).filter((x) => x.kind === 'hop').map((x) => ({ label: x.label ?? '', address: x.address }));
+const sameHops = (a: Hop[], b: Hop[]) => a.length === b.length && a.every((h, i) => h.label === b[i].label && h.address === b[i].address);
 const isTput = (t: NetworkTest): t is Tput => t.kind === 'throughput';
 
 const round2 = (v: number) => Math.round(v * 100) / 100;
@@ -116,6 +128,8 @@ export function NetworkPage() {
   const [capAsk, setCapAsk] = useState<{ id: string; mbps: number } | null>(null);
   const [capPosting, setCapPosting] = useState(false);
   const [capNotice, setCapNotice] = useState<string | null>(null);
+  // 途中の無線機 as applied (both roles)
+  const [net, setNet] = useState<NetworkSettings | null>(null);
 
   // A list read that started before a test was posted must not hide the new test.
   const gen = useRef(0);
@@ -136,6 +150,16 @@ export function NetworkPage() {
       .then((s) => g === limitGen.current && setLimit(s.send_limit ?? null))
       .catch(() => undefined);
   }, []);
+  // Applied elsewhere too (another screen): read every 5 s. A read that started before this screen
+  // applied must not bring the old list back.
+  const netGen = useRef(0);
+  const loadNet = useCallback(() => {
+    const g = netGen.current;
+    api.network
+      .get()
+      .then((s) => g === netGen.current && setNet(s))
+      .catch(() => undefined);
+  }, []);
   const put = (t: NetworkTest) => {
     gen.current += 1;
     setList((prev) => [t, ...(prev ?? []).filter((x) => x.id !== t.id)].slice(0, 20));
@@ -144,6 +168,7 @@ export function NetworkPage() {
   useEffect(() => {
     if (!role) return;
     load();
+    loadNet();
     if (role === 'tx') {
       loadLimit();
       api.networkTest.options().then(setOptions).catch(() => undefined);
@@ -152,7 +177,7 @@ export function NetworkPage() {
         .then((o) => setBitrateRange(o.bitrate_range_mbps))
         .catch(() => undefined);
     }
-  }, [role, load, loadLimit]);
+  }, [role, load, loadLimit, loadNet]);
 
   // Every second while a test runs (progress), every 5 s otherwise (a test started from another
   // screen shows up). The cap is read again every 5 s as well.
@@ -166,6 +191,11 @@ export function NetworkPage() {
     const t = setInterval(loadLimit, 5000);
     return () => clearInterval(t);
   }, [role, loadLimit]);
+  useEffect(() => {
+    if (!role) return;
+    const t = setInterval(loadNet, 5000);
+    return () => clearInterval(t);
+  }, [role, loadNet]);
 
   if (!device || !status || !role) {
     return (
@@ -186,17 +216,28 @@ export function NetworkPage() {
   const [dMin, dMax] = options?.duration_range_s ?? [5, 30];
   const durations = DURATION_CHOICES.filter((d) => d >= dMin && d <= dMax);
 
-  const startReach = async () => {
+  /** `quiet`: started by the screen itself (after applying 途中の無線機); a refusal is not reported. */
+  const startReach = async (quiet = false) => {
     setReachNotice(null);
     setPosting('reachability');
     try {
       put(await api.networkTest.start({ kind: 'reachability' }));
     } catch (e) {
-      setReachNotice(testStartProblem('reachability', e instanceof ApiFailure ? e.body?.error.code : undefined, false));
+      if (!quiet) setReachNotice(testStartProblem('reachability', e instanceof ApiFailure ? e.body?.error.code : undefined, false));
     } finally {
       setPosting(null);
     }
   };
+
+  // 途中の無線機 applied: つながりの確認 now checks the new list; check it at once.
+  const hopsApplied = (s: NetworkSettings) => {
+    netGen.current += 1;
+    setNet(s);
+    if (!reachRunning && posting !== 'reachability') void startReach(true);
+  };
+  // Not while a new check is being started (right after applying, the old result is about to go).
+  const reachIsStale =
+    !!net && reach?.state === 'done' && !!reach.result && posting !== 'reachability' && !sameHops(checkedHops(reach), net.hops);
 
   const startTput = async () => {
     setTputNotice(null);
@@ -256,14 +297,12 @@ export function NetworkPage() {
             つながりの確認
           </h2>
           <div className="nt-body">
-            <p className="nt-help">
-              {tx ? '受信機' : '送信機'}と、途中の無線機まで届くかを確かめます。伝送中でも使えます。
-            </p>
+            <p className="nt-help">{reachHelp(role, net?.hops.length ?? 1)}</p>
             <div className="nt-actions">
               <button
                 type="button"
                 className="btn btn-primary"
-                onClick={startReach}
+                onClick={() => startReach()}
                 disabled={reachRunning || posting === 'reachability'}
               >
                 {reachRunning ? '確かめています…' : '確かめる'}
@@ -275,9 +314,17 @@ export function NetworkPage() {
             {reachNotice && <ProblemLine text={reachNotice} alert />}
             {reachRunning && <Progress value={reach.progress} label="つながりを確かめている進み具合" />}
             {reach?.state === 'done' && reach.result && <ReachTable role={role} result={reach.result} />}
+            {reachIsStale && (
+              <p className="nt-line">
+                <Glyph tone="info" />
+                <span>{reachStale}</span>
+              </p>
+            )}
             {reach?.state === 'failed' && <ProblemLine text={reachFailed} />}
           </div>
         </section>
+
+        <HopsSection role={role} settings={net} onApplied={hopsApplied} onReload={loadNet} />
 
         <section aria-labelledby="sec-tput" className="nt-sec">
           <h2 id="sec-tput" className="sec-title">

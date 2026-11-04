@@ -5,6 +5,8 @@ import type {
   CompareResult,
   Device,
   DeviceEvent,
+  NetworkSettings,
+  NetworkSettingsInput,
   NetworkTest,
   NetworkTestList,
   NetworkTestOptions,
@@ -81,6 +83,12 @@ export const api = {
     apply: (input: TransportSettingsInput) =>
       req<ApplyResult<TransportSettings>>('PUT', '/settings/transport', input),
     compare: () => req<CompareResult>('GET', '/transport/compare'),
+  },
+  /** 途中の無線機 (both roles). Applying answers the new settings; it does not touch the transmission. */
+  network: {
+    get: () => req<NetworkSettings>('GET', '/settings/network'),
+    check: (input: NetworkSettingsInput) => req<CheckResult>('POST', '/settings/network/check', input),
+    apply: (input: NetworkSettingsInput) => req<NetworkSettings>('PUT', '/settings/network', input),
   },
   networkTest: {
     start: (body: NetworkTestRequest) => req<NetworkTest>('POST', '/network-tests', body),

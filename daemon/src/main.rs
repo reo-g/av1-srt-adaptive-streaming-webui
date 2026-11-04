@@ -12,6 +12,7 @@ mod check;
 mod config;
 mod events;
 mod history;
+mod link_filter;
 mod media;
 mod model;
 mod nettest;

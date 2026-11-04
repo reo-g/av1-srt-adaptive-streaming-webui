@@ -94,7 +94,7 @@ function Nav({ current }: { current: Route }) {
         録画
       </NavLink>
       <div className="nav-group">管理</div>
-      <NavLink route="network" current={current}>
+      <NavLink route="network" current={current} count={counts.network}>
         ネットワーク
       </NavLink>
       <NavLink route="logs" current={current}>

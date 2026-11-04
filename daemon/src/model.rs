@@ -2,7 +2,7 @@
 //! daemon builds often, plus the stored settings. Rarely built objects (options, compare)
 //! are written with json! where they are served.
 
-use crate::config::Role;
+use crate::config::{Hop, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -117,7 +117,8 @@ pub struct DeviceEvent {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FieldError {
-    pub field: &'static str,
+    /// A dotted path; list items by index from 0 (`hops[1].address`).
+    pub field: String,
     pub code: &'static str,
     #[serde(skip_serializing_if = "Map::is_empty")]
     pub params: Params,
@@ -268,8 +269,21 @@ impl SendLimit {
     }
 }
 
+/// 途中の無線機 (the contract's NetworkSettings): the devices on the way to the peer. Reachability
+/// checks them after the peer, and the radio line may carry, besides the video, only the traffic
+/// with them (link_filter.rs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NetworkStored {
+    pub version: u64,
+    pub hops: Vec<Hop>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub video: VideoStored,
     pub transport: TransportStored,
+    /// None until the list is first applied: then device.toml's `[[network_test.hops]]` are used
+    /// (App::network), so a change there still takes effect. Absent in an older settings.json.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkStored>,
 }
