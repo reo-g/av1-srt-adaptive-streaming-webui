@@ -14,6 +14,7 @@ mod events;
 mod history;
 mod media;
 mod model;
+mod nettest;
 mod preview;
 mod profile;
 mod stats;

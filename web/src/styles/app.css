@@ -1105,6 +1105,114 @@ a:hover {
   transition: width 0.3s;
 }
 
+/* ------------------------------------------------------------ network screen */
+.nt-sec + .nt-sec {
+  border-top: 1px solid var(--line);
+}
+.nt-sec .row:last-of-type {
+  border-bottom: 1px solid var(--rule);
+}
+.nt-body {
+  padding: 0 28px 24px;
+}
+.nt-run {
+  padding-top: 16px;
+}
+.nt-help {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--sub);
+}
+.nt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+}
+.nt-actions .btn {
+  min-width: 120px;
+}
+.nt-progress {
+  max-width: 480px;
+  margin-top: 16px;
+}
+/* polled once a second: move steadily instead of jumping */
+.nt-progress .progress div {
+  transition: width 1s linear;
+}
+.nt-progress p {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--sub);
+}
+.nt-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+.nt-line svg {
+  margin-top: 6px;
+}
+.nt-problem {
+  font-weight: 600;
+  color: var(--err-text);
+}
+.nt-table-wrap {
+  margin-top: 16px;
+  overflow-x: auto;
+}
+.nt-table {
+  min-width: 560px;
+}
+.nt-hist td:first-child {
+  white-space: nowrap;
+}
+.nt-state,
+.nt-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.nt-state {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.nt-flag svg {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  margin-top: 6px;
+}
+.nt-choice-hint {
+  display: block;
+  font-size: 13px;
+  color: var(--sub);
+}
+.nt-select {
+  min-width: 120px;
+}
+.nt-result {
+  margin-top: 20px;
+}
+.nt-what {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--sub);
+}
+.nt-figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px 48px;
+}
+.nt-figures .kv {
+  padding-bottom: 6px;
+}
+.nt-verdict {
+  font-size: 16px;
+  font-weight: 600;
+}
+
 /* ------------------------------------------------------------ full screen */
 .fs {
   position: fixed;

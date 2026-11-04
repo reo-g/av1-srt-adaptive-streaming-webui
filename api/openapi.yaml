@@ -19,6 +19,11 @@ tags:
   - name: transport settings
     description: Transmitter only. A receiver answers 409 unsupported_role.
   - name: network test
+    description: |
+      Checks of the line to the peer, started from the UI. reachability (つながりの確認): both roles,
+      any time, also while live. throughput (回線の速さ): transmitter only (a receiver answers
+      409 unsupported_role), only while the link is stopped, one at a time. The receiver answers
+      throughput tests by itself whenever the device is running. Tests are kept in memory only.
   - name: preview
     description: |
       Live picture in the browser, only while the link is live. tx shows what it sends (after
@@ -94,8 +99,10 @@ paths:
     post:
       tags: [transport control]
       summary: Start sending (tx) or receiving (rx)
+      description: 409 busy while a throughput network test is running (tx).
       responses:
         '200': { description: New status, content: { application/json: { schema: { $ref: '#/components/schemas/Status' } } } }
+        '409': { description: busy, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
   /transport/stop:
     post:
       tags: [transport control]
@@ -170,11 +177,33 @@ paths:
   /network-tests:
     post:
       tags: [network test]
-      summary: Start a bandwidth test to the peer (tx only)
+      summary: Start a test
+      description: |
+        Answers at once with the running test; read GET /network-tests/{id} (or the list) until
+        `state` is no longer `running`.
+        Checks, in this order: 400 invalid (kind missing or unknown) → 409 unsupported_role
+        (throughput on a receiver) → 400 invalid with field errors (direction, mode: invalid;
+        rate_mbps 1–20 in steady, duration_s integer 5–30: out_of_range with min and max) → 409 busy.
+        busy: throughput while the link is not `stopped` or while another throughput test runs;
+        reachability while another reachability test runs.
+        While a throughput test runs, POST /transport/start answers 409 busy.
+        A throughput test that finishes adds the event network_test_done (mbps, direction).
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTestRequest' } } } }
       responses:
         '202': { description: Started, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTest' } } } }
-        '409': { $ref: '#/components/responses/Conflict' }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '409': { description: busy or unsupported_role, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+    get:
+      tags: [network test]
+      summary: The last 20 tests, newest first (memory only; empty after the device restarts)
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTestList' } } } }
+  /network-tests/options:
+    get:
+      tags: [network test]
+      summary: Limits and defaults of the throughput test
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTestOptions' } } } }
   /network-tests/{id}:
     get:
       tags: [network test]
@@ -182,7 +211,7 @@ paths:
         - { name: id, in: path, required: true, schema: { type: string } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkTest' } } } }
-        '404': { description: Not found, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+        '404': { description: not_found (unknown, or no longer among the last 20), content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
 
 components:
   responses:
@@ -315,7 +344,8 @@ components:
           description: |
             delay_margin_low: margin_s. video_stalled: seconds. loss_high: loss_pct.
             bitrate_changed: mbps, from_mbps, reason (BitrateReason). transport_started (rx): format.
-            listening_started: port. input_detected: format. network_test_done: mbps.
+            listening_started: port. input_detected: format.
+            network_test_done: mbps, direction (to_peer | from_peer); only after a throughput test that finished.
     BitrateReason:
       type: string
       enum: [loss, delay, recovered, manual]
@@ -553,25 +583,110 @@ components:
         received_at: { type: [string, 'null'], format: date-time }
         peer_id: { type: [string, 'null'] }
         rows: { type: array, items: { $ref: '#/components/schemas/CompareRow' } }
+    NetworkTestKind:
+      type: string
+      enum: [reachability, throughput]
+      description: |
+        reachability: whether the peer and the devices on the way answer, and their round-trip time (つながりの確認).
+        throughput: how fast data gets through to or from the peer (回線の速さ). tx only, only while stopped.
+    NetworkTestDirection:
+      type: string
+      enum: [to_peer, from_peer]
+      description: to_peer = this device → the peer (on tx the video's direction); from_peer = the peer → this device
+    NetworkTestMode:
+      type: string
+      enum: [max, steady]
+      description: |
+        max: the upper limit of the line (いちばん速く送れる速さ).
+        steady: send at rate_mbps and see whether it gets through, with loss and jitter.
     NetworkTestRequest:
       type: object
-      required: [direction, duration_s]
+      description: Fields other than kind apply to throughput only and are ignored for reachability. Omitted fields take the defaults.
+      required: [kind]
       properties:
-        direction: { type: string, enum: [to_peer, from_peer] }
-        duration_s: { type: integer, minimum: 5, maximum: 30 }
+        kind: { $ref: '#/components/schemas/NetworkTestKind' }
+        direction: { $ref: '#/components/schemas/NetworkTestDirection', description: default to_peer }
+        mode: { $ref: '#/components/schemas/NetworkTestMode', description: default max }
+        rate_mbps: { type: number, minimum: 1, maximum: 20, description: 'steady only (ignored, not checked, in max); default NetworkTestOptions.steady_rate_mbps' }
+        duration_s: { type: integer, minimum: 5, maximum: 30, default: 10 }
+    NetworkTestParams:
+      type: object
+      description: The request as the device runs it, defaults filled in; null where a field does not apply.
+      required: [kind, direction, mode, rate_mbps, duration_s]
+      properties:
+        kind: { $ref: '#/components/schemas/NetworkTestKind' }
+        direction: { oneOf: [{ $ref: '#/components/schemas/NetworkTestDirection' }, { type: 'null' }], description: null for reachability }
+        mode: { oneOf: [{ $ref: '#/components/schemas/NetworkTestMode' }, { type: 'null' }], description: null for reachability }
+        rate_mbps: { type: [number, 'null'], description: steady only; null otherwise }
+        duration_s: { type: [integer, 'null'], description: null for reachability }
+    NetworkTestOptions:
+      type: object
+      required: [steady_rate_mbps, rate_range_mbps, duration_range_s]
+      properties:
+        steady_rate_mbps: { type: number, description: default rate of the steady mode, examples: [6] }
+        rate_range_mbps: { type: array, items: { type: number }, minItems: 2, maxItems: 2, examples: [[1, 20]] }
+        duration_range_s: { type: array, items: { type: integer }, minItems: 2, maxItems: 2, examples: [[5, 30]] }
+    ReachabilityTarget:
+      type: object
+      required: [kind, label, address, sent, received, rtt_min_ms, rtt_avg_ms, rtt_max_ms]
+      properties:
+        kind: { type: string, enum: [peer, hop], description: 'peer: the other device (the UI names it 受信機 / 送信機); hop: a device on the way, named by label' }
+        label: { type: [string, 'null'], description: 'hop: the name set on the device; peer: null', examples: ['無線機（送信機側）'] }
+        address: { type: string, examples: [192.168.0.65] }
+        sent: { type: integer, examples: [10] }
+        received: { type: integer, examples: [10] }
+        rtt_min_ms: { type: [number, 'null'], description: null when nothing came back }
+        rtt_avg_ms: { type: [number, 'null'] }
+        rtt_max_ms: { type: [number, 'null'] }
+    ReachabilityResult:
+      type: object
+      description: |
+        The peer first, then the devices on the way in their configured order. The peer is left out
+        when its address is not known (rx before any transmitter connected, no address configured);
+        the list can be empty.
+      required: [targets]
+      properties:
+        targets: { type: array, items: { $ref: '#/components/schemas/ReachabilityTarget' } }
+    ThroughputResult:
+      type: object
+      required: [throughput_mbps, loss_pct, jitter_ms, retransmits, rtt_ms, per_second_mbps]
+      properties:
+        throughput_mbps: { type: number, description: 'what got through, as received (Mbps); while running, the mean of the seconds so far' }
+        loss_pct: { type: [number, 'null'], description: steady only }
+        jitter_ms: { type: [number, 'null'], description: steady only (variation of the delay) }
+        retransmits: { type: [integer, 'null'], description: max only (data sent again) }
+        rtt_ms: { type: [number, 'null'], description: max only, when it could be measured (mean round-trip time during the test) }
+        per_second_mbps: { type: array, items: { type: number }, description: one value per second, oldest first }
+    NetworkTestError:
+      type: string
+      enum: [peer_unreachable, peer_busy, failed]
+      description: |
+        peer_unreachable: the peer could not be reached (no route, no answer, refused).
+        peer_busy: the peer is answering another test. failed: anything else (details only in the developer log).
     NetworkTest:
       type: object
-      required: [id, state, direction, started_at, progress, result, error]
+      description: |
+        result is null while running and when failed, except that a running throughput test fills it in
+        from its first measured second on (per_second_mbps so far, throughput_mbps their mean; loss_pct,
+        jitter_ms, retransmits and rtt_ms stay null until done). kind=reachability → ReachabilityResult,
+        kind=throughput → ThroughputResult.
+      required: [id, kind, state, started_at, finished_at, progress, request, result, error]
       properties:
-        id: { type: string }
+        id: { type: string, description: opaque }
+        kind: { $ref: '#/components/schemas/NetworkTestKind' }
         state: { type: string, enum: [running, done, failed] }
-        direction: { type: string, enum: [to_peer, from_peer] }
         started_at: { type: string, format: date-time }
+        finished_at: { type: [string, 'null'], format: date-time, description: null while running }
         progress: { type: number, minimum: 0, maximum: 1 }
+        request: { $ref: '#/components/schemas/NetworkTestParams' }
         result:
-          type: [object, 'null']
-          properties:
-            throughput_mbps: { type: number }
-            loss_pct: { type: number }
-            jitter_ms: { type: number }
-        error: { type: [string, 'null'], enum: [peer_unreachable, busy, null] }
+          oneOf:
+            - { $ref: '#/components/schemas/ReachabilityResult' }
+            - { $ref: '#/components/schemas/ThroughputResult' }
+            - { type: 'null' }
+        error: { oneOf: [{ $ref: '#/components/schemas/NetworkTestError' }, { type: 'null' }], description: set when failed }
+    NetworkTestList:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, maxItems: 20, items: { $ref: '#/components/schemas/NetworkTest' }, description: newest first }

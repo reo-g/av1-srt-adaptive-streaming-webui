@@ -36,6 +36,7 @@ peer_port = 60021
 
 [rx]
 listen_port = 60021
+# peer_host = "192.168.0.220"  # the transmitter's address for つながりの確認 (default: the last one that connected)
 
 # The browser preview: a copy of the picture being sent (tx) / shown (rx), started on demand
 # (src/preview.rs). The media programs copy their video to <run_dir>/preview.sock while it runs.
@@ -51,6 +52,28 @@ enabled = true
 # delay_ms = 800               # smoothing delay; default 800 (tx), 300 (rx)
 # idle_exit_s = 30             # the program exits this long after the last viewer left
 # answer_timeout_s = 10
+
+# Network tests from the UI: つながりの確認 (echo to the peer and the hops below, both roles, also
+# while live) and 回線の速さ (tx only, while stopped: the bandwidth tool's client on tx to its server
+# on rx). The receiver runs the server on `port`, TCP and UDP: allow both between the two devices.
+# See src/nettest.rs.
+[network_test]
+enabled = true
+port = 60022
+# server = false               # run the bandwidth tool's server here (default: true on rx, false on tx)
+# iperf = "iperf3"             # program paths (a bare name is looked up in PATH)
+# ping = "ping"
+# steady_rate_mbps = 6         # the steady mode's rate when the request names none (1–20)
+
+# Devices on the way to the peer (e.g. the radios of a wireless link), checked after the peer in
+# this order; the label is shown in the UI as it is.
+[[network_test.hops]]
+label = "無線機（送信機側）"
+address = "192.168.0.65"
+
+[[network_test.hops]]
+label = "無線機（受信機側）"
+address = "192.168.0.56"
 
 # The profile: environment and arguments of each child. The built-in defaults are the standard
 # profile (the current automatic mode, see daemon/src/profile.rs). Entries here replace a

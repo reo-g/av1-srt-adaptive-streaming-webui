@@ -39,6 +39,8 @@ pub struct Config {
     pub profile: ProfileConfig,
     #[serde(default)]
     pub preview: Preview,
+    #[serde(default)]
+    pub network_test: NetworkTest,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -124,11 +126,13 @@ impl Default for Tx {
 #[serde(deny_unknown_fields, default)]
 pub struct Rx {
     pub listen_port: u16,
+    /// The transmitter's address for the reachability test (else the last transmitter that connected).
+    pub peer_host: Option<String>,
 }
 
 impl Default for Rx {
     fn default() -> Self {
-        Rx { listen_port: 60021 }
+        Rx { listen_port: 60021, peer_host: None }
     }
 }
 
@@ -184,6 +188,63 @@ impl Preview {
     }
 }
 
+/// The network tests (nettest.rs): reachability (the echo program to the peer and the hops) and
+/// throughput (the bandwidth tool's client on tx to its server on rx). Relative program names
+/// are looked up in PATH.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NetworkTest {
+    pub enabled: bool,
+    /// The bandwidth tool's port on the receiver (TCP and UDP).
+    pub port: u16,
+    /// Run the bandwidth tool's server as a child (default: true on rx, false on tx).
+    pub server: Option<bool>,
+    pub iperf: PathBuf,
+    pub ping: PathBuf,
+    /// The steady mode's rate when a request names none.
+    pub steady_rate_mbps: f64,
+    /// Devices on the way to the peer (e.g. the radios), checked after the peer in this order.
+    pub hops: Vec<Hop>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hop {
+    /// Shown in the UI as it is (e.g. "無線機（送信機側）").
+    pub label: String,
+    pub address: String,
+}
+
+impl Default for NetworkTest {
+    fn default() -> Self {
+        NetworkTest {
+            enabled: true,
+            port: 60022,
+            server: None,
+            iperf: "iperf3".into(),
+            ping: "ping".into(),
+            steady_rate_mbps: 6.0,
+            hops: Vec::new(),
+        }
+    }
+}
+
+impl NetworkTest {
+    /// Whether this device runs the bandwidth tool's server.
+    pub fn runs_server(&self, role: Role) -> bool {
+        self.enabled && self.server.unwrap_or(role == Role::Rx)
+    }
+}
+
+/// An address passed to a program as its last argument: a host name or an IP address, never
+/// something it would take as an option.
+pub fn address_ok(a: &str) -> bool {
+    !a.is_empty()
+        && a.len() <= 253
+        && !a.starts_with('-')
+        && a.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | ':' | '-' | '_' | '%'))
+}
+
 /// Changes to the standard profile. In the env maps a value replaces the default and an
 /// empty string removes the variable; numbers and booleans are written as text (true = 1).
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -220,6 +281,23 @@ impl Config {
         if c.preview.enabled && (c.preview.max_viewers == 0 || c.preview.answer_timeout_s == 0) {
             return Err("preview.max_viewers and preview.answer_timeout_s must be at least 1".into());
         }
+        c.rx.peer_host = c.rx.peer_host.map(|h| h.trim().to_string()).filter(|h| !h.is_empty());
+        if c.rx.peer_host.as_deref().is_some_and(|h| !address_ok(h)) {
+            return Err("rx.peer_host is not a host name or an address".into());
+        }
+        let n = &c.network_test;
+        if n.port == 0 {
+            return Err("network_test.port must not be 0".into());
+        }
+        let (lo, hi) = crate::nettest::RATE_RANGE;
+        if !(lo..=hi).contains(&n.steady_rate_mbps) {
+            return Err(format!("network_test.steady_rate_mbps must be {lo}–{hi}"));
+        }
+        for h in &n.hops {
+            if h.label.trim().is_empty() || !address_ok(&h.address) {
+                return Err(format!("network_test.hops: \"{}\" needs a label and a host name or address", h.address));
+            }
+        }
         c.media.repo = expand(&c.media.repo);
         c.media.bridge_cwd = c.media.bridge_cwd.as_deref().map(expand);
         c.run_dir = c.run_dir.as_deref().map(expand);
@@ -227,6 +305,8 @@ impl Config {
         c.archive_dir = c.archive_dir.as_deref().map(expand);
         c.tx.media_dir = c.tx.media_dir.as_deref().map(expand);
         c.preview.program = expand(&c.preview.program);
+        c.network_test.iperf = expand(&c.network_test.iperf);
+        c.network_test.ping = expand(&c.network_test.ping);
         Ok(c)
     }
 
@@ -247,6 +327,11 @@ impl Config {
     /// The socket the media programs copy the video to for the preview (one per device).
     pub fn preview_sock(&self) -> PathBuf {
         self.run_dir().join("preview.sock")
+    }
+
+    /// The bandwidth tool server's log (one per device, outside the sessions).
+    pub fn nettest_server_log(&self) -> PathBuf {
+        self.run_dir().join("nettest-server.log")
     }
 
     /// Where session directories are created: the archive if there is one, else the run dir.
@@ -289,6 +374,12 @@ mod tests {
         assert_eq!(c.preview.program, PathBuf::from("preview/preview_webrtc.py"));
         assert_eq!((c.preview.h265_kbps, c.preview.h264_kbps, c.preview.max_viewers), (16000, 24000, 3));
         assert_eq!(c.preview.delay_ms(c.role), 800);
+        let n = &c.network_test;
+        assert!(n.enabled && !n.runs_server(c.role));
+        assert_eq!(n.port, 60022);
+        let hops: Vec<&str> = n.hops.iter().map(|h| h.address.as_str()).collect();
+        assert_eq!(hops, ["192.168.0.65", "192.168.0.56"]);
+        assert!(c.rx.peer_host.is_none());
     }
 
     #[test]
@@ -304,6 +395,49 @@ mod tests {
         assert!(Config::parse(&format!("{base}[preview]\nmax_viewers = 0\n")).is_err());
         assert!(Config::parse(&format!("{base}[preview]\nenabled = false\nmax_viewers = 0\n")).is_ok());
         assert!(Config::parse(&format!("{base}[preview]\nfps = 5\n")).is_err());
+    }
+
+    #[test]
+    fn network_test_section() {
+        let rx = "id = \"RX-02\"\nrole = \"rx\"\nrun_dir = \"/run/c\"\n[media]\nrepo = \"/opt/m\"\n";
+        let tx = "id = \"TX-01\"\nrole = \"tx\"\n[tx]\npeer_host = \"10.0.0.2\"\n[media]\nrepo = \"/opt/m\"\n";
+        let c = Config::parse(rx).unwrap();
+        let n = &c.network_test;
+        assert!(n.enabled && n.runs_server(Role::Rx), "the receiver answers by default");
+        assert_eq!((n.port, n.steady_rate_mbps), (60022, 6.0));
+        assert_eq!((n.iperf.as_path(), n.ping.as_path()), (Path::new("iperf3"), Path::new("ping")));
+        assert!(n.hops.is_empty() && c.rx.peer_host.is_none());
+        assert_eq!(c.nettest_server_log(), PathBuf::from("/run/c/nettest-server.log"));
+        let c = Config::parse(tx).unwrap();
+        assert!(!c.network_test.runs_server(Role::Tx), "not on the transmitter");
+        let c = Config::parse(&format!("{tx}[network_test]\nserver = true\n")).unwrap();
+        assert!(c.network_test.runs_server(Role::Tx));
+        let c = Config::parse(&format!("{rx}[network_test]\nenabled = false\n")).unwrap();
+        assert!(!c.network_test.runs_server(Role::Rx), "off with the tests");
+
+        let hops = "[[network_test.hops]]\nlabel = \"無線機（送信機側）\"\naddress = \"192.168.0.65\"\n\
+                    [[network_test.hops]]\nlabel = \"無線機（受信機側）\"\naddress = \"192.168.0.56\"\n";
+        let c = Config::parse(&format!("{rx}[rx]\npeer_host = \" 192.168.0.220 \"\n[network_test]\nport = 5201\nsteady_rate_mbps = 4\n{hops}")).unwrap();
+        assert_eq!(c.rx.peer_host.as_deref(), Some("192.168.0.220"));
+        assert_eq!((c.network_test.port, c.network_test.steady_rate_mbps), (5201, 4.0));
+        let labels: Vec<_> = c.network_test.hops.iter().map(|h| (h.label.as_str(), h.address.as_str())).collect();
+        assert_eq!(labels, [("無線機（送信機側）", "192.168.0.65"), ("無線機（受信機側）", "192.168.0.56")]);
+        assert!(Config::parse(&format!("{rx}[rx]\npeer_host = \"\"\n")).unwrap().rx.peer_host.is_none());
+
+        for bad in [
+            "[rx]\npeer_host = \"-f\"\n",
+            "[network_test]\nport = 0\n",
+            "[network_test]\nsteady_rate_mbps = 25\n",
+            "[network_test]\nsteady_rate_mbps = 0.5\n",
+            "[[network_test.hops]]\nlabel = \"\"\naddress = \"192.168.0.65\"\n",
+            "[[network_test.hops]]\nlabel = \"x\"\naddress = \"-c 5\"\n",
+            "[[network_test.hops]]\nlabel = \"x\"\n",
+            "[network_test]\nduration_s = 10\n",
+        ] {
+            assert!(Config::parse(&format!("{rx}{bad}")).is_err(), "{bad}");
+        }
+        assert!(address_ok("192.168.0.65") && address_ok("fe80::1%eth0") && address_ok("rx-01.local"));
+        assert!(!address_ok("") && !address_ok("-R") && !address_ok("a b") && !address_ok("a;b"));
     }
 
     #[test]

@@ -6,6 +6,8 @@ import type {
   Device,
   DeviceEvent,
   NetworkTest,
+  NetworkTestList,
+  NetworkTestOptions,
   NetworkTestRequest,
   PreviewOffer,
   PreviewSession,
@@ -82,7 +84,9 @@ export const api = {
   },
   networkTest: {
     start: (body: NetworkTestRequest) => req<NetworkTest>('POST', '/network-tests', body),
+    list: () => req<NetworkTestList>('GET', '/network-tests'),
     get: (id: string) => req<NetworkTest>('GET', `/network-tests/${encodeURIComponent(id)}`),
+    options: () => req<NetworkTestOptions>('GET', '/network-tests/options'),
   },
 
   /** Open a preview session: send the browser's offer, get the device's answer. */

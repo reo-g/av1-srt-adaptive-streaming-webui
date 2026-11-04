@@ -150,7 +150,7 @@ export type EventCode =
   | 'video_settings_applied'
   | 'transport_settings_applied'
   | 'passphrase_changed'
-  | 'network_test_done'; // params: mbps
+  | 'network_test_done'; // params: mbps, direction (NetworkTestDirection). Only after a throughput test that finished
 
 /**
  * Why the video bitrate changed (bitrate_changed.reason).
@@ -362,19 +362,108 @@ export interface CompareResult {
   rows: CompareRow[];
 }
 
-// ---------------------------------------------------------------- network test (tx starts it)
+// ---------------------------------------------------------------- network test
 
+/**
+ * reachability  つながりの確認: whether the peer and the devices on the way (configured on the
+ *               device) answer, and their round-trip time. Both roles, any time (also while live).
+ * throughput    回線の速さ: how fast data gets through to or from the peer. tx only, only while the
+ *               link is stopped (it would disturb the video), one at a time.
+ */
+export type NetworkTestKind = 'reachability' | 'throughput';
+
+/** to_peer: this device → the peer (on tx the video's direction). from_peer: the peer → this device. */
+export type NetworkTestDirection = 'to_peer' | 'from_peer';
+
+/**
+ * max     いちばん速く送れる速さを測る: the upper limit of the line
+ * steady  決めた速さで送って、損失と揺らぎを見る: send at rate_mbps and see whether it gets through
+ */
+export type NetworkTestMode = 'max' | 'steady';
+
+/** POST /network-tests. Fields other than kind apply to throughput only; omitted ones take the defaults. */
 export interface NetworkTestRequest {
-  direction: 'to_peer' | 'from_peer';
-  duration_s: number; // 5–30
+  kind: NetworkTestKind;
+  direction?: NetworkTestDirection; // default to_peer
+  mode?: NetworkTestMode; // default max
+  rate_mbps?: number; // steady only; NetworkTestOptions.rate_range_mbps (1–20), default NetworkTestOptions.steady_rate_mbps
+  duration_s?: number; // integer, NetworkTestOptions.duration_range_s (5–30), default 10
 }
 
-export interface NetworkTest {
-  id: string;
+/** The request as the device runs it: defaults filled in, null where a field does not apply. */
+export interface NetworkTestParams {
+  kind: NetworkTestKind;
+  direction: NetworkTestDirection | null; // null for reachability
+  mode: NetworkTestMode | null; // null for reachability
+  rate_mbps: number | null; // steady only
+  duration_s: number | null; // null for reachability
+}
+
+/** GET /network-tests/options: limits and defaults of the throughput test. */
+export interface NetworkTestOptions {
+  steady_rate_mbps: number; // default rate of the steady mode, e.g. 6
+  rate_range_mbps: [number, number]; // [1, 20]
+  duration_range_s: [number, number]; // [5, 30]
+}
+
+export interface ReachabilityTarget {
+  /** peer: the other device (the UI names it 受信機 / 送信機). hop: a device on the way, named by `label`. */
+  kind: 'peer' | 'hop';
+  label: string | null; // hop: the name set on the device, e.g. "無線機（送信機側）"; peer: null
+  address: string;
+  sent: number; // e.g. 10
+  received: number;
+  /** Round-trip times; null when nothing came back. */
+  rtt_min_ms: number | null;
+  rtt_avg_ms: number | null;
+  rtt_max_ms: number | null;
+}
+
+/**
+ * Peer first (left out when its address is not known: rx before any transmitter has connected and
+ * without a configured address), then the devices on the way in their configured order. Can be empty.
+ */
+export interface ReachabilityResult {
+  targets: ReachabilityTarget[];
+}
+
+export interface ThroughputResult {
+  /** What got through, Mbps (as received). While running: the mean of the seconds so far. */
+  throughput_mbps: number;
+  loss_pct: number | null; // steady only
+  jitter_ms: number | null; // steady only: variation of the delay
+  retransmits: number | null; // max only: data sent again
+  rtt_ms: number | null; // max only, when the device could measure it
+  per_second_mbps: number[]; // one value per second, oldest first
+}
+
+/**
+ * peer_unreachable  the peer could not be reached (no route, no answer, refused)
+ * peer_busy         the peer is answering another test
+ * failed            anything else
+ */
+export type NetworkTestError = 'peer_unreachable' | 'peer_busy' | 'failed';
+
+interface NetworkTestBase {
+  id: string; // opaque
   state: 'running' | 'done' | 'failed';
-  direction: 'to_peer' | 'from_peer';
   started_at: string;
+  finished_at: string | null; // null while running
   progress: number; // 0–1
-  result: { throughput_mbps: number; loss_pct: number; jitter_ms: number } | null;
-  error: 'peer_unreachable' | 'busy' | null;
+  error: NetworkTestError | null; // set when failed
+}
+
+/**
+ * One test (POST /network-tests, GET /network-tests[/{id}]).
+ * result: null while running and when failed, except that a running throughput test fills it in
+ * from its first measured second on (per_second_mbps so far; loss, jitter, retransmits and rtt
+ * stay null until it is done).
+ */
+export type NetworkTest =
+  | (NetworkTestBase & { kind: 'reachability'; request: NetworkTestParams; result: ReachabilityResult | null })
+  | (NetworkTestBase & { kind: 'throughput'; request: NetworkTestParams; result: ThroughputResult | null });
+
+/** GET /network-tests: the last 20, newest first (kept in memory only). */
+export interface NetworkTestList {
+  items: NetworkTest[];
 }

@@ -8,6 +8,7 @@ use crate::media::{self, Real};
 use crate::model::{
     Alert, Device, InputKind, LinkState, Media, Mode, Peer, Settings, Stats, Status, SIGNAL_FORMAT, TIMEZONE,
 };
+use crate::nettest::{NetTests, Server, ServerLaunch};
 use crate::preview::{self, Preview};
 use crate::profile::{Input, Plan, Profile};
 use crate::stats::{Ctx, Sampler};
@@ -52,6 +53,8 @@ pub struct App {
     pub firmware: String,
     /// The browser preview (independent of the link; preview.rs).
     pub preview: Preview,
+    /// The network tests and, on rx, the bandwidth tool's server (independent of the link; nettest.rs).
+    pub nettest: NetTests,
     inner: Mutex<Inner>,
     live: broadcast::Sender<Arc<str>>,
     cmd: mpsc::Sender<Cmd>,
@@ -271,6 +274,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         dlog!("preview: {} is too long for a socket path; set a shorter run_dir", cfg.preview_sock().display());
     }
     let preview = Preview::start(preview::Launch::from_config(&cfg));
+    let nettest = NetTests::new(&cfg, Server::start(ServerLaunch::from_config(&cfg)));
     let machine = Machine::new(cfg.role, backend, placeholder_plan(&cfg), sessions, now);
     let inner = Inner {
         link: machine.link.clone(),
@@ -285,6 +289,7 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         prof,
         firmware,
         preview,
+        nettest,
         inner: Mutex::new(inner),
         live,
         cmd: cmd_tx,
@@ -340,6 +345,7 @@ async fn supervise<B: MediaBackend>(
     let mut kept: Option<PathBuf> = None;
     let mut shutdown: Option<Instant> = None;
     let mut preview_done = None;
+    let mut server_done = None;
     loop {
         tokio::select! {
             Some(cmd) = cmds.recv() => {
@@ -403,25 +409,34 @@ async fn supervise<B: MediaBackend>(
             }
             _ = next_signal(&mut term) => {
                 // a second signal: exit now (the children get SIGTERM from PDEATHSIG)
-                if shutdown.is_some() { preview_done = None; break; }
+                if shutdown.is_some() { preview_done = None; server_done = None; break; }
                 dlog!("SIGTERM: stopping the media programs");
                 m.stop(Instant::now());
                 preview_done = Some(app.preview.stop());
+                server_done = Some(app.nettest.stop_server());
                 shutdown = Some(Instant::now());
             }
             _ = next_signal(&mut int) => {
-                if shutdown.is_some() { preview_done = None; break; }
+                if shutdown.is_some() { preview_done = None; server_done = None; break; }
                 dlog!("SIGINT: stopping the media programs");
                 m.stop(Instant::now());
                 preview_done = Some(app.preview.stop());
+                server_done = Some(app.nettest.stop_server());
                 shutdown = Some(Instant::now());
             }
         }
     }
-    // The preview program was asked to quit with the media programs (SIGKILL after 4 s); not
-    // waited for after a second signal.
-    if let (Some(done), Some(t)) = (preview_done, shutdown) {
-        let _ = tokio::time::timeout_at((t + Duration::from_millis(4500)).into(), done).await;
+    // The preview program was asked to quit with the media programs (SIGKILL after 4 s), the
+    // network test server too (SIGKILL after 2 s); not waited for after a second signal. A
+    // network test still running dies with the daemon (PDEATHSIG).
+    if let Some(t) = shutdown {
+        let by = (t + Duration::from_millis(4500)).into();
+        if let Some(done) = preview_done {
+            let _ = tokio::time::timeout_at(by, done).await;
+        }
+        if let Some(done) = server_done {
+            let _ = tokio::time::timeout_at(by, done).await;
+        }
     }
     dlog!("exit");
 }
@@ -456,6 +471,13 @@ fn publish<B: MediaBackend>(app: &App, m: &mut Machine<B>, published: &mut u64, 
 /// An App for the HTTP tests: no supervisor loop, the link in `state`.
 #[cfg(test)]
 pub fn test_app(cfg: Config, preview: Preview, state: LinkState) -> Arc<App> {
+    let nettest = NetTests::new(&cfg, Server::start(None));
+    test_app_with(cfg, preview, state, nettest)
+}
+
+/// test_app with the network tests given (stub programs, short waits; nettest.rs).
+#[cfg(test)]
+pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: NetTests) -> Arc<App> {
     use crate::supervisor::Link;
     let now = Instant::now();
     let link = Link {
@@ -477,6 +499,7 @@ pub fn test_app(cfg: Config, preview: Preview, state: LinkState) -> Arc<App> {
         prof: Profile::standard(),
         firmware: "test".into(),
         preview,
+        nettest,
         inner: Mutex::new(inner),
         live,
         cmd,

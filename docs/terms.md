@@ -42,7 +42,13 @@
 | 置き換えを推奨 | エンコード / デコード（信号経路の段） | 圧縮 / 復元 | — | エンコーダ / デコーダ |
 | 置き換えを推奨 | プレビュー（AV1 を二分岐し、H.265 か H.264 で圧縮し直して WebRTC で配る） | プレビュー。方式と映像形式の名前は出さず、何を映しているかを添える（「受信機へ送っている映像を、圧縮したあとの画質で確認用に表示しています。」）。表示できないときは理由を文で（「ほかの画面でプレビューを見ているため、表示できません」「このブラウザではプレビューを表示できません」） | `/preview/sessions`（`offer` / `answer`）、エラー `not_live`・`too_many_viewers`・`bad_offer`・`no_common_codec`・`preview_unavailable` | 送信機は送出直前の AV1、受信機は表示に合わせた AV1 を写し取り、プレビュー用の子プロセスが復号して再圧縮（H.265 を優先、なければ H.264）。視聴は既定 3 画面まで |
 | 置き換えを推奨 | デバイスのパス（`/dev/video0`）、ファイルのフルパス | カメラの名前（「Facecam 4K」）、ファイル名だけ | `Media.label`（画面に出す名前）。`VideoInput.camera` / `file` は値として持つだけ | V4L2 デバイス、メディアフォルダー |
-| 置き換えを推奨 | 帯域、パケット損失、ジッター（回線テスト） | 送れた量、回線の損失、揺らぎ（遅れのばらつき） | `throughput_mbps`, `loss_pct`, `jitter_ms` | 帯域測定ツールの結果 |
+| 必ず置き換え | 帯域測定ツール（iperf3）、疎通確認（ping、ICMP）、TCP / UDP の名前 | 「回線の確認」。画面ではネットワーク画面の「つながりの確認」と「回線の速さ」。ツールとプロトコルの名前は画面にも API にも出さない（`npm run check:terms` は iperf を拒否する） | `/network-tests`、`kind`（`reachability` / `throughput`） | 送信機の daemon が iperf3 クライアント（`--json-stream`）、受信機の daemon が iperf3 サーバー（子プロセス、ポート 60022）。疎通は iputils の ping（10 回、0.2 秒おき）。設定は `[network_test]`（`iperf`、`ping`、`port`、`server`、`hops`） |
+| 置き換えを推奨 | 疎通確認（ping） | つながりの確認。状態は「届く／一部届かない／届かない」（● ▲ ■）、「往復時間」、「届いた数（9/10）」 | `kind: reachability`、`targets[]`（`sent`, `received`, `rtt_min_ms` / `rtt_avg_ms` / `rtt_max_ms`） | ping の transmitted / received と rtt min/avg/max |
+| 置き換えを推奨 | ホップ（経路上の機器） | 途中の機器（画面では機器に設定した名前、例「無線機（送信機側）」。説明では「途中の無線機」） | `targets[].kind: hop`、`label` | `[[network_test.hops]]`（`label`, `address`） |
+| 置き換えを推奨 | スループット測定（TCP の最大値 / UDP の固定レート） | 回線の速さ。測り方は「いちばん速く送れる速さを測る」／「決めた速さで送って、損失と揺らぎを見る」 | `kind: throughput`、`mode`（`max` / `steady`）、`rate_mbps` | TCP（既定）／ UDP（`-u -b <rate>M`） |
+| 置き換えを推奨 | 上り / 下り、リバースモード | 向き「送信機 → 受信機（映像の向き）」／「受信機 → 送信機」 | `direction`（`to_peer` / `from_peer`） | 通常 / `-R` |
+| 置き換えを推奨 | 帯域、パケット損失、ジッター、再送（回線の速さの結果） | 送れた速さ、損失（届かずに失われた割合）、揺らぎ（遅れのばらつき）、往復時間（測っている間）。再送の回数は画面に出さない | `throughput_mbps`, `loss_pct`, `jitter_ms`, `rtt_ms`, `retransmits`, `per_second_mbps` | iperf3 の受信側の bits_per_second、lost_percent、jitter_ms、retransmits、mean_rtt、interval ごとの値 |
+| 置き換えを推奨 | 接続タイムアウト、接続拒否、サーバー使用中（回線の速さの失敗） | 「受信機に届きませんでした。つながりの確認を試してください。」「受信機が別の測定をしています。…」「測れませんでした。」 | `error`（`peer_unreachable` / `peer_busy` / `failed`） | iperf3 のエラー文（開発者向けログだけ） |
 | そのまま | 映像の遅れ（入力から表示まで） | 映像の遅れ。実測するまでは「映像の遅れ（目安）」として遅延の目標を出す | `video_latency_ms`（未測定は `null`）, `delay_target_ms` | 表示時刻 − 入力時刻 |
 | そのまま | パスフレーズ | パスフレーズ（暗号化が「なし」の間は出さない） | `passphrase`（書き込みのみ） | `passphrase` |
 | そのまま | 暗号化方式（AES-128 / 192 / 256） | そのまま。選択肢が「なし」だけの間は、比較の表も含めて「暗号化　なし」 | `cipher` | `pbkeylen` |

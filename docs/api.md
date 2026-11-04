@@ -31,7 +31,9 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | POST | `/settings/transport/check` | 下書きの検証と影響 |
 | GET | `/settings/transport/options` | 接続方法・暗号化・遅延の選択肢（いまは接続方法 `outbound`、暗号化 `none`、遅延は標準のみ。低遅延は `available: false`） |
 | GET | `/transport/compare` | 送信機と受信機の設定の比較 |
-| POST / GET | `/network-tests`, `/network-tests/{id}` | 回線テスト |
+| POST / GET | `/network-tests` | 回線の確認を始める（つながりの確認・回線の速さ）／直近 20 件の結果（新しい順） |
+| GET | `/network-tests/{id}` | 1 件の進み具合と結果 |
+| GET | `/network-tests/options` | 回線の速さの選択の範囲と既定値（決めた速さの既定 6 Mbps、1〜20 Mbps、5〜30 秒） |
 
 ## 設定変更の流れ
 
@@ -62,6 +64,41 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `503 preview_unavailable` | プレビューが無効、または準備できなかった | プレビューを表示できませんでした ＋「もう一度試す」 |
 
 `DELETE /preview/sessions/{id}` は、知らない id でも `204`。
+
+## 回線の確認（ネットワーク画面）
+
+送信機と受信機の間の回線を、画面から確かめる。2 種類ある（`NetworkTest.kind`）。結果は機器のメモリーに直近 20 件だけ持ち、再起動すると消える。
+
+| `kind` | 画面 | 役割 | いつ | 中身 |
+| --- | --- | --- | --- | --- |
+| `reachability` | つながりの確認 | 送信機・受信機 | いつでも（伝送中も。とても小さい） | 相手と、機器に設定した途中の機器（無線機など）が応答するか、往復時間。10 回ずつ、約 2〜3 秒 |
+| `throughput` | 回線の速さ | 送信機だけ（受信機は `409 unsupported_role`） | 接続の状態が `stopped` のときだけ。1 度に 1 つ | 受信機との間で 1 秒あたりどれだけ送れるか。5〜30 秒（既定 10 秒） |
+
+- 始める：`POST /network-tests {"kind": "reachability"}` または `{"kind": "throughput", "direction", "mode", "rate_mbps", "duration_s"}`。すぐに `202` で、`state: "running"` のテストを返す。画面は `GET /network-tests` を、走っている間は 1 秒ごと、それ以外は 5 秒ごとに読み直す（ほかの画面で始めたテストも出る）。
+- 調べる順番：`kind` がない・知らない値（`400 invalid`、`field: "kind"`）→ 受信機で `throughput`（`409 unsupported_role`）→ 入力の誤り（`400 invalid`。`direction`・`mode` は `invalid`、`rate_mbps` 1〜20（`steady` のときだけ）・`duration_s` 5〜30 の整数は `out_of_range` と `min`・`max`）→ `409 busy`。
+- `409 busy`：`throughput` は接続の状態が `stopped` でないとき（測ると映像が止まるため）と、別の `throughput` が走っているとき。`reachability` は別の `reachability` が走っているとき。
+- `throughput` が走っている間は、`POST /transport/start` も `409 busy`（画面は「回線の速さを測っているため、伝送を開始できません。…」）。
+- `direction`：`to_peer` はこの機器から相手へ（送信機では映像の向き）、`from_peer` は相手からこの機器へ。
+- `mode`：`max` は回線がどこまで速く送れるか（上限）、`steady` は `rate_mbps`（既定は `/network-tests/options` の `steady_rate_mbps`、6 Mbps）で送り、届かずに失われた割合（`loss_pct`）と遅れのばらつき（`jitter_ms`）を見る。
+- 受信機は、機器が動いている間いつでも `throughput` の相手になる。伝送とは別に動き、伝送には影響しない。
+
+`NetworkTest`
+
+| 項目 | 中身 |
+| --- | --- |
+| `id`, `kind`, `state` | `running` → `done` か `failed` |
+| `started_at`, `finished_at` | 走っている間 `finished_at` は `null` |
+| `progress` | 0〜1 |
+| `request` | 機器が実際に使った値（既定値を埋めたもの）。`reachability` では `direction`・`mode`・`rate_mbps`・`duration_s` は `null`。`rate_mbps` は `steady` のときだけ |
+| `result` | 下の表。走っている間と失敗したときは `null`。ただし `throughput` は 1 秒目が測れたところから、それまでの `per_second_mbps` と、その平均の `throughput_mbps` を入れる（`loss_pct`・`jitter_ms`・`retransmits`・`rtt_ms` は終わるまで `null`） |
+| `error` | 失敗したとき：`peer_unreachable`（相手に届かない：経路がない・応答がない・断られた）、`peer_busy`（相手が別の測定をしている）、`failed`（それ以外。詳しいことは開発者向けログだけに出す） |
+
+| 結果 | 項目 | 画面 |
+| --- | --- | --- |
+| `reachability` | `targets[]`：`kind`（`peer` / `hop`）、`label`（`hop` の名前。`peer` は `null`）、`address`、`sent`、`received`、`rtt_min_ms`・`rtt_avg_ms`・`rtt_max_ms`（届かなければ `null`）。相手が先、そのあと途中の機器を設定の順に。受信機で相手のアドレスがわからない（まだ一度もつながっていない、設定もない）ときは相手を入れない。空のこともある | 相手、アドレス、状態（● 届く ▲ 一部届かない ■ 届かない）、往復時間（平均と最小〜最大）、届いた数（9/10） |
+| `throughput` | `throughput_mbps`（受け取れた速さ）、`loss_pct`・`jitter_ms`（`steady` だけ）、`retransmits`・`rtt_ms`（`max` だけ。`rtt_ms` は測れたとき）、`per_second_mbps`（1 秒ごと） | 送れた速さ、損失、揺らぎ、往復時間（測っている間）。走っている間は最後の 1 秒の値を「いま 5.2 Mbps」 |
+
+終わった `throughput` は、イベント `network_test_done`（`mbps`、`direction`）を出す（「回線テストが終わりました（送信機 → 受信機、5.3 Mbps）」）。
 
 ## 状態（`Status.state`）
 
@@ -152,7 +189,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `recovered` | 回線に余裕が戻ったため、画質を 2.5 → 3.0 Mbps に上げました |
 | `manual` | 画質を 3.0 → 2.5 Mbps に変更しました |
 
-ほかに `delay_margin_low`（`margin_s`）、`video_stalled`（`seconds`：その停止の長さ）、`loss_high`（`loss_pct`）など。
+ほかに `delay_margin_low`（`margin_s`）、`video_stalled`（`seconds`：その停止の長さ）、`loss_high`（`loss_pct`）、`network_test_done`（`mbps`、`direction`）など。
 
 ## モック（開発用）
 
@@ -165,3 +202,11 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `error` | 受信機に接続できない（`peer_unreachable`）。5 秒ごとに再接続を試みる | 送信機からの接続を待っている |
 
 回線が混んでいる間、送信機は推定容量くらいで送り（溜まった分が余裕を減らす）、推定容量が測れる。実際の映像のビットレートは、目標が変わってから約 3 秒かけて新しい目標に近づく。
+
+回線の確認は、実際の設置（約 5 Mbps の無線区間、往復約 75 ms、両端の近くに無線機）をまねる。結果はモックを切り替えると消える。
+
+| 状況 | つながりの確認 | 回線の速さ（送信機） |
+| --- | --- | --- |
+| `normal` | 相手 約 75 ms、近い無線機 約 0.4 ms、遠い無線機 約 75 ms。すべて 10/10 | 送信機 → 受信機 約 5.3 Mbps、受信機 → 送信機 約 3 Mbps。決めた速さでは 5.4（逆向き 3.1）Mbps を超えた分が失われる（6 Mbps で損失 約 10 %、揺らぎ 3 ms） |
+| `warn` | 遠い無線機と相手が 9/10（▲ 一部届かない） | 約 3.2 Mbps と 2 Mbps |
+| `error` | 近い無線機だけ届き、遠い無線機と相手は届かない | 接続を試す 3 秒のあと `peer_unreachable`（送信機は再接続中なので、先に停止が要る） |

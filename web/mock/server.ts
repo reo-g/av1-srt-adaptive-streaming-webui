@@ -45,7 +45,14 @@ import type {
   Media,
   Metric,
   NetworkTest,
+  NetworkTestDirection,
+  NetworkTestList,
+  NetworkTestMode,
+  NetworkTestOptions,
+  NetworkTestParams,
+  NetworkTestRequest,
   Params,
+  ReachabilityTarget,
   PreviewOffer,
   Role,
   Stats,
@@ -288,6 +295,7 @@ function reset() {
   wasMarginLow = scenario === 'warn' && marginLowSince(0) !== null;
   lastTickT = 0;
   switchRamp = null;
+  tests = [];
   seedEvents();
   seedHistory();
 }
@@ -601,26 +609,204 @@ function compare(): CompareResult {
 
 // ------------------------------------------------------------------ network test
 
-const tests = new Map<string, NetworkTest & { startMs: number }>();
+/**
+ * The line of the real installation: a radio link of about 5 Mbps with a round trip of about 75 ms,
+ * a radio next to each device. tx: the near radio is on the transmitter side, rx the other way round.
+ *   normal  everything answers; about 5.3 Mbps towards the receiver, 3 Mbps back; sending at a fixed
+ *           rate, what is above about 5.4 (3.1) Mbps is lost (6 Mbps → about 10 % loss, 3 ms jitter)
+ *   warn    the radio link is worse: an answer lost now and then, 3.2 Mbps towards the receiver, 2 back
+ *   error   the radio link is down: the near radio answers, the far one and the peer do not;
+ *           throughput tests fail after the 3 s connection timeout with peer_unreachable
+ * Throughput tests run only while stopped (409 busy otherwise) and block /transport/start, as on the device.
+ */
+const NETWORK_TEST_OPTIONS: NetworkTestOptions = { steady_rate_mbps: 6, rate_range_mbps: [1, 20], duration_range_s: [5, 30] };
+const REACH_MS = 2400; // 10 answers 0.2 s apart, the last one waited for up to 1 s
+const CONNECT_TIMEOUT_MS = 3000;
+const HISTORY_MAX = 20;
+const RADIO_TX_SIDE = '10.20.1.65';
+const RADIO_RX_SIDE = '10.20.1.56';
 
-function networkTest(id: string): NetworkTest | null {
-  const t = tests.get(id);
-  if (!t) return null;
-  const dur = 5000;
-  const p = Math.min(1, (now() - t.startMs) / dur);
-  if (scenario === 'error' && p > 0.2) return { ...strip(t), state: 'failed', progress: p, error: 'peer_unreachable' };
-  if (p < 1) return { ...strip(t), progress: p };
-  if (t.state === 'running') {
-    t.state = 'done';
-    t.result = scenario === 'warn' ? { throughput_mbps: 3.1, loss_pct: 4.6, jitter_ms: 6.2 } : { throughput_mbps: 48.2, loss_pct: 0.2, jitter_ms: 1.3 };
-    addEvent('info', 'network_test_done', { mbps: t.result.throughput_mbps });
-  }
-  return { ...strip(t), progress: 1 };
+interface MockTest {
+  test: NetworkTest;
+  startMs: number;
+  durMs: number;
+  /** throughput: the per-second values the test will report */
+  seconds: number[];
+  finish: () => Pick<NetworkTest, 'result' | 'error'>;
 }
-const strip = (t: NetworkTest & { startMs: number }): NetworkTest => {
-  const { startMs: _ignored, ...rest } = t;
-  void _ignored;
-  return rest;
+let tests: MockTest[] = [];
+let testSeq = 0;
+
+const wave = (i: number, a: number) => a * (0.6 * Math.sin(i * 1.7 + 0.4) + 0.4 * Math.sin(i * 0.61 + 2.1));
+const mean = (v: number[]) => (v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0);
+
+/** One reachability target: `rtt` the typical round trip, `got` how many of 10 answers come back. */
+function target(kind: 'peer' | 'hop', label: string | null, address: string, rtt: number, got: number): ReachabilityTarget {
+  const seen = got > 0;
+  const k = rtt < 5 ? 0.15 : 0.06;
+  return {
+    kind,
+    label,
+    address,
+    sent: 10,
+    received: got,
+    rtt_min_ms: seen ? r2(rtt * (1 - k)) : null,
+    rtt_avg_ms: seen ? r2(rtt) : null,
+    rtt_max_ms: seen ? r2(rtt * (1 + 2 * k)) : null,
+  };
+}
+
+function reachTargets(): ReachabilityTarget[] {
+  const down = scenario === 'error';
+  const lossy = scenario === 'warn';
+  const far = down ? 0 : lossy ? 9 : 10;
+  const [near, other] =
+    role === 'tx'
+      ? [['無線機（送信機側）', RADIO_TX_SIDE], ['無線機（受信機側）', RADIO_RX_SIDE]]
+      : [['無線機（受信機側）', RADIO_RX_SIDE], ['無線機（送信機側）', RADIO_TX_SIDE]];
+  return [
+    target('peer', null, peer().address, lossy ? 78.6 : 75.4, far),
+    target('hop', near[0], near[1], 0.42, 10),
+    target('hop', other[0], other[1], lossy ? 77.9 : 74.8, far),
+  ];
+}
+
+/** Line capacity in Mbps: [max, steady] for each direction (tx view: to_peer = towards the receiver). */
+function capacity(direction: NetworkTestDirection): { max: number; steady: number } {
+  const toRx = direction === 'to_peer';
+  if (scenario === 'warn') return toRx ? { max: 3.2, steady: 3.3 } : { max: 2.0, steady: 2.1 };
+  return toRx ? { max: 5.3, steady: 5.4 } : { max: 3.0, steady: 3.1 };
+}
+
+function planThroughput(p: NetworkTestParams): Pick<MockTest, 'durMs' | 'seconds' | 'finish'> {
+  const dur = p.duration_s ?? 10;
+  if (scenario === 'error')
+    return { durMs: CONNECT_TIMEOUT_MS, seconds: [], finish: () => ({ result: null, error: 'peer_unreachable' }) };
+  const cap = capacity(p.direction ?? 'to_peer');
+  if (p.mode === 'steady') {
+    const rate = p.rate_mbps ?? NETWORK_TEST_OPTIONS.steady_rate_mbps;
+    const over = rate > cap.steady;
+    const through = over ? cap.steady : rate;
+    const seconds = Array.from({ length: dur }, (_, i) => r2(through * (1 + wave(i, over ? 0.02 : 0.004))));
+    return {
+      durMs: dur * 1000,
+      seconds,
+      finish: () => ({
+        result: {
+          throughput_mbps: r2(mean(seconds)),
+          loss_pct: r2(over ? (1 - cap.steady / rate) * 100 + 0.2 : 0.1),
+          jitter_ms: r2(over ? 3.0 : 1.6),
+          retransmits: null,
+          rtt_ms: null,
+          per_second_mbps: seconds,
+        },
+        error: null,
+      }),
+    };
+  }
+  // Upper limit: the first second is slower (the sender works up to the line's pace over a 75 ms
+  // round trip); the seconds are scaled so that their mean is the capacity.
+  const raw = Array.from({ length: dur }, (_, i) => (i === 0 ? 0.62 : 1 + wave(i, 0.03)));
+  const seconds = raw.map((v) => r2((v * cap.max) / mean(raw)));
+  return {
+    durMs: dur * 1000,
+    seconds,
+    finish: () => ({
+      result: {
+        throughput_mbps: r2(mean(seconds)),
+        loss_pct: null,
+        jitter_ms: null,
+        retransmits: scenario === 'warn' ? 61 : 14,
+        rtt_ms: scenario === 'warn' ? 142.6 : 118.3,
+        per_second_mbps: seconds,
+      },
+      error: null,
+    }),
+  };
+}
+
+/** Bring a test up to now: progress, the seconds measured so far, the end. */
+function advance(m: MockTest) {
+  const t = m.test;
+  if (t.state !== 'running') return;
+  const elapsed = now() - m.startMs;
+  if (elapsed < m.durMs) {
+    if (t.kind === 'throughput' && m.seconds.length > 0) {
+      t.progress = r2(elapsed / m.durMs);
+      const sofar = m.seconds.slice(0, Math.floor(elapsed / 1000));
+      t.result = sofar.length
+        ? { throughput_mbps: r2(mean(sofar)), loss_pct: null, jitter_ms: null, retransmits: null, rtt_ms: null, per_second_mbps: sofar }
+        : null;
+    } else if (t.kind === 'reachability') t.progress = r2(elapsed / m.durMs);
+    return;
+  }
+  const { result, error } = m.finish();
+  Object.assign(t, { state: error ? 'failed' : 'done', finished_at: iso(m.startMs + m.durMs), result, error });
+  if (!error) t.progress = 1;
+  if (t.kind === 'throughput' && t.result)
+    addEvent('info', 'network_test_done', { mbps: r1(t.result.throughput_mbps), direction: t.request.direction ?? 'to_peer' });
+}
+const advanceTests = () => tests.forEach(advance);
+const throughputRunning = () => tests.some((m) => m.test.kind === 'throughput' && m.test.state === 'running');
+
+const DIRECTIONS: NetworkTestDirection[] = ['to_peer', 'from_peer'];
+const MODES: NetworkTestMode[] = ['max', 'steady'];
+
+/** POST /network-tests, with the device's order of checks. */
+function startNetworkTest(b: Partial<NetworkTestRequest>): { code: number; body: NetworkTest | ApiError } {
+  const invalid = (errors: FieldError[]) => ({ code: 400, body: { error: { code: 'invalid' as const, errors } } });
+  if (b.kind !== 'reachability' && b.kind !== 'throughput')
+    return invalid([{ field: 'kind', code: b.kind === undefined ? 'required' : 'invalid' }]);
+  if (b.kind === 'throughput' && role !== 'tx') return { code: 409, body: { error: { code: 'unsupported_role' } } };
+
+  let params: NetworkTestParams = { kind: 'reachability', direction: null, mode: null, rate_mbps: null, duration_s: null };
+  if (b.kind === 'throughput') {
+    const errors: FieldError[] = [];
+    const direction = b.direction ?? 'to_peer';
+    const mode = b.mode ?? 'max';
+    const [dMin, dMax] = NETWORK_TEST_OPTIONS.duration_range_s;
+    const [rMin, rMax] = NETWORK_TEST_OPTIONS.rate_range_mbps;
+    const duration = b.duration_s ?? 10;
+    const rate = mode === 'steady' ? (b.rate_mbps ?? NETWORK_TEST_OPTIONS.steady_rate_mbps) : null;
+    if (!DIRECTIONS.includes(direction)) errors.push({ field: 'direction', code: 'invalid' });
+    if (!MODES.includes(mode)) errors.push({ field: 'mode', code: 'invalid' });
+    if (rate !== null && !(typeof rate === 'number' && rate >= rMin && rate <= rMax))
+      errors.push({ field: 'rate_mbps', code: 'out_of_range', params: { min: rMin, max: rMax } });
+    if (!(Number.isInteger(duration) && duration >= dMin && duration <= dMax))
+      errors.push({ field: 'duration_s', code: 'out_of_range', params: { min: dMin, max: dMax } });
+    if (errors.length) return invalid(errors);
+    if (status().state !== 'stopped' || throughputRunning()) return { code: 409, body: { error: { code: 'busy' } } };
+    params = { kind: 'throughput', direction, mode, rate_mbps: rate, duration_s: duration };
+  } else if (tests.some((m) => m.test.kind === 'reachability' && m.test.state === 'running')) {
+    return { code: 409, body: { error: { code: 'busy' } } };
+  }
+
+  const startMs = now();
+  const base = { id: `nt-${++testSeq}`, state: 'running' as const, started_at: iso(startMs), finished_at: null, progress: 0, error: null };
+  let entry: MockTest;
+  if (params.kind === 'reachability') {
+    const targets = reachTargets();
+    entry = {
+      test: { ...base, kind: 'reachability', request: params, result: null },
+      startMs,
+      durMs: REACH_MS,
+      seconds: [],
+      finish: () => ({ result: { targets }, error: null }),
+    };
+  } else {
+    entry = { test: { ...base, kind: 'throughput', request: params, result: null }, startMs, ...planThroughput(params) };
+  }
+  tests = [entry, ...tests].slice(0, HISTORY_MAX);
+  return { code: 202, body: entry.test };
+}
+
+const testList = (): NetworkTestList => {
+  advanceTests();
+  return { items: tests.map((m) => m.test) };
+};
+const testById = (id: string): NetworkTest | null => {
+  advanceTests();
+  return tests.find((m) => m.test.id === id)?.test ?? null;
 };
 
 // ------------------------------------------------------------------ HTTP
@@ -707,6 +893,8 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, status());
     }
     if (m === 'POST' && path === '/transport/start') {
+      // The line is being measured: starting now would spoil both.
+      if (throughputRunning()) return send(res, 409, { error: { code: 'busy' } });
       if (stoppedAt !== null) {
         stoppedAt = null;
         liveSince = now();
@@ -801,16 +989,20 @@ const server = http.createServer(async (req, res) => {
 
     // network test
     if (m === 'POST' && path === '/network-tests') {
-      if (role !== 'tx') return send(res, 409, { error: { code: 'unsupported_role' } });
-      const b = await readJson<{ direction?: 'to_peer' | 'from_peer' }>(req);
-      const id = `t${Date.now()}`;
-      const t = { id, state: 'running' as const, direction: b.direction ?? 'to_peer', started_at: iso(now()), progress: 0, result: null, error: null, startMs: now() };
-      tests.set(id, t);
-      return send(res, 202, strip(t));
+      let b: Partial<NetworkTestRequest>;
+      try {
+        b = await readJson<Partial<NetworkTestRequest>>(req);
+      } catch {
+        b = {};
+      }
+      const out = startNetworkTest(b);
+      return send(res, out.code, out.body);
     }
+    if (m === 'GET' && path === '/network-tests') return send(res, 200, testList());
+    if (m === 'GET' && path === '/network-tests/options') return send(res, 200, NETWORK_TEST_OPTIONS);
     const nt = path.match(/^\/network-tests\/([\w-]+)$/);
     if (m === 'GET' && nt) {
-      const t = networkTest(nt[1]);
+      const t = testById(nt[1]);
       return t ? send(res, 200, t) : send(res, 404, { error: { code: 'not_found' } });
     }
 
@@ -841,6 +1033,7 @@ const broadcastHello = () => broadcast(hello());
 
 setInterval(() => {
   tick += 1;
+  advanceTests(); // finishes tests nobody is polling, so their events still appear
   const T = modelT();
   if (scenario === 'error' && stoppedAt === null && role === 'tx' && now() >= nextRetryAt) {
     attempt += 1;

@@ -11,6 +11,7 @@ use crate::events::Ev;
 use crate::history::INTERVAL_S;
 use crate::media;
 use crate::model::{DelayProfile, LinkState, TransportStored, SIGNAL_FORMAT};
+use crate::nettest;
 use crate::preview::{Refusal, OFFER_LIMIT};
 use crate::util::{iso_jst, now_ms};
 use axum::body::{Body, Bytes};
@@ -104,6 +105,9 @@ async fn api(State(app): State<Arc<App>>, method: Method, uri: Uri, body: Result
             return (StatusCode::NO_CONTENT, [(CACHE_CONTROL, "no-store")]).into_response();
         }
     }
+    if path == "/network-tests" || path.starts_with("/network-tests/") {
+        return network_tests(&app, method.as_str(), path, &body);
+    }
     let command = match (method.as_str(), path) {
         ("POST", "/transport/start") => Some(CmdKind::Start),
         ("POST", "/transport/stop") => Some(CmdKind::Stop),
@@ -111,9 +115,39 @@ async fn api(State(app): State<Arc<App>>, method: Method, uri: Uri, body: Result
         _ => None,
     };
     match command {
+        // Not while a throughput test runs (it needs the line to itself); while the start is on
+        // its way, no such test starts either.
+        Some(CmdKind::Start) => match app.nettest.hold_start() {
+            Some(_hold) => ok(&app.command(CmdKind::Start).await),
+            None => error(StatusCode::CONFLICT, "busy"),
+        },
         // the supervisor answers once the state has changed; returns the new status
         Some(k) => ok(&app.command(k).await),
         None => request(&app, method.as_str(), path, &uri, &body),
+    }
+}
+
+/// The network tests (nettest.rs). POST answers at once with the running test.
+fn network_tests(app: &Arc<App>, method: &str, path: &str, body: &Bytes) -> Response {
+    match (method, path) {
+        ("POST", "/network-tests") => {
+            let Some(v) = body_json(body) else { return bad_body() };
+            match nettest::start(app, &v) {
+                Ok(t) => json_response(StatusCode::ACCEPTED, &t),
+                Err(nettest::Refusal::Invalid(errors)) => {
+                    json_response(StatusCode::BAD_REQUEST, &json!({ "error": { "code": "invalid", "errors": errors } }))
+                }
+                Err(nettest::Refusal::Busy) => error(StatusCode::CONFLICT, "busy"),
+                Err(nettest::Refusal::UnsupportedRole) => error(StatusCode::CONFLICT, "unsupported_role"),
+            }
+        }
+        ("GET", "/network-tests") => ok(&json!({ "items": app.nettest.list() })),
+        ("GET", "/network-tests/options") => ok(&app.nettest.options()),
+        ("GET", p) => match p.strip_prefix("/network-tests/").and_then(|id| app.nettest.get(id)) {
+            Some(t) => ok(&t),
+            None => not_found(),
+        },
+        _ => not_found(),
     }
 }
 
@@ -133,8 +167,6 @@ fn request(app: &App, method: &str, path: &str, uri: &Uri, body: &Bytes) -> Resp
             let limit = query(uri, "limit").map_or(20, |l| (l as usize).min(crate::events::CAPACITY));
             ok(&app.lock().events.latest(limit))
         }
-        // the network test comes in phase 4
-        ("POST", "/network-tests") => error(StatusCode::CONFLICT, if tx { "busy" } else { "unsupported_role" }),
         (m, p) if p.starts_with("/settings/") || p == "/transport/compare" => {
             if !tx {
                 return error(StatusCode::CONFLICT, "unsupported_role");
@@ -516,6 +548,117 @@ mod tests {
         preview.stop().await.unwrap();
         let (s, v) = offer(&app, H264).await;
         assert_eq!((s, code(&v)), (StatusCode::SERVICE_UNAVAILABLE, "preview_unavailable"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn network_tests_over_http() {
+        use crate::config::Role;
+        use crate::nettest::{stub_app, wait_done};
+        let (app, dir) = stub_app("http", Role::Tx, LinkState::Live, "");
+        let post = |body: Value| call(&app, Method::POST, "/api/v1/network-tests", body.to_string());
+
+        // the order of the checks: kind → role → fields → busy
+        let (s, h, v) = call(&app, Method::POST, "/api/v1/network-tests", "not json").await;
+        assert_eq!((s, &v), (StatusCode::BAD_REQUEST, &json!({ "error": { "code": "invalid", "errors": [] } })));
+        assert_eq!(h[CACHE_CONTROL], "no-store");
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/network-tests", "").await;
+        assert_eq!((s, &v["error"]["errors"]), (StatusCode::BAD_REQUEST, &json!([{ "field": "kind", "code": "required" }])));
+        let (s, _, v) = post(json!({ "kind": "throughput", "mode": "steady", "rate_mbps": 0, "duration_s": 3 })).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            v["error"]["errors"],
+            json!([
+                { "field": "rate_mbps", "code": "out_of_range", "params": { "min": 1.0, "max": 20.0 } },
+                { "field": "duration_s", "code": "out_of_range", "params": { "min": 5, "max": 30 } },
+            ])
+        );
+        let (s, _, v) = post(json!({ "kind": "throughput" })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "busy"), "the link is live");
+
+        // reachability while live
+        let (s, _, v) = post(json!({ "kind": "reachability" })).await;
+        assert_eq!(s, StatusCode::ACCEPTED);
+        assert_eq!((v["kind"].as_str(), v["state"].as_str(), &v["result"]), (Some("reachability"), Some("running"), &Value::Null));
+        let keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(keys, ["error", "finished_at", "id", "kind", "progress", "request", "result", "started_at", "state"]);
+        assert!(v["started_at"].as_str().unwrap().ends_with("+09:00"));
+        let reach = v["id"].as_str().unwrap().to_string();
+        let t = wait_done(&app, &reach).await;
+        let (s, _, v) = call(&app, Method::GET, &format!("/api/v1/network-tests/{reach}"), "").await;
+        assert_eq!((s, v["state"].as_str()), (StatusCode::OK, Some("done")));
+        assert_eq!(v["result"]["targets"][0], json!({
+            "kind": "peer", "label": null, "address": "10.0.0.2", "sent": 10, "received": 10,
+            "rtt_min_ms": 0.0, "rtt_avg_ms": 0.01, "rtt_max_ms": 0.03,
+        }));
+        assert_eq!(v["finished_at"].as_str(), t.finished_at.as_deref());
+
+        // throughput once stopped; meanwhile neither another one nor a transport start
+        app.lock().link.state = LinkState::Stopped;
+        app.lock().settings.transport.peer_host = "slow-10.0.0.2".into();
+        let (s, _, v) = post(json!({ "kind": "throughput", "direction": "from_peer", "duration_s": 5 })).await;
+        assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+        assert_eq!(v["request"], json!({ "kind": "throughput", "direction": "from_peer", "mode": "max", "rate_mbps": null, "duration_s": 5 }));
+        let id = v["id"].as_str().unwrap().to_string();
+        let (s, _, v) = post(json!({ "kind": "throughput" })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "busy"));
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/transport/start", "").await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "busy"));
+        let (s, _, _) = call(&app, Method::POST, "/api/v1/transport/stop", "").await;
+        assert_eq!(s, StatusCode::OK, "stop is never refused");
+        let (s, _, _) = post(json!({ "kind": "reachability" })).await;
+        assert_eq!(s, StatusCode::ACCEPTED, "a reachability test may run meanwhile");
+        wait_done(&app, &id).await;
+        let (s, _, _) = call(&app, Method::POST, "/api/v1/transport/start", "").await;
+        assert_eq!(s, StatusCode::OK);
+
+        // the list (newest first), one test, the options
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/network-tests", "").await;
+        let kinds: Vec<&str> = v["items"].as_array().unwrap().iter().map(|t| t["kind"].as_str().unwrap()).collect();
+        assert_eq!((s, kinds), (StatusCode::OK, vec!["reachability", "throughput", "reachability"]));
+        assert_eq!(v["items"][1]["id"], id.as_str());
+        let r = &v["items"][1]["result"];
+        assert_eq!((r["rtt_ms"].clone(), r["retransmits"].clone()), (Value::Null, json!(0)), "{r}");
+        assert_eq!(r["per_second_mbps"].as_array().unwrap().len(), 3);
+        assert_eq!(app.lock().events.latest(1)[0].params["direction"], "from_peer");
+        let (s, _, v) = call(&app, Method::GET, "/api/v1/network-tests/options", "").await;
+        assert_eq!((s, v), (StatusCode::OK, json!({ "steady_rate_mbps": 6.0, "rate_range_mbps": [1.0, 20.0], "duration_range_s": [5, 30] })));
+        for p in ["/api/v1/network-tests/nope", "/api/v1/network-tests/"] {
+            let (s, _, v) = call(&app, Method::GET, p, "").await;
+            assert_eq!((s, code(&v)), (StatusCode::NOT_FOUND, "not_found"), "{p}");
+        }
+        assert_eq!(call(&app, Method::DELETE, &format!("/api/v1/network-tests/{id}"), "").await.0, StatusCode::NOT_FOUND);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn network_tests_on_the_receiver() {
+        use crate::config::Role;
+        let (app, dir) = crate::nettest::stub_app("http-rx", Role::Rx, LinkState::Listening, "");
+        let post = |body: Value| call(&app, Method::POST, "/api/v1/network-tests", body.to_string());
+        let (s, _, v) = post(json!({ "kind": "throughput", "duration_s": "x" })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "unsupported_role"), "before the fields");
+        let (s, _, v) = post(json!({ "kind": "nope" })).await;
+        assert_eq!((s, code(&v)), (StatusCode::BAD_REQUEST, "invalid"));
+        // no transmitter known and no hops: nothing to check, done at once; the last 20 are kept
+        let mut ids = Vec::new();
+        for _ in 0..22 {
+            let (s, _, v) = post(json!({ "kind": "reachability" })).await;
+            assert_eq!((s, v["state"].as_str(), &v["result"]), (StatusCode::ACCEPTED, Some("done"), &json!({ "targets": [] })));
+            ids.push(v["id"].as_str().unwrap().to_string());
+        }
+        let (_, _, v) = call(&app, Method::GET, "/api/v1/network-tests", "").await;
+        let listed: Vec<&str> = v["items"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+        let want: Vec<&str> = ids.iter().rev().take(20).map(String::as_str).collect();
+        assert_eq!(listed, want);
+        assert_eq!(call(&app, Method::GET, &format!("/api/v1/network-tests/{}", ids[0]), "").await.0, StatusCode::NOT_FOUND);
+        assert_eq!(call(&app, Method::POST, "/api/v1/transport/start", "").await.0, StatusCode::OK);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        // turned off in device.toml: not offered
+        let (app, dir) = crate::nettest::stub_app("http-off", Role::Tx, LinkState::Stopped, "enabled = false\n");
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/network-tests", json!({ "kind": "reachability" }).to_string()).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "unsupported_role"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

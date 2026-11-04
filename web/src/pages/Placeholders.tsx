@@ -3,14 +3,14 @@
  * marked so the menu works end to end; replace them once designs exist
  * (docs/screens.md「未デザインの画面」).
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { api } from '../api/client';
 import { useLive } from '../api/live';
-import type { DeviceEvent, NetworkTest } from '../api/types';
+import type { DeviceEvent } from '../api/types';
 import { Glyph } from '../components/Glyph';
 import { Shell } from '../components/Shell';
 import { eventText, roleName } from '../i18n/ja';
-import { fixed1, timeOf } from '../lib/format';
+import { timeOf } from '../lib/format';
 import type { Route } from '../lib/router';
 
 function Todo({ note }: { note: ReactNode }) {
@@ -79,76 +79,6 @@ export function LogsPage() {
             ))}
           </tbody>
         </table>
-      </div>
-    </Shell>
-  );
-}
-
-export function NetworkPage() {
-  const { device, status } = useLive();
-  const [test, setTest] = useState<NetworkTest | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const timer = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
-  useEffect(() => () => clearInterval(timer.current), []);
-
-  const start = async () => {
-    setError(null);
-    try {
-      const t = await api.networkTest.start({ direction: 'to_peer', duration_s: 10 });
-      setTest(t);
-      clearInterval(timer.current);
-      timer.current = setInterval(async () => {
-        const cur = await api.networkTest.get(t.id);
-        setTest(cur);
-        if (cur.state !== 'running') clearInterval(timer.current);
-      }, 500);
-    } catch {
-      setError('回線テストを始められませんでした。伝送を止めてからもう一度お試しください。');
-    }
-  };
-
-  const tx = device?.role === 'tx';
-  return (
-    <Shell route="network">
-      <div className="card todo">
-        <h1>ネットワーク</h1>
-        <Todo note="この画面はまだデザインしていません。回線テストの動作を確かめるための仮の画面です。" />
-        {tx ? (
-          <section aria-labelledby="nt" style={{ marginTop: 20 }}>
-            <h2 id="nt" style={{ margin: 0, fontSize: 16, fontWeight: 600 }}>
-              回線テスト
-            </h2>
-            <p className="muted" style={{ margin: '2px 0 12px', fontSize: 13 }}>
-              受信機 {status?.peer.id ?? ''} まで、どれだけ送れるかを 10 秒間はかります。伝送中は映像に影響するため、止めてから行ってください。
-            </p>
-            <button type="button" className="btn btn-primary" onClick={start} disabled={test?.state === 'running'}>
-              {test?.state === 'running' ? 'はかっています…' : '回線テストを始める'}
-            </button>
-            {error && <p style={{ color: 'var(--err-text)', fontWeight: 600 }}>{error}</p>}
-            {test && (
-              <div style={{ marginTop: 16, maxWidth: 480 }}>
-                <div className="progress" aria-label="進み具合">
-                  <div style={{ width: `${Math.round(test.progress * 100)}%` }} />
-                </div>
-                {test.result && (
-                  <dl className="kv" style={{ marginTop: 12 }}>
-                    <dt>送れた量</dt>
-                    <dd>{fixed1(test.result.throughput_mbps)} Mbps</dd>
-                    <dt>回線の損失</dt>
-                    <dd>{fixed1(test.result.loss_pct)} %</dd>
-                    <dt>揺らぎ（遅れのばらつき）</dt>
-                    <dd>{fixed1(test.result.jitter_ms)} ms</dd>
-                  </dl>
-                )}
-                {test.state === 'failed' && <p style={{ color: 'var(--err-text)', fontWeight: 600 }}>受信機に接続できませんでした。</p>}
-              </div>
-            )}
-          </section>
-        ) : (
-          <p className="muted" style={{ marginTop: 16 }}>
-            回線テストは送信機から始めます。受信機側は、テストの間だけ自動で応答します。
-          </p>
-        )}
       </div>
     </Shell>
   );

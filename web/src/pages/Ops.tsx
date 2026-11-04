@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api/client';
+import { ApiFailure, api } from '../api/client';
 import { useLive } from '../api/live';
 import type { DeviceEvent, Metric, Role, Stats, StatsHistory, Status } from '../api/types';
 import { AlertDialog } from '../components/Dialog';
@@ -7,7 +7,7 @@ import { Chevron, FullscreenIcon, Glyph, toneText, type Tone } from '../componen
 import { mediaMeta, OpsPreview } from '../components/Preview';
 import { Shell } from '../components/Shell';
 import { Sparkline } from '../components/Sparkline';
-import { delayName, eventText } from '../i18n/ja';
+import { delayName, eventText, startProblem } from '../i18n/ja';
 import { fixed1, int, timeOf } from '../lib/format';
 import { openFullscreen, takeReturnFocus } from '../lib/fullscreen';
 import { href } from '../lib/router';
@@ -255,6 +255,7 @@ export function OpsPage() {
   const [more, setMore] = useState(false);
   const [askStop, setAskStop] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [startNote, setStartNote] = useState<string | null>(null);
   const fsBtn = useRef<HTMLButtonElement>(null);
 
   // Return focus to the 全画面 button after leaving the full-screen view.
@@ -295,6 +296,15 @@ export function OpsPage() {
       setStatus(await f());
     } finally {
       setBusy(false);
+    }
+  };
+  // Start can be refused, e.g. while the line is being measured (409 busy).
+  const start = async () => {
+    setStartNote(null);
+    try {
+      await run(api.start);
+    } catch (e) {
+      setStartNote(startProblem(role, e instanceof ApiFailure ? e.body?.error.code : undefined));
     }
   };
 
@@ -406,9 +416,19 @@ export function OpsPage() {
               )}
             </div>
             {stopped ? (
-              <button type="button" className="btn btn-primary" disabled={busy} onClick={() => run(api.start)}>
-                {tx ? '伝送を開始' : '受信を開始'}
-              </button>
+              <>
+                <button type="button" className="btn btn-primary" disabled={busy} onClick={start}>
+                  {tx ? '伝送を開始' : '受信を開始'}
+                </button>
+                {startNote && (
+                  <p role="alert" style={{ display: 'flex', alignItems: 'flex-start', gap: 8, margin: 0, fontWeight: 600, color: 'var(--err-text)' }}>
+                    <span style={{ marginTop: 1 }}>
+                      <Glyph tone="err" />
+                    </span>
+                    <span>{startNote}</span>
+                  </p>
+                )}
+              </>
             ) : (
               <button type="button" className="btn" onClick={() => setAskStop(true)}>
                 {tx ? '伝送を停止…' : '受信を停止…'}

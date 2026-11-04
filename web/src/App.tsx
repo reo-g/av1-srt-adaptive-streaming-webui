@@ -3,7 +3,8 @@ import { DevBar } from './dev/DevBar';
 import { useRoute } from './lib/router';
 import { FullscreenPage } from './pages/Fullscreen';
 import { OpsPage } from './pages/Ops';
-import { DevicePage, LogsPage, NetworkPage, RecordingPage } from './pages/Placeholders';
+import { NetworkPage } from './pages/Network';
+import { DevicePage, LogsPage, RecordingPage } from './pages/Placeholders';
 import { TransportSettingsPage } from './pages/TransportSettings';
 import { VideoSettingsPage } from './pages/VideoSettings';
 
