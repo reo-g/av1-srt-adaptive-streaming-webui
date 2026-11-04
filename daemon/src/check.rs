@@ -1,12 +1,12 @@
-//! Check rules for settings drafts: a port of checkVideo / checkTransport / checkNetwork in
-//! web/mock/server.ts (the oracle), plus a check that the chosen input is one the device offers,
-//! because the device really opens it. Request bodies are read leniently: a missing, null or
-//! mistyped value becomes a FieldError, never a 422.
+//! Check rules for settings drafts: a port of checkVideo / checkTransport / checkNetwork /
+//! checkOutput in web/mock/server.ts (the oracle), plus a check that the chosen input is one the
+//! device offers, because the device really opens it. Request bodies are read leniently: a
+//! missing, null or mistyped value becomes a FieldError, never a 422.
 
 use crate::config::Hop;
 use crate::model::{
-    params, CheckResult, DelayProfile, FieldError, Impact, InputKind, LinkState, Mode, NetworkStored, SendLimit,
-    TransportStored, VideoInput, VideoStored, SEND_LIMIT_RANGE,
+    params, CheckResult, DelayProfile, DisplayMode, FieldError, Impact, InputKind, LinkState, Mode, NetworkStored,
+    OutputStored, SendLimit, TransportStored, VideoInput, VideoStored, SEND_LIMIT_RANGE,
 };
 use crate::util::round;
 use serde_json::{json, Value};
@@ -487,6 +487,55 @@ pub fn check_network(d: &NetworkDraft, c: &NetworkCtx) -> CheckResult {
 /// The settings a valid draft gives (call only when check_network found no errors).
 pub fn apply_network(d: &NetworkDraft, a: &NetworkStored) -> NetworkStored {
     NetworkStored { version: a.version + 1, hops: d.hops.clone().unwrap_or_else(|| a.hops.clone()) }
+}
+
+// ------------------------------------------------------------------ output (受信機のモニター, rx)
+
+#[derive(Debug, Clone, Default)]
+pub struct OutputDraft {
+    pub version: Option<f64>,
+    /// None when missing, null, not text or not one of the modes.
+    pub display: Option<DisplayMode>,
+}
+
+impl OutputDraft {
+    pub fn parse(v: &Value) -> Self {
+        OutputDraft { version: num(v, "version"), display: text(v, "display").as_deref().and_then(DisplayMode::parse) }
+    }
+}
+
+/// One field, `display: invalid` when it is not one of the modes. Allowed in every link state: the
+/// player follows at once. Impacts only for a change: display_on (to full screen or a window) or
+/// display_off, then display_fullscreen_covers when the new value is full screen.
+pub fn check_output(d: &OutputDraft, applied: &OutputStored) -> CheckResult {
+    match d.display {
+        Some(to) => CheckResult { ok: true, errors: Vec::new(), impacts: display_impacts(applied.display, to) },
+        None => CheckResult { ok: false, errors: vec![fe("display", "invalid", json!({}))], impacts: Vec::new() },
+    }
+}
+
+fn display_impacts(from: DisplayMode, to: DisplayMode) -> Vec<Impact> {
+    let mut impacts = Vec::new();
+    if from == to {
+        return impacts;
+    }
+    impacts.push(im("info", if to.is_on() { "display_on" } else { "display_off" }, json!({})));
+    if to == DisplayMode::Fullscreen {
+        impacts.push(im("info", "display_fullscreen_covers", json!({})));
+    }
+    impacts
+}
+
+/// The body of POST /display (`{mode}`, the operation screen's button): the mode, or the field
+/// error (`mode: invalid`) when it is not one of them.
+pub fn display_request(v: &Value) -> Result<DisplayMode, Vec<FieldError>> {
+    text(v, "mode").as_deref().and_then(DisplayMode::parse).ok_or_else(|| vec![fe("mode", "invalid", json!({}))])
+}
+
+/// The settings a new value gives: the version goes up also when it is the same (it is written
+/// to the player again, which is a retry by hand).
+pub fn apply_output(to: DisplayMode, a: &OutputStored) -> OutputStored {
+    OutputStored { version: a.version + 1, display: to }
 }
 
 // ------------------------------------------------------------------ tests (the mock is the oracle)
@@ -1089,6 +1138,56 @@ mod tests {
         for bad in ["0.0.0.0", "255.255.255.255", "127.0.0.53", "10.0.0.01", "1.2.3", "::1", "localhost"] {
             assert_eq!(hop_address(bad), None, "{bad}");
         }
+    }
+
+    /// (case, applied, draft, errors, impacts): the mock's checkOutput is the oracle.
+    #[test]
+    fn output_rules() {
+        use DisplayMode::*;
+        let d = |v: Value| json!({ "version": 2, "display": v });
+        let cases: Vec<(&str, DisplayMode, Value, &[&str], &[&str])> = vec![
+            ("off, unchanged", Off, d(json!("off")), &[], &[]),
+            ("off → window", Off, d(json!("window")), &[], &["info:display_on"]),
+            ("off → fullscreen", Off, d(json!("fullscreen")), &[], &["info:display_on", "info:display_fullscreen_covers"]),
+            ("window → fullscreen", Window, d(json!("fullscreen")), &[], &["info:display_on", "info:display_fullscreen_covers"]),
+            ("fullscreen → window", Fullscreen, d(json!("window")), &[], &["info:display_on"]),
+            ("fullscreen → off", Fullscreen, d(json!("off")), &[], &["info:display_off"]),
+            ("window → off", Window, d(json!("off")), &[], &["info:display_off"]),
+            ("fullscreen, unchanged", Fullscreen, d(json!("fullscreen")), &[], &[]),
+            ("not a mode", Off, d(json!("on")), &["display:invalid"], &[]),
+            ("another case", Off, d(json!("Window")), &["display:invalid"], &[]),
+            ("a number", Window, d(json!(1)), &["display:invalid"], &[]),
+            ("null", Window, d(Value::Null), &["display:invalid"], &[]),
+            ("missing", Window, json!({ "version": 2 }), &["display:invalid"], &[]),
+            ("not an object", Window, json!("fullscreen"), &["display:invalid"], &[]),
+        ];
+        for (name, applied, body, errs, imps) in cases {
+            let r = check_output(&OutputDraft::parse(&body), &OutputStored { version: 2, display: applied });
+            let (e, i) = codes(&r);
+            assert_eq!(e, errs, "{name}: errors");
+            assert_eq!(i, imps, "{name}: impacts");
+            assert_eq!(r.ok, errs.is_empty(), "{name}: ok");
+        }
+        let r = check_output(&OutputDraft::parse(&json!({ "display": "x" })), &OutputStored::default());
+        assert_eq!(serde_json::to_value(&r).unwrap(), json!({ "ok": false, "errors": [{ "field": "display", "code": "invalid" }], "impacts": [] }));
+        let r = check_output(&OutputDraft::parse(&json!({ "display": "fullscreen" })), &OutputStored::default());
+        assert_eq!(
+            serde_json::to_value(&r.impacts).unwrap(),
+            json!([{ "level": "info", "code": "display_on" }, { "level": "info", "code": "display_fullscreen_covers" }])
+        );
+        assert_eq!(OutputDraft::parse(&json!({ "version": 7, "display": "window" })).version, Some(7.0));
+
+        // the operation screen's button: {mode}
+        assert_eq!(display_request(&json!({ "mode": "window" })), Ok(Window));
+        assert_eq!(display_request(&json!({ "mode": "off", "display": "window" })), Ok(Off));
+        for bad in [json!({}), json!({ "mode": "on" }), json!({ "mode": null }), json!({ "display": "window" }), json!([])] {
+            let e = display_request(&bad).unwrap_err();
+            assert_eq!(serde_json::to_value(&e).unwrap(), json!([{ "field": "mode", "code": "invalid" }]), "{bad}");
+        }
+        // the version goes up, also for the same value
+        let a = OutputStored { version: 4, display: Window };
+        assert_eq!(apply_output(Fullscreen, &a), OutputStored { version: 5, display: Fullscreen });
+        assert_eq!(apply_output(Window, &a), OutputStored { version: 5, display: Window });
     }
 
     #[test]

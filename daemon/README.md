@@ -142,13 +142,42 @@ margin watch raises its offset when frames come late, so this is the delay aimed
 first offset is the last `ts-offset-ms` line of `player_ctl`, else `--ts-offset-ms` of the
 arguments; only while live, and only from stats lines read since the profile was set).
 
+**受信機のモニター** (`OutputSettings`, rx; system repo `ll_player.py --ctl-fd`). The player can show
+the picture itself in its own window on the receiver's desktop (`waylandsink`), about 0.5 s sooner
+than the browser preview. `display` is `off` (default), `fullscreen` or `window`; it is applied at
+once in every link state (no `busy`) and kept in `settings.json` (`output`; absent until the first
+apply, version 1 `off` before; a member edited by hand that does not read is dropped, the rest of
+the file kept). The daemon writes `display <mode>` to every player right after it starts (also
+`off`; before any line a transmitter's stream id brings) and, on every apply, to the current
+player (also the same value again: a retry by hand); a player playing out an earlier connection
+has no control input any more and keeps its window until it exits. The player answers `[player]
+ctl display <mode> ok` and reports `display` (`off` / `fullscreen` / `window` / `failed`) in its
+stats lines; `failed` (no desktop to show it on, or it broke) while the setting is on makes the
+daemon write the line again 30 s after it was last written, then every 30 s while it stays
+`failed`; each change of what the player reports has a developer-log line. `Stats.display` is the
+current player's report as `on` (full screen or a window) / `off` / `failed`, null on tx, while no
+player runs (stopped, between two pairs) and until the player has said. HTTP: `GET
+/settings/output` → `{version, display}`; `POST /settings/output/check` with `{version, display}` →
+`CheckResult`; `PUT /settings/output` → `200` with the new `OutputSettings`; `POST /display
+{"mode"}` (the operation screen's 低遅延表示 button: no version, no draft) → `200` with the new
+`OutputSettings`. Checks in order: tx → `409 unsupported_role` (all four, whatever the body); not
+JSON → `400 invalid` (no errors); PUT with another `version` → `409 version_conflict`; a value that
+is not one of the three → `400 invalid` (`display: invalid`, for /display `mode: invalid`). Impacts
+(only when the value changes): `info display_on` (to `fullscreen` or `window`) or `info
+display_off`, then `info display_fullscreen_covers` when the new value is `fullscreen`. Both
+changes bump the version (also without a change), store it, add the event `output_settings_applied
+{display}`, push `{type: settings, section: output, version}` and answer once the supervisor loop
+has given the player the line.
+
 **Environment of the children.** A child does not inherit the daemon's whole environment: only
 `PATH`, `HOME`, `USER`, `LOGNAME`, the locale (`LANG`, `LANGUAGE`, `LC_*`, `TZ`), `TMPDIR`, the
 `XDG_*` directories, `DBUS_SESSION_BUS_ADDRESS`, `LD_LIBRARY_PATH`, `PYTHONPATH`, the plugin
 and driver paths (`GST_PLUGIN_PATH`, `GST_PLUGIN_SYSTEM_PATH`, `GST_REGISTRY`,
 `LIBVA_DRIVER_NAME`, `LIBVA_DRIVERS_PATH`, `SVTAV1_GST_PLUGIN_DIR`, `SVTAV1_LIB_DIR`) and the
-names in `media.pass_env` (a trailing `*` is a prefix, e.g. `["GST_DEBUG*"]`). Then the profile
-is applied on top. Variables exported for experiments in the shell that started the daemon
+names in `media.pass_env` (a trailing `*` is a prefix, e.g. `["GST_DEBUG*"]`). The player also
+keeps the desktop's display (`WAYLAND_DISPLAY`, `DISPLAY`, `XAUTHORITY`) for the monitor output;
+no other child gets them. A daemon started before the desktop session has none of them: the
+player then finds `$XDG_RUNTIME_DIR/wayland-*` itself. Then the profile is applied on top. Variables exported for experiments in the shell that started the daemon
 (`LAT_LOG`, `SVT_PRED_STRUCT`, `BUF_*` …) therefore never reach the children; put a setting in
 the profile instead.
 
@@ -174,8 +203,8 @@ None of these logs is shown in the UI.
   cwd `<repo>/sender`). Stop: `{"cmd":"stop"}` to the bridge, the sender drains its input
   (≤ `SRT_DRAIN_MAX_MS`), SIGTERM to the process groups after 6 s, SIGKILL after 8 s.
   Sender exit → `reconnecting`, the next try 5 s after the previous one started.
-- **rx**: the player first (stdin = a 1 MiB pipe, stats on fd 4, control on fd 5), then the receiver with the
-  pipe as its fd 3 (`SRT_RCV_PIPE=/dev/fd/3`). Receiver exit → the old player plays out what it
+- **rx**: the player first (stdin = a 1 MiB pipe, stats on fd 4, control on fd 5, where the monitor output's
+  `display <mode>` line comes first), then the receiver with the pipe as its fd 3 (`SRT_RCV_PIPE=/dev/fd/3`). Receiver exit → the old player plays out what it
   holds (≤ 30 s) while a new pair starts listening 0.5 s later.
 - **rx stops** come from the player's stats: a stop is followed while it lasts (the alert and
   the 5-minute totals grow with it) and `video_stalled{seconds}` is sent with its whole length
@@ -268,7 +297,8 @@ Phase 1 API: everything in the contract is answered. Settings can be applied whi
 (the next start uses them); while running a `PUT` answers `409 busy` (the settings screens
 then tell the operator to stop first; the check endpoint still shows the live impacts phase 2
 will have), except a transport `PUT` that changes only `send_limit`: it is stored while the
-link runs (the running transmission keeps its cap). `send_limit` may be left out of the input
+link runs (the running transmission keeps its cap), and the network and output settings (途中の
+無線機, 受信機のモニター), which never touch the transmission and are applied in every state. `send_limit` may be left out of the input
 (the applied value is kept); a value outside 1.0–20.0 or not a number (`null` too) →
 `send_limit.mbps: out_of_range {min, max}`, listed first; a new value becomes `source: manual`
 (two decimals), the same value keeps its source. Impacts: a new cap alone while the link runs →
@@ -426,6 +456,17 @@ the impacts, `src/api.rs` both roles over HTTP (options, `auto_available`, the p
 bitrate while the stored mode is auto, `enabled = false`, rx `follows_peer` and a draft's delay
 ignored).
 
+受信機のモニター: `src/check.rs` the rules (table, the mock's checkOutput as the oracle) and the
+body of /display, `src/store.rs` the setting on disk (absent, kept, one edited by hand dropped),
+`src/supervisor.rs` the lines through the fake backend (each new player gets it right after its
+start and before the low-delay lines, an apply reaches the current player at once, nothing between
+two pairs or while stopped, the 30 s retry while the player says `failed`, none on tx),
+`src/stats.rs` `Stats.display` from the player's lines (the current player only, null before it
+said and after it exited, null on tx), `src/media.rs` that only the player keeps `WAYLAND_DISPLAY`,
+`DISPLAY` and `XAUTHORITY`, and `src/api.rs` both roles over HTTP (the order of the checks, the
+version, the event, the live message, the command to the supervisor loop with the stored value,
+persistence across a restart, tx refused).
+
 `src/preview.rs` and `src/api.rs` run `tests/fixtures/stub_preview.py` (canned answers, the
 real program's arguments only, markers in an offer make it fail, stay silent, answer late, hang or
 exit; see its docstring) for the preview manager's lifecycle, id matching, timeouts, the
@@ -437,4 +478,5 @@ camera, encoder or network: point `[media]` at them (`repo = ".../daemon/tests/f
 `sender = "stub_sender.py"`, …, `[preview] program = "stub_preview.py"`) and drive them with the
 control files described in each stub (`media.pass_env = ["STUB_CTL"]`). `rx_stream_id` (its
 content, e.g. `delay=low`) makes the stub receiver print a transmitter's stream id, and the stub
-player follows its `--ctl-fd` lines as the real one does (and reports `ts_offset_ms`).
+player follows its `--ctl-fd` lines as the real one does (and reports `ts_offset_ms` and `display`;
+while `display_fail` exists, `display fullscreen|window` reports `failed`).

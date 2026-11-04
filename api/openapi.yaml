@@ -29,6 +29,16 @@ tags:
       reachability (つながりの確認) after the peer, and the radio line carries, besides the video,
       only the traffic with them. Allowed any time, also while live: applying does not touch the
       transmission.
+  - name: output settings
+    description: |
+      The receiver's monitor (受信機のモニター), receiver only (a transmitter answers 409
+      unsupported_role for all of it): the receiver shows the picture it receives directly on the
+      monitor attached to it, full screen or in a window, about 0.5 s sooner and smoother than the
+      browser preview. Applied at once in every link state (also while live; it does not touch the
+      transmission) and kept across restarts. The settings page changes it with a draft
+      (check, PUT with the version); the operation screen's 低遅延表示 button with POST /display (an
+      operation: no version, no check). Both change the same stored value. The receiver reports
+      what it shows in Stats.display.
   - name: network test
     description: |
       Checks of the line to the peer, started from the UI. reachability (つながりの確認): both roles,
@@ -229,6 +239,55 @@ paths:
       requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/NetworkSettingsInput' } } } }
       responses:
         '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CheckResult' } } } }
+  /settings/output:
+    get:
+      tags: [output settings]
+      summary: The receiver's monitor (受信機のモニター)
+      description: Off (version 1) until something is applied.
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/OutputSettings' } } } }
+        '409': { description: unsupported_role (transmitter), content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+    put:
+      tags: [output settings]
+      summary: Apply. The receiver follows at once (also while live).
+      description: |
+        Checks, in this order: 409 unsupported_role (transmitter) → 400 invalid (not JSON, no errors)
+        → 409 version_conflict → 400 invalid (display: invalid). On success the version goes up (also
+        without a change: the receiver is given the value again), the value is stored, the event
+        output_settings_applied {display} is added and a `settings` message (section output) is pushed.
+        Answered once the receiver has been given it. Returns the new settings.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OutputSettingsInput' } } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/OutputSettings' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '409': { description: version_conflict or unsupported_role, content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+  /settings/output/check:
+    post:
+      tags: [output settings]
+      summary: Validate a draft and describe the impact of applying it. Changes nothing.
+      description: |
+        Impacts, only when the value changes: display_on (to fullscreen or window) or display_off,
+        then display_fullscreen_covers when the new value is fullscreen.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/OutputSettingsInput' } } } }
+      responses:
+        '200': { description: OK, content: { application/json: { schema: { $ref: '#/components/schemas/CheckResult' } } } }
+        '409': { description: unsupported_role (transmitter), content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
+  /display:
+    post:
+      tags: [output settings]
+      summary: Show the picture on the receiver's monitor (低遅延表示), change how, or stop
+      description: |
+        The operation screen's buttons (低遅延表示 = window, 全画面にする, ウィンドウにする, ブラウザ表示に戻す =
+        off). An operation, not a draft: no version and no check. Sets OutputSettings.display like a
+        PUT (the version goes up, the same event and `settings` message) and returns the new
+        OutputSettings. Checks, in this order: 409 unsupported_role (transmitter) → 400 invalid (not
+        JSON, no errors) → 400 invalid (mode: invalid, any other value or none). The screen closes its
+        browser preview first and keeps it closed while the receiver shows the picture itself.
+      requestBody: { required: true, content: { application/json: { schema: { $ref: '#/components/schemas/DisplayRequest' } } } }
+      responses:
+        '200': { description: Applied, content: { application/json: { schema: { $ref: '#/components/schemas/OutputSettings' } } } }
+        '400': { $ref: '#/components/responses/Invalid' }
+        '409': { description: unsupported_role (transmitter), content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } } }
   /network-tests:
     post:
       tags: [network test]
@@ -374,7 +433,7 @@ components:
     Stats:
       type: object
       description: Fields that do not apply to the role, or cannot be measured now, are null.
-      required: [at, delay_profile, delay_target_ms, loss_pct, loss_threshold_pct, rtt_ms, last_rtt_ms, retrans_pct, send_mbps, target_mbps, actual_mbps, bandwidth_mbps, send_late_5m, delay_margin_s, delay_margin_warn_s, recv_mbps, stalls_5m, stall_s_5m, video_latency_ms, unrecovered_5m]
+      required: [at, delay_profile, delay_target_ms, loss_pct, loss_threshold_pct, rtt_ms, last_rtt_ms, retrans_pct, send_mbps, target_mbps, actual_mbps, bandwidth_mbps, send_late_5m, delay_margin_s, delay_margin_warn_s, recv_mbps, stalls_5m, stall_s_5m, video_latency_ms, unrecovered_5m, display]
       properties:
         at: { type: string, format: date-time }
         delay_profile: { $ref: '#/components/schemas/DelayProfile', description: "the profile in effect; rx: the transmitter's of the current or last connection" }
@@ -396,6 +455,14 @@ components:
         stall_s_5m: { type: [number, 'null'], description: "rx; total seconds the picture stood still, last 5 min" }
         video_latency_ms: { type: [number, 'null'], description: "rx; measured capture-to-display delay, null until really measured (the UI then shows delay_target_ms as an estimate)" }
         unrecovered_5m: { type: [integer, 'null'], description: "rx; packets that could not be recovered, last 5 min" }
+        display:
+          type: [string, 'null']
+          enum: ['off', 'on', 'failed', null]
+          description: |
+            rx; the receiver's monitor (OutputSettings.display) as the receiver reports it: on (full
+            screen or a window), off, or failed (it could not show the picture there, e.g. nobody is
+            logged in on the receiver's screen; it tries again every 30 s while the setting is on).
+            null on tx, while the receiver is stopped and until it has said.
     StatsHistory:
       type: object
       required: [interval_s, end, series]
@@ -415,7 +482,7 @@ components:
         level: { $ref: '#/components/schemas/Level' }
         code:
           type: string
-          enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done, send_limit_changed, network_settings_applied]
+          enum: [delay_margin_low, video_stalled, loss_high, peer_rejected_passphrase, peer_disconnected, peer_connected, transport_started, transport_stopped, listening_started, input_detected, device_started, bitrate_changed, video_settings_applied, transport_settings_applied, passphrase_changed, network_test_done, send_limit_changed, network_settings_applied, output_settings_applied]
         params:
           $ref: '#/components/schemas/Params'
           description: |
@@ -425,6 +492,7 @@ components:
             network_test_done: mbps (what arrived, ThroughputResult.throughput_mbps with two decimals), direction (to_peer | from_peer); only after a throughput test that finished.
             send_limit_changed (tx): mbps, from_mbps, source (measured: POST /network-tests/{id}/use; manual: PUT /settings/transport).
             network_settings_applied: no params (PUT /settings/network).
+            output_settings_applied (rx): display (OutputDisplay; PUT /settings/output or POST /display).
     BitrateReason:
       type: string
       enum: [loss, delay, recovered, manual]
@@ -436,7 +504,7 @@ components:
       type: object
       required: [field, code]
       properties:
-        field: { type: string, description: 'dotted path of the input field; list items by index from 0', examples: [encode.manual.bitrate_mbps, delay.profile, send_limit.mbps, 'hops[1].address'] }
+        field: { type: string, description: 'dotted path of the input field; list items by index from 0', examples: [encode.manual.bitrate_mbps, delay.profile, send_limit.mbps, 'hops[1].address', display, mode] }
         code:
           type: string
           enum: [out_of_range, required, too_short, too_long, too_many, invalid, duplicate, is_self, is_peer]
@@ -452,7 +520,7 @@ components:
         level: { type: string, enum: [warn, ok, info] }
         code:
           type: string
-          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, takes_effect_next_start, hops_changed, low_delay_fixed, low_delay_effects]
+          enum: [input_switch_gap, switch_no_gap, manual_fixed, auto_decides, bitrate_lower_quality, bitrate_near_bandwidth, reconnect, reconnect_gap, no_peer_effect, saved_while_stopped, takes_effect_next_start, hops_changed, low_delay_fixed, low_delay_effects, display_on, display_off, display_fullscreen_covers]
         params:
           $ref: '#/components/schemas/Params'
           description: |
@@ -464,6 +532,9 @@ components:
             hops_changed (info, network settings): the list differs from the applied one; reachability and what the radio line may carry follow the new list. Nothing else is affected (the transmission is not touched).
             low_delay_fixed (info): bitrate_mbps (encode.manual.bitrate_mbps). Low delay sends this fixed bitrate whatever the video mode says. Transport: the delay changes to low while the applied video mode is auto. Video: the draft's mode is auto while low is applied (not an error; auto applies again when the delay is standard). While low is applied, a change of the mode alone does not change what is sent (no switch_no_gap, no auto_decides).
             low_delay_effects (info, transport): the delay changes to low; on a busy line the receiver's delay may grow (it comes back slowly once the line is quiet).
+            display_on (info, output settings): to fullscreen or window; the receiver shows the picture on its monitor at once (while stopped: once receiving starts).
+            display_off (info, output settings): to off; the picture leaves the receiver's monitor.
+            display_fullscreen_covers (info, output settings): the new value is fullscreen; the monitor shows only the picture, so this screen cannot be used on the receiver's monitor meanwhile.
     CheckResult:
       type: object
       required: [ok, errors, impacts]
@@ -741,6 +812,34 @@ components:
       properties:
         version: { type: integer }
         hops: { type: array, items: { $ref: '#/components/schemas/Hop' } }
+    OutputDisplay:
+      type: string
+      enum: ['off', fullscreen, window]
+      description: |
+        The receiver's monitor (受信機のモニター). off: not shown there (the default); fullscreen: the
+        monitor shows only the picture; window: in a window on the receiver's screen.
+    OutputSettings:
+      type: object
+      description: The receiver's monitor as applied (rx). Off at version 1 until something is applied; kept across restarts.
+      required: [version, display]
+      properties:
+        version: { type: integer }
+        display: { $ref: '#/components/schemas/OutputDisplay' }
+    OutputSettingsInput:
+      type: object
+      description: |
+        A draft of the settings page. Field error: display: invalid (not one of OutputDisplay).
+        Impacts only when it differs from the applied value (see /settings/output/check).
+      required: [version, display]
+      properties:
+        version: { type: integer }
+        display: { $ref: '#/components/schemas/OutputDisplay' }
+    DisplayRequest:
+      type: object
+      description: 'POST /display: the mode alone. Field error: mode: invalid.'
+      required: [mode]
+      properties:
+        mode: { $ref: '#/components/schemas/OutputDisplay' }
     NetworkTestKind:
       type: string
       enum: [reachability, throughput]

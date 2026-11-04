@@ -12,6 +12,10 @@
 //! The profile (set_profile) gives the delay target and the margin warning. rx: the target is the
 //! profile's plus what the player's margin watch has added to its display offset since the
 //! transmitter connected (the `ts_offset_ms` of its stats lines), so it is the delay aimed at now.
+//!
+//! rx monitor output (受信機のモニター): the current player's `display` (off, fullscreen, window,
+//! failed) becomes Stats.display (on / off / failed) and goes to the state machine, which asks
+//! again while it failed (supervisor.rs).
 
 use crate::config::Role;
 use crate::events::Ev;
@@ -210,6 +214,9 @@ pub struct PlayerRow {
     pub last_gap_ms: Option<f64>,
     /// The display offset in force (with --ctl-fd; the margin watch moves it).
     pub ts_offset_ms: Option<f64>,
+    /// The monitor output (with --ctl-fd): off, fullscreen, window, or failed (it could not be
+    /// opened, or it broke; the player goes on without it).
+    pub display: Option<String>,
 }
 
 /// Why the automatic mode changed the bitrate, from the controller's cause. Downward steps of
@@ -281,6 +288,8 @@ struct PlayerState {
     done: bool,
     /// Its display offset, from the lines read since the profile was last set.
     offset_ms: Option<f64>,
+    /// Its monitor output, as it last said.
+    display: Option<String>,
 }
 
 // ------------------------------------------------------------------ the sampler
@@ -297,6 +306,9 @@ pub struct Obs {
     pub black: bool,
     /// rx: the current session's player rendered its first frames.
     pub first_frames: bool,
+    /// rx: the current session's player's monitor output as it last said (off, fullscreen, window,
+    /// failed); None while no player runs or it has not said.
+    pub player_display: Option<String>,
     pub events: Vec<Ev>,
 }
 
@@ -521,6 +533,10 @@ impl Sampler {
         let rendered = row.fps.unwrap_or(0.0) > 0.0 || advanced;
         if row.ts_offset_ms.is_some() {
             p.offset_ms = row.ts_offset_ms;
+        }
+        if let Some(d) = row.display.as_deref().filter(|d| p.display.as_deref() != Some(*d)) {
+            dlog!("session {session}: the player's monitor output: {} → {d}", p.display.as_deref().unwrap_or("not said"));
+            p.display = Some(d.to_string());
         }
         p.last = Some(row);
         r.stall_acc += acc;
@@ -805,6 +821,10 @@ impl Sampler {
             r.events.clear();
         }
         obs.black = !r.frame_at.is_some_and(|a| now.duration_since(a) <= BLACK_AFTER);
+        // the current player's monitor output (none while no player runs, or before it said)
+        let shown = session.and_then(|sid| r.players.get(&sid)).filter(|p| !p.done).and_then(|p| p.display.clone());
+        st.display = shown.as_deref().and_then(display_state);
+        obs.player_display = shown;
         if let Some(sid) = session.filter(|s| r.rendered.contains(s) && r.reported != Some(*s)) {
             r.reported = Some(sid);
             obs.first_frames = true;
@@ -855,6 +875,16 @@ fn line_capacity(k: &TickRow) -> Option<f64> {
     match k.nd_mnow {
         Some(m) if m > 0.0 && c >= 0.9 * m => None,
         _ => Some(c),
+    }
+}
+
+/// Stats.display from what the player says: on (full screen or a window), off, failed.
+fn display_state(reported: &str) -> Option<&'static str> {
+    match reported {
+        "fullscreen" | "window" => Some("on"),
+        "off" => Some("off"),
+        "failed" => Some("failed"),
+        _ => None,
     }
 }
 
@@ -1234,6 +1264,55 @@ mod tests {
         s.set_profile(&std, &std.player_args);
         s.player_line(1, PLAYER_ROWS.lines().next().unwrap(), t0 + Duration::from_secs(8));
         assert_eq!(target(&mut s, 8).delay_target_ms, 9500);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn rx_monitor_output_from_the_player() {
+        fn look(s: &mut Sampler, ctx: Ctx, at: Instant) -> (Option<&'static str>, Option<String>) {
+            let o = s.sample(ctx, at);
+            (o.stats.display, o.obs.player_display)
+        }
+        let d = tmpdir("rx_display");
+        let mut s = Sampler::new(Role::Rx, 9500, 3.0, None);
+        let t0 = Instant::now();
+        let at = |k: u64| t0 + Duration::from_secs(k);
+        let row = |said: Option<&str>| {
+            let base = r#""frames":30,"fps":30.0,"stalls":0,"stall_ms":0,"last_gap_ms":34.0,"ts_offset_ms":7000.0"#;
+            match said {
+                Some(v) => format!(r#"{{{base},"display":"{v}"}}"#),
+                None => format!("{{{base}}}"),
+            }
+        };
+        let listening = |sid: u64| Ctx { live: false, running: true, session: Some((sid, d.as_path())) };
+        // a player that has not said (an older one, or before its first line with it): null
+        s.player_line(1, &row(None), at(0));
+        assert_eq!(look(&mut s, live(&d), at(0)), (None, None));
+        for (said, shown) in [("off", "off"), ("window", "on"), ("fullscreen", "on"), ("failed", "failed")] {
+            s.player_line(1, &row(Some(said)), at(1));
+            assert_eq!(look(&mut s, live(&d), at(1)), (Some(shown), Some(said.to_string())), "{said}");
+        }
+        // while listening too: the player runs and its window may be up
+        s.player_line(1, &row(Some("window")), at(2));
+        assert_eq!(look(&mut s, listening(1), at(2)).0, Some("on"));
+        // a line without the field keeps what it said; a word it does not know is not shown
+        s.player_line(1, &row(None), at(3));
+        assert_eq!(look(&mut s, live(&d), at(3)).0, Some("on"));
+        s.player_line(1, &row(Some("blinking")), at(4));
+        assert_eq!(look(&mut s, live(&d), at(4)), (None, Some("blinking".into())));
+        // only the current session's player counts: none once it exited, none while stopped
+        s.player_line(1, &row(Some("failed")), at(5));
+        assert_eq!(look(&mut s, listening(2), at(5)), (None, None), "the next player has not said yet");
+        s.player_line(2, &row(Some("fullscreen")), at(6));
+        assert_eq!(look(&mut s, listening(2), at(6)).0, Some("on"));
+        s.player_done(2, at(7));
+        assert_eq!(look(&mut s, listening(2), at(7)), (None, None));
+        assert_eq!(look(&mut s, Ctx { live: false, running: false, session: None }, at(8)), (None, None));
+        // the transmitter has none
+        let mut tx = Sampler::new(Role::Tx, 9500, 3.0, None);
+        assert_eq!(tx.sample(live(&d), at(9)).stats.display, None);
+        let v = serde_json::to_value(tx.blank()).unwrap();
+        assert_eq!(v["display"], Value::Null, "in the contract as null");
         fs::remove_dir_all(&d).unwrap();
     }
 

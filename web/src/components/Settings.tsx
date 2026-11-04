@@ -85,13 +85,14 @@ export const FieldError = ({ id, text }: { id?: string; text: string }) => (
 
 const impactTone = (i: Impact) => (i.level === 'warn' ? 'warn' : i.level === 'ok' ? 'ok' : 'info');
 
-export function ImpactList({ impacts, large }: { impacts: Impact[]; large?: boolean }) {
+/** `stopped`: the device is stopped (impacts on what is shown now then take effect at the next start). */
+export function ImpactList({ impacts, large, stopped }: { impacts: Impact[]; large?: boolean; stopped?: boolean }) {
   return (
     <ul className="impacts">
       {visibleImpacts(impacts).map((m) => (
         <li key={m.code} style={large ? { fontSize: 14 } : undefined}>
           <Glyph tone={impactTone(m)} />
-          <span>{impactText(m)}</span>
+          <span>{impactText(m, { stopped })}</span>
         </li>
       ))}
     </ul>
@@ -109,6 +110,7 @@ export function PendingPanel({
   doneNote,
   emptyNote,
   emptyLink,
+  stopped,
 }: {
   items: PendingItem[];
   impacts: Impact[];
@@ -119,6 +121,7 @@ export function PendingPanel({
   doneNote: string;
   emptyNote: ReactNode;
   emptyLink?: ReactNode;
+  stopped?: boolean;
 }) {
   const n = items.length;
   return (
@@ -148,7 +151,7 @@ export function PendingPanel({
             {impacts.length > 0 && (
               <>
                 <h3>適用したときの影響</h3>
-                <ImpactList impacts={impacts} />
+                <ImpactList impacts={impacts} stopped={stopped} />
               </>
             )}
             {invalid && (
@@ -205,6 +208,7 @@ export function ApplyDialog({
   applyingText,
   onCancel,
   onApply,
+  stopped,
 }: {
   items: PendingItem[];
   impacts: Impact[];
@@ -213,6 +217,7 @@ export function ApplyDialog({
   applyingText: string;
   onCancel: () => void;
   onApply: () => void;
+  stopped?: boolean;
 }) {
   return (
     <AlertDialog
@@ -255,7 +260,7 @@ export function ApplyDialog({
       {impacts.length > 0 && (
         <div style={{ padding: '16px 24px 4px' }}>
           <h3 style={{ margin: '0 0 8px', fontSize: 14, fontWeight: 600 }}>適用すると</h3>
-          <ImpactList impacts={impacts} large />
+          <ImpactList impacts={impacts} large stopped={stopped} />
         </div>
       )}
     </AlertDialog>

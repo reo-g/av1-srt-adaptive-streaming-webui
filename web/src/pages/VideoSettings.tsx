@@ -24,7 +24,7 @@ import {
   videoModeShort,
 } from '../i18n/ja';
 import { fileName, fixed1, timeOf } from '../lib/format';
-import { NotDesigned } from './Placeholders';
+import { OutputSettingsPage } from './OutputSettings';
 
 /** Form state. Numbers are kept as typed text so a half-typed value is not lost. */
 interface VDraft {
@@ -90,9 +90,8 @@ const qualityNow = (st: Stats | null, live: boolean) => {
 
 export function VideoSettingsPage() {
   const { device, status } = useLive();
-  if (device && device.role === 'rx') {
-    return <NotDesigned route="video" title="映像設定" note="受信機の映像設定（出力先や出力形式）はまだデザインしていません。" />;
-  }
+  // the receiver's: 受信機のモニター (the rest of it is not designed yet)
+  if (device && device.role === 'rx') return <OutputSettingsPage />;
   return <VideoSettingsTx statusLabel={device && status ? stateLabel(device.role, status.state) : ''} deviceId={device?.id ?? ''} peerId={status?.peer.id ?? ''} live={status?.state === 'live'} />;
 }
 

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLive } from '../api/live';
 import { FullscreenIcon, Glyph } from '../components/Glyph';
+import { useMonitorView } from '../components/Monitor';
 import { hasPicture, mediaMeta, PreviewVideo, usePreviewActive } from '../components/Preview';
 import { stateBadge, useDeviceNow } from '../components/Shell';
-import { alertLabel, alertText, previewCaption } from '../i18n/ja';
+import { alertLabel, alertText, directFailed, directFsNote, directOn, monitorFailedHint, previewCaption } from '../i18n/ja';
 import { timeOf } from '../lib/format';
 import { closeFullscreen } from '../lib/fullscreen';
 
@@ -12,12 +13,14 @@ const RECOVERED_FOR_MS = 10000;
 
 /**
  * Full-screen picture (docs/screens.md「全画面表示」): the top band hides after 3 s
- * without input, warnings and errors never hide, nothing here changes settings.
+ * without input, warnings and errors never hide, nothing here changes settings. On the receiver
+ * the preview stays closed while the picture goes to the receiver's own monitor (低遅延表示).
  */
 export function FullscreenPage() {
   const { device, status } = useLive();
   const now = useDeviceNow();
-  const active = usePreviewActive(status);
+  const monitor = useMonitorView();
+  const active = usePreviewActive(status) && monitor === 'browser';
   const [band, setBand] = useState(true);
   const [safe, setSafe] = useState(false);
   const [recovered, setRecovered] = useState(false);
@@ -96,6 +99,11 @@ export function FullscreenPage() {
         <div className="fs-frame">
           {active ? (
             <PreviewVideo role={device.role} label={tx ? '入力映像' : '受信映像'} />
+          ) : monitor === 'direct' || monitor === 'failed' ? (
+            <div className="ph none" role="status">
+              {monitor === 'direct' ? directOn : directFailed}
+              <small>{monitor === 'direct' ? directFsNote : monitorFailedHint}</small>
+            </div>
           ) : (
             <div className={picture ? 'ph' : 'ph none'}>
               {picture ? (tx ? '入力映像' : '受信映像') : tx ? '入力映像なし' : '受信映像なし'}

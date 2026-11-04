@@ -4,6 +4,7 @@ import { useLive } from '../api/live';
 import type { DeviceEvent, Metric, Role, Stats, StatsHistory, Status } from '../api/types';
 import { AlertDialog } from '../components/Dialog';
 import { Chevron, FullscreenIcon, Glyph, toneText, type Tone } from '../components/Glyph';
+import { MonitorLine, RxPicture, useMonitorView } from '../components/Monitor';
 import { mediaMeta, OpsPreview } from '../components/Preview';
 import { Shell } from '../components/Shell';
 import { Sparkline } from '../components/Sparkline';
@@ -259,6 +260,7 @@ export function OpsPage() {
   const [busy, setBusy] = useState(false);
   const [startNote, setStartNote] = useState<string | null>(null);
   const fsBtn = useRef<HTMLButtonElement>(null);
+  const monitor = useMonitorView();
 
   // Return focus to the 全画面 button after leaving the full-screen view.
   useEffect(() => {
@@ -326,11 +328,13 @@ export function OpsPage() {
                 </button>
               </div>
             </div>
-            <OpsPreview status={status} role={role} />
+            {/* rx: 低遅延表示 can send the picture to the receiver's monitor instead (no browser preview then) */}
+            {tx ? <OpsPreview status={status} role={role} /> : <RxPicture status={status} />}
             <div className="audio-line">
               <span>音声</span>
               <span>なし</span>
             </div>
+            {!tx && <MonitorLine status={status} view={monitor} />}
             <section aria-labelledby="path" className="path">
               <h2 id="path">信号経路</h2>
               <ol>

@@ -106,6 +106,7 @@ PC・タブレットのブラウザ
 | `Stats.delay_profile` / `delay_target_ms` / `TransportSettings.delay` | 遅延のプロファイル（daemon の `src/profile.rs`）。標準：送受信の `latency`（`SRTO_LATENCY`）8000 ms と再生まで 9.5 s。低遅延：約 1.5 s（標準に preset 10・先読みなし、小さなメッセージをすぐ送る、固定のビットレート、表示の待ち 400 ms と余裕の見張りを足したもの。device.toml の `[profile_low]`）。送信機は伝送を始めるときに伝送設定の遅延を使い、接続のときにストリーム ID（`SRTO_STREAMID`、`delay=low` など）で受信機に伝える。受信機は、受信プログラムが出すストリーム ID の行を見て、再生プログラムの制御の入力（`--ctl-fd`）に低遅延の行を書き、計測値をそのプロファイルに切り替える（`follows_peer: true`）。受信機の `delay_target_ms` は、再生プログラムが自分で足した待ち時間（`ts_offset_ms` の増え分）を含む |
 | `VideoOptions.auto_available` / 影響 `low_delay_fixed` | 低遅延のあいだは、保存した `encode.mode` によらず固定のビットレート（`encode.manual`）で送る（おまかせは効かない）。映像設定は書き換えない |
 | `Stats.video_latency_ms` | 受信機の実測（送信機に入った時刻と表示時刻の差）。測れるまでは `null` |
+| `OutputSettings.display` / `POST /display` / `Stats.display` | 受信機のモニター。試作の段階では、再生プログラムの制御の入力（`--ctl-fd`）に `display <mode>` を書き、再生プログラムが自分のウィンドウ（`waylandsink`）で映す。1 秒ごとの出力の `display` を `on` / `off` / `failed` にし、映せないあいだは 30 秒ごとに書き直す。デスクトップの表示の変数（`WAYLAND_DISPLAY` など）は再生プログラムにだけ渡す |
 | `Media.label` | 画面に出す名前。カメラは名前（例「Facecam 4K」）、ファイルはフォルダーを除いたファイル名。デバイスのパスは出さない |
 | `Impact reconnect_gap` / `input_switch_gap` の `gap_s` | 接続をやり直したときに受信側の映像が途切れる秒数。遅延の設定でおよそ決まる（標準で約 10 秒） |
 | `Event bitrate_changed` | エンコード制御の判断と切り替え完了の記録から。理由は損失 → `loss`、送り出しの遅れ → `delay`、上げ → `recovered`、操作 → `manual` |

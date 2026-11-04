@@ -460,6 +460,61 @@ a:hover {
   font-size: 13px;
   color: var(--sub);
 }
+/* 受信機のモニター (components/Monitor.tsx): the box while the picture goes to the receiver's monitor */
+.pv-overlay .pv-lead {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #eef1f4;
+  font-weight: 600;
+}
+.pv-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.pv-overlay .pv-actions .btn {
+  margin-top: 0;
+}
+/* 低遅延表示 under the browser preview */
+.direct-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 12px;
+}
+.direct-offer p {
+  flex: 1 1 260px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--sub);
+}
+.direct-problem {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-weight: 600;
+  color: var(--err-text);
+}
+.direct-problem svg {
+  margin-top: 6px;
+}
+.monitor-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.audio-line .monitor-state {
+  align-self: center;
+}
+/* what the receiver's video settings do not have yet, under the designed part */
+.set-todo {
+  margin: 20px 28px 0;
+}
 .audio-line {
   display: flex;
   flex-wrap: wrap;

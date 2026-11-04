@@ -103,6 +103,9 @@ pub struct Stats {
     pub stall_s_5m: Option<f64>,
     pub video_latency_ms: Option<f64>,
     pub unrecovered_5m: Option<i64>,
+    /// rx: 受信機のモニター as the current player reports it: "on" (full screen or a window), "off"
+    /// or "failed"; null on tx, while no player runs and until it has said.
+    pub display: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -286,6 +289,54 @@ pub struct NetworkStored {
     pub hops: Vec<Hop>,
 }
 
+/// 受信機のモニター (the contract's OutputDisplay): the player's own window on the receiver's
+/// desktop, which shows the picture sooner than the browser preview. Off by default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DisplayMode {
+    #[default]
+    Off,
+    Fullscreen,
+    Window,
+}
+
+impl DisplayMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            DisplayMode::Off => "off",
+            DisplayMode::Fullscreen => "fullscreen",
+            DisplayMode::Window => "window",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<DisplayMode> {
+        match s {
+            "off" => Some(DisplayMode::Off),
+            "fullscreen" => Some(DisplayMode::Fullscreen),
+            "window" => Some(DisplayMode::Window),
+            _ => None,
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        self != DisplayMode::Off
+    }
+}
+
+/// 受信機のモニター (the contract's OutputSettings, rx): applied at once, also while live (the
+/// player gets `display <mode>` on its control input; supervisor.rs).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputStored {
+    pub version: u64,
+    pub display: DisplayMode,
+}
+
+impl Default for OutputStored {
+    fn default() -> Self {
+        OutputStored { version: 1, display: DisplayMode::Off }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub video: VideoStored,
@@ -294,4 +345,18 @@ pub struct Settings {
     /// (App::network), so a change there still takes effect. Absent in an older settings.json.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkStored>,
+    /// rx: None until something is applied (version 1, off; App::output). Absent in an older
+    /// settings.json; one edited by hand that does not read is dropped (off again), the rest kept.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "lenient")]
+    pub output: Option<OutputStored>,
+}
+
+/// A member that does not read as T is left out instead of failing the whole file.
+fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = Option::<Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }

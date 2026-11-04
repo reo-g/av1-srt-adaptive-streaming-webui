@@ -30,6 +30,8 @@ pub fn defaults(cfg: &Config) -> Settings {
         },
         // device.toml's list until one is applied (network_defaults)
         network: None,
+        // rx: off, version 1, until something is applied (App::output)
+        output: None,
     }
 }
 
@@ -129,6 +131,47 @@ mod tests {
             save(&path, &s).unwrap();
             let back = load(&path).unwrap();
             assert_eq!((back.network, back.video.version), (None, 9), "{bad:?}");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn output_on_disk() {
+        use crate::model::{DisplayMode, OutputStored};
+        let dir = std::env::temp_dir().join(format!("ctrld-store-output-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let cfg = Config::parse("id = \"RX\"\nrole = \"rx\"\n[media]\nrepo = \"/m\"\n").unwrap();
+        // nothing applied yet: not written (a file from before the setting existed reads the same)
+        let mut s = defaults(&cfg);
+        save(&path, &s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(v.get("output").is_none(), "{v}");
+        assert_eq!(load(&path).unwrap().output, None);
+        // applied: kept as it is
+        for display in [DisplayMode::Fullscreen, DisplayMode::Window, DisplayMode::Off] {
+            s.output = Some(OutputStored { version: 3, display });
+            save(&path, &s).unwrap();
+            assert_eq!(load(&path), Some(s.clone()));
+        }
+        s.output = Some(OutputStored { version: 4, display: DisplayMode::Window });
+        save(&path, &s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["output"], serde_json::json!({ "version": 4, "display": "window" }));
+        // edited by hand into something that does not read: off again, the rest is kept
+        for bad in [
+            serde_json::json!({ "version": 4, "display": "on" }),
+            serde_json::json!({ "version": "4", "display": "window" }),
+            serde_json::json!({ "display": "window" }),
+            serde_json::json!("window"),
+            serde_json::Value::Null,
+        ] {
+            let mut file = serde_json::to_value(&s).unwrap();
+            file["output"] = bad.clone();
+            file["video"]["version"] = 9.into();
+            fs::write(&path, file.to_string()).unwrap();
+            let back = load(&path).unwrap();
+            assert_eq!((back.output, back.video.version), (None, 9), "{bad}");
         }
         fs::remove_dir_all(&dir).unwrap();
     }

@@ -3,14 +3,18 @@
 
 use crate::app::{base_name, App, CmdKind, Inner};
 use crate::check::{
-    apply_network, apply_transport, apply_video, check_network, check_transport, check_video, gap_s, NetworkCtx,
-    NetworkDraft, TransportCtx, TransportDraft, VideoCtx, VideoDraft, BITRATE_RANGE, CIPHERS, MODES,
+    apply_network, apply_output, apply_transport, apply_video, check_network, check_output, check_transport,
+    check_video, display_request, gap_s, NetworkCtx, NetworkDraft, OutputDraft, TransportCtx, TransportDraft, VideoCtx,
+    VideoDraft, BITRATE_RANGE, CIPHERS, MODES,
 };
 use crate::config::Role;
 use crate::events::Ev;
 use crate::history::INTERVAL_S;
 use crate::media;
-use crate::model::{DelayProfile, LimitSource, LinkState, Mode, NetworkStored, SendLimit, TransportStored, SIGNAL_FORMAT};
+use crate::model::{
+    DelayProfile, FieldError, LimitSource, LinkState, Mode, NetworkStored, OutputStored, SendLimit, TransportStored,
+    SIGNAL_FORMAT,
+};
 use crate::nettest;
 use crate::preview::{Refusal, OFFER_LIMIT};
 use crate::util::{iso_jst, now_ms};
@@ -107,6 +111,10 @@ async fn api(State(app): State<Arc<App>>, method: Method, uri: Uri, body: Result
     }
     if path == "/network-tests" || path.starts_with("/network-tests/") {
         return network_tests(&app, method.as_str(), path, &body);
+    }
+    // 受信機のモニター: what is applied reaches the player at once (the supervisor loop writes it)
+    if matches!((method.as_str(), path), ("PUT", "/settings/output") | ("POST", "/display")) {
+        return output_change(&app, method == Method::PUT, &body).await;
     }
     let command = match (method.as_str(), path) {
         ("POST", "/transport/start") => Some(CmdKind::Start),
@@ -209,6 +217,13 @@ fn request(app: &App, method: &str, path: &str, uri: &Uri, body: &Bytes) -> Resp
         }
         // 途中の無線機: both roles
         (m, p) if p == "/settings/network" || p.starts_with("/settings/network/") => network_settings(app, m, p, body),
+        // 受信機のモニター: the receiver's (a transmitter refuses all of it)
+        (m, p) if p == "/settings/output" || p.starts_with("/settings/output/") || p == "/display" => {
+            if tx {
+                return error(StatusCode::CONFLICT, "unsupported_role");
+            }
+            output_settings(app, m, p, body)
+        }
         // both roles: on rx the delay follows the transmitter (follows_peer) and is ignored in drafts
         (m, p) if p == "/settings/transport" || p.starts_with("/settings/transport/") => transport_settings(app, m, p, body),
         (m, p) if p.starts_with("/settings/") || p == "/transport/compare" => {
@@ -342,6 +357,87 @@ fn put_network(app: &App, body: &Bytes) -> Response {
     app.send(&json!({ "type": "settings", "section": "network", "version": n.version }));
     app.update_link_filter(&i);
     ok(&network_view(&n))
+}
+
+/// 受信機のモニター (rx). GET and the check; the changes are output_change.
+fn output_settings(app: &App, method: &str, path: &str, body: &Bytes) -> Response {
+    match (method, path) {
+        ("GET", "/settings/output") => ok(&output_view(&app.output(&app.lock()))),
+        ("POST", "/settings/output/check") => {
+            let Some(v) = body_json(body) else { return bad_body() };
+            let applied = app.output(&app.lock());
+            ok(&check_output(&OutputDraft::parse(&v), &applied))
+        }
+        _ => not_found(),
+    }
+}
+
+fn output_view(o: &OutputStored) -> Value {
+    json!({ "version": o.version, "display": o.display })
+}
+
+fn invalid(errors: &[FieldError]) -> Response {
+    json_response(StatusCode::BAD_REQUEST, &json!({ "error": { "code": "invalid", "errors": errors } }))
+}
+
+/// PUT /settings/output (the settings screen: a draft and its version) and POST /display (the
+/// operation screen's button 低遅延表示: the mode alone). Both store the value (allowed in every
+/// link state) and answer the new OutputSettings once the player has been given it.
+async fn output_change(app: &App, put: bool, body: &Bytes) -> Response {
+    let changed = if put { put_output(app, body) } else { post_display(app, body) };
+    match changed {
+        Ok(o) => {
+            app.command(CmdKind::Display).await;
+            ok(&output_view(&o))
+        }
+        Err(refused) => refused,
+    }
+}
+
+/// Checks in order: role → not JSON → 409 version_conflict → 400 invalid (`display`).
+fn put_output(app: &App, body: &Bytes) -> Result<OutputStored, Response> {
+    if app.cfg.role != Role::Rx {
+        return Err(error(StatusCode::CONFLICT, "unsupported_role"));
+    }
+    let Some(v) = body_json(body) else { return Err(bad_body()) };
+    let d = OutputDraft::parse(&v);
+    let mut i = app.lock();
+    let applied = app.output(&i);
+    if d.version != Some(applied.version as f64) {
+        return Err(error(StatusCode::CONFLICT, "version_conflict"));
+    }
+    let result = check_output(&d, &applied);
+    match d.display.filter(|_| result.ok) {
+        Some(to) => Ok(store_output(app, &mut i, apply_output(to, &applied))),
+        None => Err(invalid(&result.errors)),
+    }
+}
+
+/// Checks in order: role → not JSON → 400 invalid (`mode`). No version: it is an operation, like
+/// opening the preview, not a draft.
+fn post_display(app: &App, body: &Bytes) -> Result<OutputStored, Response> {
+    if app.cfg.role != Role::Rx {
+        return Err(error(StatusCode::CONFLICT, "unsupported_role"));
+    }
+    let Some(v) = body_json(body) else { return Err(bad_body()) };
+    let to = display_request(&v).map_err(|e| invalid(&e))?;
+    let mut i = app.lock();
+    let applied = app.output(&i);
+    Ok(store_output(app, &mut i, apply_output(to, &applied)))
+}
+
+/// A new monitor output: settings.json, the event, the live channel (the player gets it next).
+fn store_output(app: &App, i: &mut Inner, o: OutputStored) -> OutputStored {
+    let mut next = i.settings.clone();
+    next.output = Some(o.clone());
+    if let Err(e) = app.save_settings(&next) {
+        dlog!("settings: cannot save: {e}");
+    }
+    i.settings = next;
+    dlog!("output settings v{}: monitor output {}", o.version, o.display.name());
+    app.emit(i, Ev::info("output_settings_applied").with(json!({ "display": o.display })));
+    app.send(&json!({ "type": "settings", "section": "output", "version": o.version }));
+    o
 }
 
 /// The inputs the device offers now (read from the system, outside the state lock).
@@ -1198,6 +1294,147 @@ mod tests {
             filter_file(&dir),
             json!({ "version": 1, "role": "rx", "peer": "192.168.0.230", "video_port": 61000, "test_port": 60022, "hosts": [] })
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An app of the role with its state in a new directory, and the commands its handlers send.
+    fn output_app(name: &str, role: &str, state: LinkState) -> (Arc<App>, tokio::sync::mpsc::Receiver<crate::app::Cmd>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("ctrld-api-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = Config::parse(&format!(
+            "id = \"DEV-01\"\nrole = \"{role}\"\nrun_dir = \"{d}\"\nstate_dir = \"{d}\"\n[tx]\npeer_host = \"10.0.0.2\"\n\
+             [media]\nrepo = \"/m\"\n[preview]\nenabled = false\n",
+            d = dir.display()
+        ))
+        .unwrap();
+        let (app, cmds) = crate::app::test_app_cmds(cfg, state);
+        (app, cmds, dir)
+    }
+
+    #[tokio::test]
+    async fn output_settings_on_the_receiver() {
+        let (app, mut cmds, dir) = output_app("output-rx", "rx", LinkState::Live);
+        // the supervisor loop's part: it reads the value just stored and writes it to the player
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let (rec, app2) = (seen.clone(), app.clone());
+        tokio::spawn(async move {
+            while let Some(c) = cmds.recv().await {
+                assert!(matches!(c.kind, CmdKind::Display), "{:?}", c.kind);
+                let now = output_view(&app2.output(&app2.lock()));
+                rec.lock().unwrap().push(now);
+                let _ = c.reply.send(());
+            }
+        });
+        let sent = || seen.lock().unwrap().clone();
+        let check = |body: Value| call(&app, Method::POST, "/api/v1/settings/output/check", body.to_string());
+        let put = |body: Value| call(&app, Method::PUT, "/api/v1/settings/output", body.to_string());
+        let display = |body: Value| call(&app, Method::POST, "/api/v1/display", body.to_string());
+        let bad = |field: &str| json!({ "code": "invalid", "errors": [{ "field": field, "code": "invalid" }] });
+
+        // nothing applied yet: off, version 1
+        let (s, h, v) = call(&app, Method::GET, "/api/v1/settings/output", "").await;
+        assert_eq!((s, &h[CACHE_CONTROL]), (StatusCode::OK, &"no-store".parse::<axum::http::HeaderValue>().unwrap()));
+        assert_eq!(v, json!({ "version": 1, "display": "off" }));
+
+        // the check changes nothing
+        let (s, _, v) = check(json!({ "version": 1, "display": "fullscreen" })).await;
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(
+            v,
+            json!({ "ok": true, "errors": [], "impacts": [{ "level": "info", "code": "display_on" }, { "level": "info", "code": "display_fullscreen_covers" }] })
+        );
+        assert_eq!(check(json!({ "version": 1, "display": "off" })).await.2, json!({ "ok": true, "errors": [], "impacts": [] }));
+        assert_eq!(check(json!({ "version": 9, "display": "on" })).await.2, json!({ "ok": false, "errors": [{ "field": "display", "code": "invalid" }], "impacts": [] }));
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/settings/output/check", "not json").await;
+        assert_eq!((s, v), (StatusCode::BAD_REQUEST, json!({ "error": { "code": "invalid", "errors": [] } })));
+
+        // applying: the version first, then the value (allowed while live: no busy)
+        let (s, _, v) = put(json!({ "version": 2, "display": "on" })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "version_conflict"), "the version first");
+        let (s, _, v) = put(json!({ "display": "window" })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "version_conflict"));
+        let (s, _, v) = put(json!({ "version": 1, "display": "on" })).await;
+        assert_eq!((s, v["error"].clone()), (StatusCode::BAD_REQUEST, bad("display")));
+        let (s, _, v) = call(&app, Method::PUT, "/api/v1/settings/output", "not json").await;
+        assert_eq!((s, v), (StatusCode::BAD_REQUEST, json!({ "error": { "code": "invalid", "errors": [] } })));
+        assert!(sent().is_empty(), "nothing for the player before something is applied");
+        let mut live = app.subscribe();
+        let (s, _, v) = put(json!({ "version": 1, "display": "fullscreen" })).await;
+        assert_eq!((s, v.clone()), (StatusCode::OK, json!({ "version": 2, "display": "fullscreen" })));
+        assert_eq!(sent(), [v.clone()], "the player gets it at once");
+        assert_eq!(app.lock().link.state, LinkState::Live, "the link is not touched");
+        let ev = app.lock().events.latest(1);
+        assert_eq!((ev[0].code, ev[0].level, Value::Object(ev[0].params.clone())), ("output_settings_applied", "info", json!({ "display": "fullscreen" })));
+        let msgs: Vec<Value> = std::iter::from_fn(|| live.try_recv().ok()).map(|m| serde_json::from_str(&m).unwrap()).collect();
+        assert!(msgs.contains(&json!({ "type": "settings", "section": "output", "version": 2 })), "{msgs:?}");
+        assert_eq!(call(&app, Method::GET, "/api/v1/settings/output", "").await.2, v);
+
+        // the operation screen's button: the mode alone, the same value rules, no version
+        let (s, _, v) = display(json!({ "mode": "window" })).await;
+        assert_eq!((s, v.clone()), (StatusCode::OK, json!({ "version": 3, "display": "window" })));
+        assert_eq!(sent().last(), Some(&v));
+        for body in [json!({}), json!({ "mode": "on" }), json!({ "mode": 1 }), json!({ "mode": null }), json!({ "display": "off" })] {
+            let (s, _, v) = display(body.clone()).await;
+            assert_eq!((s, v["error"].clone()), (StatusCode::BAD_REQUEST, bad("mode")), "{body}");
+        }
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/display", "").await;
+        assert_eq!((s, v["error"].clone()), (StatusCode::BAD_REQUEST, bad("mode")), "no body");
+        let (s, _, v) = call(&app, Method::POST, "/api/v1/display", "not json").await;
+        assert_eq!((s, v), (StatusCode::BAD_REQUEST, json!({ "error": { "code": "invalid", "errors": [] } })));
+        // the same mode again: stored and given to the player again (a retry by hand)
+        let (s, _, v) = display(json!({ "mode": "window" })).await;
+        assert_eq!((s, v), (StatusCode::OK, json!({ "version": 4, "display": "window" })));
+        assert_eq!(sent().len(), 3);
+        let codes: Vec<&str> = app.lock().events.latest(3).iter().map(|e| e.code).collect();
+        assert_eq!(codes, ["output_settings_applied"; 3]);
+        // a draft of the settings screen made before the button: refused; the check still answers
+        let (s, _, v) = put(json!({ "version": 2, "display": "off" })).await;
+        assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "version_conflict"));
+        assert_eq!(check(json!({ "version": 4, "display": "off" })).await.2["impacts"], json!([{ "level": "info", "code": "display_off" }]));
+        let (s, _, v) = put(json!({ "version": 4, "display": "off" })).await;
+        assert_eq!((s, v), (StatusCode::OK, json!({ "version": 5, "display": "off" })));
+        for (m, p) in [
+            (Method::GET, "/api/v1/display"),
+            (Method::PUT, "/api/v1/display"),
+            (Method::POST, "/api/v1/settings/output"),
+            (Method::DELETE, "/api/v1/settings/output"),
+            (Method::GET, "/api/v1/settings/output/check"),
+            (Method::GET, "/api/v1/settings/output/x"),
+        ] {
+            let (s, _, v) = call(&app, m.clone(), p, "").await;
+            assert_eq!((s, code(&v)), (StatusCode::NOT_FOUND, "not_found"), "{m} {p}");
+        }
+
+        // kept across a restart; nothing else in the settings changed
+        let saved = crate::store::load(&dir.join("settings.json")).unwrap();
+        assert_eq!(serde_json::to_value(&saved.output).unwrap(), json!({ "version": 5, "display": "off" }));
+        assert_eq!((saved.transport, saved.network), (crate::store::defaults(&app.cfg).transport, None));
+        let (again, _cmds) = crate::app::test_app_cmds(app.cfg.clone(), LinkState::Stopped);
+        assert_eq!(call(&again, Method::GET, "/api/v1/settings/output", "").await.2, json!({ "version": 5, "display": "off" }));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn output_settings_on_the_transmitter() {
+        let (app, _cmds, dir) = output_app("output-tx", "tx", LinkState::Live);
+        for (m, p, body) in [
+            (Method::GET, "/api/v1/settings/output", ""),
+            (Method::POST, "/api/v1/settings/output/check", r#"{"version":1,"display":"window"}"#),
+            (Method::PUT, "/api/v1/settings/output", r#"{"version":1,"display":"window"}"#),
+            (Method::PUT, "/api/v1/settings/output", "not json"),
+            (Method::POST, "/api/v1/display", r#"{"mode":"window"}"#),
+            (Method::POST, "/api/v1/display", "not json"),
+            (Method::GET, "/api/v1/settings/output/x", ""),
+        ] {
+            let (s, _, v) = call(&app, m.clone(), p, body).await;
+            assert_eq!((s, code(&v)), (StatusCode::CONFLICT, "unsupported_role"), "{m} {p} {body}");
+        }
+        let stored = app.lock().settings.output.clone();
+        assert_eq!(stored, None);
+        assert!(app.lock().events.latest(5).is_empty());
+        let (_, _, st) = call(&app, Method::GET, "/api/v1/stats", "").await;
+        assert_eq!(st["display"], Value::Null, "the transmitter has no monitor output");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

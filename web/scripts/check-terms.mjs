@@ -12,6 +12,7 @@ const RULES = [
   /\biperf/i,
   /\bSRTO_/,
   /maxbw/i, // 送り出しの上限 (docs/terms.md); also mbpsMaxBW
+  /wayland/i, // 受信機のモニター (docs/terms.md): the desktop's display system is not named
   /\bSRT_REJ/,
   /["'](caller|listener|rendezvous)["']/i,
   /\bpassphrase_len|pbkeylen\b/i,

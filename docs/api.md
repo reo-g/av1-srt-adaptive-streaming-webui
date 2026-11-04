@@ -33,6 +33,9 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | GET | `/transport/compare` | 送信機と受信機の設定の比較（送信機） |
 | GET / PUT | `/settings/network` | 途中の無線機（送信機・受信機）：つながりの確認で確かめ、無線の回線で通信してよい機器の一覧（名前とアドレス、4 台まで） |
 | POST | `/settings/network/check` | 下書きの検証と影響 |
+| GET / PUT | `/settings/output` | 受信機のモニター（受信機）：届いた映像を、受信機につないだモニターに直接映すか（映さない／全画面／ウィンドウ） |
+| POST | `/settings/output/check` | 下書きの検証と影響 |
+| POST | `/display` | 運用画面の「低遅延表示」：受信機のモニターに映す・映し方を変える・やめる（下書きなし。受信機） |
 | POST / GET | `/network-tests` | 回線の確認を始める（つながりの確認・回線の速さ）／直近 20 件の結果（新しい順） |
 | GET | `/network-tests/{id}` | 1 件の進み具合と結果 |
 | GET | `/network-tests/options` | 回線の速さで送る量（`saturate_mbps`、6 Mbps。機器の設定で決まり、画面からは変えない）と時間の範囲（5〜30 秒） |
@@ -48,6 +51,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
    - 伝送設定：接続をやり直す（`reconnect_gap`。`gap_s` は新しい遅延の設定でおよそ決まる。低遅延なら約 2 秒）。遅延を低遅延にするときは `low_delay_effects`、映像設定がおまかせなら `low_delay_fixed` も出す（下の「遅延」）。
    - 送り出しの上限だけの変更：接続はやり直さない。保存して、次に伝送を始めたときから使う。伝送中（接続中・再接続中も）でも適用できる（`takes_effect_next_start`。いまの伝送とその再試行はこれまでの上限のまま）。ほかの項目と一緒に変えたときは、ほかの項目の決まりに従う（機器は伝送中なら `409 busy`）。
    - 途中の無線機：伝送には触れないので、いつでも（伝送中も）適用できる（`hops_changed`）。`PUT` は `ApplyResult` ではなく新しい `NetworkSettings` を返す。
+   - 受信機のモニター：伝送には触れないので、いつでも（伝送中も）適用でき、受信機はすぐに映し方を変える（`display_on` / `display_off` / `display_fullscreen_covers`）。`PUT` は新しい `OutputSettings` を返す。
 4. `409 version_conflict` なら最新の値を読み直して知らせる。`400 invalid` は check と同じ `errors` を返す。
 
 ## プレビュー
@@ -122,6 +126,18 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 
 `i` は送った一覧の中の位置（0 から）。画面は、空の欄、名前を書いた欄、使えないアドレスを、入力された値で言い分ける（機器はどれも `invalid`）。
 
+## 受信機のモニター（`/settings/output`、`/display`）
+
+受信機が、届いた映像を受信機につないだモニターに直接映す（2026-11-04 のユーザーの依頼：ブラウザのプレビューは、待ち合わせ・圧縮し直し・ブラウザの分だけ遅れる。直接なら約 0.5 秒早く、なめらかに映る）。受信機だけ。送信機は、どれも `409 unsupported_role`。
+
+- `GET /settings/output` → `OutputSettings {version, display}`。`display` は `off`（映さない。初期値、`version` 1）／ `fullscreen`（全画面。モニターには映像だけが映る）／ `window`（受信機の画面のウィンドウ）。再起動しても残る。
+- `POST /settings/output/check`（本文 `OutputSettingsInput {version, display}`）→ `CheckResult`。値が適用中と違うときだけ影響を返す：`display_on`（`fullscreen` か `window` にする）か `display_off`（`off` にする）、新しい値が `fullscreen` なら続けて `display_fullscreen_covers`（どれも info）。
+- `PUT /settings/output` → `200 OutputSettings`。調べる順：本文が JSON でない（`400 invalid`、`errors` は空）→ `version` が違う（`409 version_conflict`）→ 値が 3 つのどれでもない（`400 invalid`、`field: "display"`、`invalid`）。
+- `POST /display`（本文 `{"mode": "off" | "fullscreen" | "window"}`）→ `200 OutputSettings`。運用画面のボタン（「低遅延表示」は `window`、「全画面にする」「ウィンドウにする」、「ブラウザ表示に戻す」は `off`）。設定の下書きではなく操作なので、`version` も check もない。値が 3 つのどれでもなければ `400 invalid`（`field: "mode"`）。
+- どちらで変えても同じ値が変わる：`version` が上がり（同じ値でも。受信機はもう一度映し直す）、保存し、イベント `output_settings_applied`（`display`）と `settings`（`section: "output"`）を出す。伝送中でも、接続の状態がどれでも受け付け（`busy` はない）、受信機がすぐに映し方を変えてから応答する。受信を止めているあいだは、受信を始めたときから映す。
+- 受信機の様子は `Stats.display`：`on`（全画面かウィンドウで映している）、`off`、`failed`（映せなかった。受信機の画面にだれもログインしていないときなど）。受信を止めているあいだと、受信機がまだ知らせていないあいだは `null`。送信機は `null`。`failed` のあいだ、設定が `off` でなければ、受信機は 30 秒ごとにもう一度映してみる。
+- 画面（運用）：受信機のモニターに映している（`Stats.display` が `on`）か、設定が `off` でなく受信機がまだ知らせていないあいだは、ブラウザのプレビューを開かない（受信機で二重に復元しない、遅れを増やさない）。「低遅延表示」を押すと、先にプレビューを閉じてから `POST /display` を送る。設定画面（映像設定）は、ほかの設定と同じ下書き → 確認 → 適用の流れ。
+
 ## 遅延（`TransportSettings.delay`）
 
 送信機で「標準（約 10 秒）」か「低遅延（約 1.5 秒）」を選ぶ（`DelayProfile`：`standard` / `low`）。受信機は、つながった送信機の遅延に自動で合わせる（2026-11-04 のユーザーの依頼）。
@@ -186,6 +202,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `video_latency_ms` | — | 入力から表示までの実測。測れるまでは `null` | 映像の遅れ（実測するまでは「目安」として `delay_target_ms` を表示） |
 | `unrecovered_5m` | — | 回復できなかったパケット（直近 5 分） | 届かなかったデータ（直近 5 分） |
 | `delay_profile` / `delay_target_ms` | 使っている遅延と、その目標（例 9500 ms）。停止中は次の伝送で使う遅延 | いまの接続か最後の接続の送信機の遅延。目標には受信機が自分で足した待ち時間を含む（100 ms 単位） | 遅延の設定　標準（約 10 秒）（受信機では「送信機の設定に合わせています」を添える） |
+| `display` | `null` | 受信機のモニターの様子：`on`・`off`・`failed`。受信を止めているあいだと、まだ知らせていないあいだは `null` | 受信機のモニター　● 映しています（全画面）／○ 映していません／▲ 映せませんでした |
 
 推移（`/stats/history` の `series`）は `send_mbps`、`recv_mbps`、`target_mbps`、`actual_mbps`、`loss_pct`、`rtt_ms`、`bandwidth_mbps`、`delay_margin_s`（送信機）、`stall_s`（受信機。5 秒ごとの停止秒数）。
 
@@ -199,7 +216,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `status` | 状態が変わったとき＋1 秒ごと | `status` |
 | `stats` | 1 秒ごと | `stats` |
 | `event` | イベントが起きたとき | `event` |
-| `settings` | 設定が適用されたとき | `section`（`video` / `transport` / `network`）, `version` |
+| `settings` | 設定が適用されたとき | `section`（`video` / `transport` / `network` / `output`）, `version` |
 
 切れたら画面は 0.5 秒から 10 秒まで間隔を延ばしながらつなぎ直す。推移のグラフは 5 秒ごとに `/stats/history` を読み直す。
 
@@ -234,6 +251,9 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `hops_changed` | info | つながりの確認で確かめる機器と、無線の回線で通信してよい機器が、この内容に変わります。（途中の無線機の一覧が適用中と違うとき） |
 | `low_delay_fixed` | info | 低遅延のあいだは、おまかせは使えません。画質は固定の 3.0 Mbps で送ります（映像設定の「固定する画質」の値）。（`bitrate_mbps`。伝送設定：遅延を低遅延にし、映像設定がおまかせのとき。映像設定：低遅延のあいだにおまかせのとき） |
 | `low_delay_effects` | info | 動きの多い場面や回線が混んだときは、受信側の遅れが少しずつ増えることがあります。遅れは、回線が落ち着くと 1 分に 1 コマずつ戻ります。（伝送設定：遅延を低遅延にするとき） |
+| `display_on` | info | 受信機のモニターに、すぐに映します。（受信機のモニターを全画面かウィンドウにするとき。受信を止めているあいだは、画面が「受信を始めると、受信機のモニターに映します。」と出す） |
+| `display_off` | info | 受信機のモニターの映像を消します。（映さないにするとき。止めているあいだは「受信を始めても、受信機のモニターには映しません。」） |
+| `display_fullscreen_covers` | info | 全画面のあいだは、受信機のモニターでこの画面を見られません。ほかのパソコンやタブレットから操作してください。（全画面にするとき） |
 
 ### イベント（`DeviceEvent.code`）
 
@@ -246,11 +266,11 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `recovered` | 回線に余裕が戻ったため、画質を 2.5 → 3.0 Mbps に上げました |
 | `manual` | 画質を 3.0 → 2.5 Mbps に変更しました |
 
-ほかに `delay_margin_low`（`margin_s`）、`video_stalled`（`seconds`：その停止の長さ）、`loss_high`（`loss_pct`）、`network_test_done`（`mbps`、`direction`）、`send_limit_changed`（`mbps`、`from_mbps`、`source`：`measured` / `manual`）、`network_settings_applied`（途中の無線機を適用した。「途中の無線機の設定を適用しました」）など。
+ほかに `delay_margin_low`（`margin_s`）、`video_stalled`（`seconds`：その停止の長さ）、`loss_high`（`loss_pct`）、`network_test_done`（`mbps`、`direction`）、`send_limit_changed`（`mbps`、`from_mbps`、`source`：`measured` / `manual`）、`network_settings_applied`（途中の無線機を適用した。「途中の無線機の設定を適用しました」）、`output_settings_applied`（受信機のモニターを変えた。`display`。「受信機のモニターにウィンドウで映すようにしました」「受信機のモニターに映すのをやめました」）など。
 
 ### 入力の誤り（`FieldError.code`）
 
-`out_of_range`（`min`・`max`）、`required`、`too_short` / `too_long`（`min` / `max`）、`invalid`、`too_many`（一覧が長すぎる。`max`）、`duplicate`・`is_self`・`is_peer`（途中の無線機のアドレス。上の表）。
+`out_of_range`（`min`・`max`）、`required`、`too_short` / `too_long`（`min` / `max`）、`invalid`（受信機のモニターの `display`・`mode` も）、`too_many`（一覧が長すぎる。`max`）、`duplicate`・`is_self`・`is_peer`（途中の無線機のアドレス。上の表）。
 
 ### エラー（`ApiError.code`）の追加
 
@@ -279,5 +299,7 @@ REST の詳細は `api/openapi.yaml`、型は `web/src/api/types.ts` です。�
 | `error` | 近い無線機だけ届き、遠い無線機と相手は届かない | 接続を試す 3 秒のあと `peer_unreachable`（送信機は再接続中なので、先に停止が要る） |
 
 途中の無線機は、実際の設置の 2 台（この機器の近くの無線機が先）を `version` 1 で持ち、機器と同じ決まりで調べて保存する（モックを切り替えると元に戻る）。つながりの確認は適用中の一覧を使い、どちらの無線機もいないアドレスは届かない（0/10）。
+
+受信機のモニターは `off`（`version` 1）から始まり、機器と同じ決まりで調べて保存する（モックを切り替えると元に戻る）。`Stats.display` は、止めているあいだ `null`、映さないなら `off`、映すなら `on`。`MOCK_DISPLAY=failed` で起動すると、映すときに `failed`（受信機の画面にログインしていないときのまね）。
 
 `MOCK_LINE_FAST=1` で起動すると、回線が送る量より速い（ほぼすべて届く、`saturated: false`。画面は「6 Mbps 以上」）。送り出しの上限は初期値 5.00 Mbps から始まり、`/use` と伝送設定の適用で機器と同じように変わる（モックを切り替えると初期値に戻る）。

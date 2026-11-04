@@ -4,9 +4,13 @@
 Reads its stdin and writes one stats line per second to --stats-fd N with the keys of the
 phase-1 player hook: t, frames, fps, stalls, stall_ms, last_gap_ms, pts. The picture stops once
 for 0.43 s in its 6th second. At the end of its input it plays out for 1 s, then exits.
---ctl-fd N: control lines as ll_player.py takes them (ts-offset-ms <ms>, adapt on|off), each
-answered on stdout "[player] ctl <line> ok" (or "[player] ctl ignored: <line>"); the stats lines
-then carry "ts_offset_ms". With adapt on, the offset goes up by one frame (33.3 ms) every 5 s.
+--ctl-fd N: control lines as ll_player.py takes them (ts-offset-ms <ms>, adapt on|off,
+display off|fullscreen|window), each answered on stdout "[player] ctl <line> ok" (or "[player] ctl
+ignored: <line>"); the stats lines then carry "ts_offset_ms" and "display" (off, fullscreen,
+window, or failed). With adapt on, the offset goes up by one frame (33.3 ms) every 5 s. The monitor
+output is only pretended: "display fullscreen|window" fails while the control file
+$STUB_CTL/display_fail exists (as the real player does without a desktop to show it on); the next
+such line after it is removed succeeds.
 """
 import argparse
 import json
@@ -24,6 +28,7 @@ ap.add_argument("--no-record", action="store_true")
 ap.add_argument("--stats-fd", type=int)
 ap.add_argument("--ctl-fd", type=int)
 a, _ = ap.parse_known_args()
+CTL_DIR = os.environ.get("STUB_CTL", "/nonexistent")
 print(f"[player] start dec={a.dec} ts_offset_ms={a.ts_offset_ms} no_record={a.no_record}", flush=True)
 signal.signal(signal.SIGTERM, lambda *_: (print("[player] stopped by SIGTERM", flush=True), os._exit(0)))
 st = {"bytes": 0, "eof": False}
@@ -39,7 +44,7 @@ def reader():
 
 
 threading.Thread(target=reader, daemon=True).start()
-ctl = {"off": float(a.ts_offset_ms or 0), "adapt": False}
+ctl = {"off": float(a.ts_offset_ms or 0), "adapt": False, "display": "off"}
 
 
 def control():
@@ -50,6 +55,9 @@ def control():
                 ctl["off"] = float(w[1])
             elif len(w) == 2 and w[0] == "adapt" and w[1] in ("on", "off"):
                 ctl["adapt"] = w[1] == "on"
+            elif len(w) == 2 and w[0] == "display" and w[1] in ("off", "fullscreen", "window"):
+                fails = w[1] != "off" and os.path.exists(os.path.join(CTL_DIR, "display_fail"))
+                ctl["display"] = "failed" if fails else w[1]
             elif w:
                 print(f"[player] ctl ignored: {raw.strip()}", flush=True)
                 continue
@@ -81,6 +89,7 @@ while True:
                "stall_ms": stall_ms, "last_gap_ms": gap, "pts": round(frames / 30, 3)}
         if a.ctl_fd is not None:
             row["ts_offset_ms"] = round(ctl["off"], 1)
+            row["display"] = ctl["display"]
         fd.write(json.dumps(row) + "\n")
     if st["eof"] and end_at is None:
         end_at = time.monotonic() + 1.0

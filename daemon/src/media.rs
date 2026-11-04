@@ -7,11 +7,13 @@
 //!
 //! Pipes: tx  bridge stdout → sender stdin; the bridge's stdin is the control input.
 //!        rx  receiver fd 3 (SRT_RCV_PIPE=/dev/fd/3) → player stdin; player stats fd → daemon;
-//!            daemon → player control fd (--ctl-fd: a low-delay transmitter is followed there).
+//!            daemon → player control fd (--ctl-fd: the monitor output, and a low-delay
+//!            transmitter is followed there).
 //!
-//! Environment: a child gets only the inherited variables in PASS_ENV (plus `media.pass_env`)
-//! and then the profile's, so variables exported for experiments in the shell that started the
-//! daemon never change what the children do or which files they write.
+//! Environment: a child gets only the inherited variables in PASS_ENV (plus `media.pass_env`;
+//! the player also PLAYER_PASS_ENV, the desktop's display for its monitor output) and then the
+//! profile's, so variables exported for experiments in the shell that started the daemon never
+//! change what the children do or which files they write.
 
 use crate::config::Config;
 use crate::model::SIGNAL_FORMAT;
@@ -62,6 +64,12 @@ const PASS_ENV: &[&str] = &[
     "SVTAV1_LIB_DIR",
 ];
 
+/// The player alone also keeps the desktop's display, for its monitor output (受信機のモニター,
+/// OutputSettings.display): no other child looks for a display. When the daemon started before
+/// the desktop session it has none of them; the player then finds the display socket in
+/// XDG_RUNTIME_DIR itself.
+pub const PLAYER_PASS_ENV: &[&str] = &["WAYLAND_DISPLAY", "DISPLAY", "XAUTHORITY"];
+
 /// Without an archive a child's log is cut back to its header (environment and command line)
 /// once it passes this size (tmpfs; the sender alone writes about 0.8 MB an hour).
 pub const LOG_CAP: u64 = 16 << 20;
@@ -71,6 +79,16 @@ fn passes(name: &str, extra: &[String]) -> bool {
         Some(prefix) => name.starts_with(prefix),
         None => name == p,
     })
+}
+
+/// The names a child of this kind inherits besides PASS_ENV: `media.pass_env`, and for the
+/// player PLAYER_PASS_ENV.
+pub fn pass_names(kind: Kind, extra: &[String]) -> Vec<String> {
+    let mut names = extra.to_vec();
+    if kind == Kind::Player {
+        names.extend(PLAYER_PASS_ENV.iter().map(|n| n.to_string()));
+    }
+    names
 }
 
 /// A child's whole environment: the inherited variables that pass, then the profile's.
@@ -150,7 +168,7 @@ impl MediaBackend for Real {
         fs::create_dir_all(&s.dir)?;
         let spec = self.spec(s, kind, plan);
         let mut log = OpenOptions::new().create(true).append(true).open(s.dir.join(format!("{}.log", kind.name())))?;
-        let env = child_env(inherited(), &self.cfg.media.pass_env, &spec.env);
+        let env = child_env(inherited(), &pass_names(kind, &self.cfg.media.pass_env), &spec.env);
         // What ran, for offline analysis: the whole environment, then the command line.
         for (k, v) in &env {
             writeln!(log, "# env {k}={v}")?;
@@ -568,6 +586,32 @@ mod tests {
         let env = child_env(inherited, &["GST_DEBUG*".to_string()], &Env::new());
         assert_eq!(env["GST_DEBUG"], "3");
         assert!(!env.contains_key("LAT_LOG"));
+    }
+
+    #[test]
+    fn only_the_player_gets_the_desktops_display() {
+        let inherited = [
+            ("PATH", "/usr/bin"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("DISPLAY", ":0"),
+            ("XAUTHORITY", "/run/user/1000/.mutter-Xwaylandauth.ABC123"),
+            ("GST_DEBUG", "3"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        let extra = ["GST_DEBUG".to_string()];
+        let env = child_env(inherited.clone(), &pass_names(Kind::Player, &extra), &Env::new());
+        assert_eq!((env["WAYLAND_DISPLAY"].as_str(), env["DISPLAY"].as_str()), ("wayland-0", ":0"));
+        assert_eq!(env["XAUTHORITY"], "/run/user/1000/.mutter-Xwaylandauth.ABC123");
+        assert_eq!((env["XDG_RUNTIME_DIR"].as_str(), env["GST_DEBUG"].as_str()), ("/run/user/1000", "3"));
+        for kind in [Kind::Sender, Kind::Bridge, Kind::Receiver] {
+            let env = child_env(inherited.clone(), &pass_names(kind, &extra), &Env::new());
+            assert!(!env.contains_key("WAYLAND_DISPLAY") && !env.contains_key("DISPLAY") && !env.contains_key("XAUTHORITY"), "{kind:?}");
+            assert_eq!(env["XDG_RUNTIME_DIR"], "/run/user/1000", "{kind:?}: the runtime directory as before");
+        }
+        // a daemon started before the desktop session has none: nothing is made up
+        let env = child_env(inherited[..2].to_vec(), &pass_names(Kind::Player, &[]), &Env::new());
+        assert_eq!(env.keys().map(String::as_str).collect::<Vec<_>>(), ["PATH", "XDG_RUNTIME_DIR"]);
     }
 
     #[test]

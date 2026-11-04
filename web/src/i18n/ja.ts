@@ -16,9 +16,11 @@ import type {
   LinkState,
   NetworkTestDirection,
   NetworkTestError,
+  OutputDisplay,
   ReachabilityTarget,
   Role,
   SendLimit,
+  Stats,
   TransportMode,
   VideoEncoding,
 } from '../api/types';
@@ -146,6 +148,17 @@ export const eventText = (role: Role, e: DeviceEvent, peerId: string | null): st
     }
     case 'network_settings_applied':
       return '途中の無線機の設定を適用しました';
+    case 'output_settings_applied':
+      switch (p.display) {
+        case 'off':
+          return '受信機のモニターに映すのをやめました';
+        case 'fullscreen':
+          return '受信機のモニターに全画面で映すようにしました';
+        case 'window':
+          return '受信機のモニターにウィンドウで映すようにしました';
+        default:
+          return '受信機のモニターの設定を適用しました';
+      }
   }
 };
 
@@ -159,7 +172,11 @@ const gapText = (s: number | string | undefined) => (s === undefined ? 'しば�
 export const visibleImpacts = (list: Impact[]): Impact[] =>
   list.some((i) => i.code === 'input_switch_gap') ? list.filter((i) => i.code !== 'reconnect_gap') : list;
 
-export const impactText = (i: Impact): string => {
+/**
+ * `stopped`: the receiver is stopped, so what acts on the picture shown now (受信機のモニター) takes
+ * effect when receiving starts.
+ */
+export const impactText = (i: Impact, opts?: { stopped?: boolean }): string => {
   const p = i.params ?? {};
   switch (i.code) {
     case 'input_switch_gap':
@@ -190,6 +207,12 @@ export const impactText = (i: Impact): string => {
       return `低遅延のあいだは、おまかせは使えません。画質は固定の ${n1(p.bitrate_mbps)} Mbps で送ります（映像設定の「固定する画質」の値）。`;
     case 'low_delay_effects':
       return '動きの多い場面や回線が混んだときは、受信側の遅れが少しずつ増えることがあります。遅れは、回線が落ち着くと 1 分に 1 コマずつ戻ります。';
+    case 'display_on':
+      return opts?.stopped ? '受信を始めると、受信機のモニターに映します。' : '受信機のモニターに、すぐに映します。';
+    case 'display_off':
+      return opts?.stopped ? '受信を始めても、受信機のモニターには映しません。' : '受信機のモニターの映像を消します。';
+    case 'display_fullscreen_covers':
+      return monitorCovers;
   }
 };
 
@@ -214,6 +237,9 @@ export const fieldErrorText = (e: FieldError): string => {
       return `${n1(p.min)}〜${n1(p.max)} の数値を入力してください`;
     case 'duration_s':
       return `時間は ${p.min}〜${p.max} 秒で選んでください`;
+    case 'display':
+    case 'mode':
+      return '映し方を選んでください';
     default:
       return '入力内容を確認してください';
   }
@@ -310,6 +336,61 @@ export const previewCaption = (role: Role, live: boolean): string => {
     ? '受信機へ送っている映像を、圧縮したあとの画質で確認用に表示しています。入力より数秒遅れて映ります。'
     : '受信機が出力している映像を、確認用に表示しています。出力より少し遅れて映ります。';
 };
+
+// ---------------------------------------------------------------- 受信機のモニター (rx)
+
+/** The choices of the receiver's video settings. */
+export const displayName = (d: OutputDisplay) => ({ off: '映さない', fullscreen: '全画面で映す', window: 'ウィンドウで映す' })[d];
+export const outputHelp =
+  '受信機につないだモニターに、届いた映像をそのまま映します。ブラウザのプレビューより遅れが少なくなります（約 0.5 秒）。全画面にすると、モニターには映像だけが映ります。';
+/** What the receiver's video settings do not have yet. */
+export const outputNotDesigned = '出力形式などの設定は、まだデザインしていません。';
+export const monitorCovers =
+  '全画面のあいだは、受信機のモニターでこの画面を見られません。ほかのパソコンやタブレットから操作してください。';
+export const monitorFailedHint = '受信機の画面にログインしているか確かめてください。';
+/** The receiver asks its monitor again by itself while it could not show the picture there. */
+export const monitorRetrying = '受信機は 30 秒ごとに、もう一度映してみます。';
+
+/**
+ * 「受信機のモニター」 as the receiver reports it (Stats.display), with the way it is shown from the
+ * applied setting. Never by colour alone: the shape and the words.
+ */
+export const monitorState = (
+  reported: Stats['display'] | undefined,
+  applied: OutputDisplay | null,
+  stopped: boolean,
+): { tone: 'ok' | 'warn' | 'off' | 'na'; text: string } => {
+  switch (reported) {
+    case 'on':
+      return { tone: 'ok', text: applied === 'fullscreen' ? '映しています（全画面）' : applied === 'window' ? '映しています（ウィンドウ）' : '映しています' };
+    case 'failed':
+      return { tone: 'warn', text: '映せませんでした' };
+    case 'off':
+      return { tone: 'off', text: '映していません' };
+    default:
+      if (!applied || applied === 'off') return { tone: 'off', text: '映していません' };
+      return stopped ? { tone: 'off', text: '映していません（受信を始めると映します）' } : { tone: 'na', text: '未取得' };
+  }
+};
+
+// The operation screen's 低遅延表示: the picture goes to the receiver's monitor instead of the browser.
+export const directButton = '低遅延表示';
+export const directOffer = '受信機につないだモニターに、届いた映像を直接映します（ブラウザより約 0.5 秒早く、なめらかに映ります）';
+export const directOn = '受信機のモニターに直接映しています（低遅延表示）';
+export const directOnStopped = '受信を始めると、受信機のモニターに直接映します（低遅延表示）';
+export const directMode = (d: OutputDisplay, stopped: boolean) =>
+  d === 'fullscreen' ? (stopped ? '全画面で映します。' : '全画面で映しています。') : stopped ? 'ウィンドウで映します。' : 'ウィンドウで映しています。';
+export const directBack = 'ブラウザ表示に戻す';
+export const directToFullscreen = '全画面にする';
+export const directToWindow = 'ウィンドウにする';
+/** Before switching to full screen from the operation screen (it has no confirmation). */
+export const directCoversNote = '全画面にすると、受信機のモニターではこの画面が見えなくなります。';
+export const directFailed = '受信機のモニターに映せませんでした';
+/** Under the picture box while the picture goes to the receiver's monitor. */
+export const directCaption = '受信機のモニターに映しているあいだは、ブラウザのプレビューを止めています。';
+export const directProblem = '切り替えられませんでした。もう一度お試しください。';
+/** The browser's full-screen view while the picture goes to the receiver's monitor. */
+export const directFsNote = '低遅延表示のあいだは、ブラウザには映しません。';
 
 // ---------------------------------------------------------------- network test
 

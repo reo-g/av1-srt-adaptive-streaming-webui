@@ -10,6 +10,7 @@
  *   MOCK_PORT=8787
  *   MOCK_LINE_FAST=1           the line is faster than the line-speed test sends (result 「6 Mbps 以上」)
  *   MOCK_PEER_DELAY=low|standard  rx: the delay of the transmitter it follows (default low)
+ *   MOCK_DISPLAY=ok|failed     rx: whether the receiver can show the picture on its monitor (default ok)
  *
  * Scenarios (they imitate the real system: automatic bitrate between 1.5 and 4.0 Mbps,
  * standard delay profile of about 10 s, losses recovered by resending):
@@ -33,6 +34,10 @@
  * rules and stores them like the device (also while live; nothing else changes). つながりの確認 checks
  * the applied list.
  *
+ * 受信機のモニター (rx: GET/PUT /settings/output, the check, POST /display): off at version 1, the
+ * device's rules; applied at once in every state. The receiver reports it in Stats.display: off,
+ * on, or failed with MOCK_DISPLAY=failed (as without a desktop session), null while stopped.
+ *
  * The preview cannot be imitated: POST /preview/sessions answers 503 preview_unavailable while
  * live, so the screens show their "cannot show the preview" overlay.
  *
@@ -50,6 +55,7 @@ import type {
   DelayProfile,
   Device,
   DeviceEvent,
+  DisplayRequest,
   EventCode,
   FieldError,
   Hop,
@@ -66,6 +72,9 @@ import type {
   NetworkTestOptions,
   NetworkTestParams,
   NetworkTestRequest,
+  OutputDisplay,
+  OutputSettings,
+  OutputSettingsInput,
   Params,
   ReachabilityTarget,
   PreviewOffer,
@@ -164,6 +173,7 @@ let switchRamp: { at: number; from: number } | null = null;
 let video: VideoSettings;
 let transport: TransportSettings;
 let network: NetworkSettings;
+let output: OutputSettings;
 
 const modelT = (ms = now()) => (ms - t0) / 1000;
 
@@ -321,6 +331,7 @@ function reset() {
   };
   // What the device's configuration file lists, until the operator applies a list.
   network = { version: 1, hops: defaultHops() };
+  output = { version: 1, display: 'off' };
   lastAutoTarget = autoTarget(0);
   wasMarginLow = scenario === 'warn' && marginLowSince(0) !== null;
   lastTickT = 0;
@@ -458,6 +469,7 @@ function stats(): Stats {
       stall_s_5m: null,
       video_latency_ms: null,
       unrecovered_5m: null,
+      display: null,
     };
   const stalls = stallsIn(T - STALL_WINDOW_S, T);
   return {
@@ -475,6 +487,7 @@ function stats(): Stats {
     stall_s_5m: live ? r1(stalls.reduce((a, s) => a + s.seconds, 0)) : null,
     video_latency_ms: null, // not measured yet: the UI shows the profile target as 目安
     unrecovered_5m: live ? 0 : null,
+    display: displayReport(),
   };
 }
 
@@ -726,18 +739,20 @@ function hopsOf(input: Partial<NetworkSettingsInput>): Hop[] | null {
   }));
 }
 
+const readNetworkInput = (req: IncomingMessage) => readObject<NetworkSettingsInput>(req);
+
 /**
  * The body as the device reads it: empty → {}; not JSON → null (400 invalid without field
  * errors); JSON that is not an object (null, a string, a list) → {} (its fields are missing).
  */
-async function readNetworkInput(req: IncomingMessage): Promise<Partial<NetworkSettingsInput> | null> {
+async function readObject<T>(req: IncomingMessage): Promise<Partial<T> | null> {
   const chunks: Buffer[] = [];
   for await (const c of req) chunks.push(c as Buffer);
   const text = Buffer.concat(chunks).toString('utf8');
   if (/^[ \t\n\f\r]*$/.test(text)) return {};
   try {
     const v: unknown = JSON.parse(text);
-    return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Partial<NetworkSettingsInput>) : {};
+    return v !== null && typeof v === 'object' && !Array.isArray(v) ? (v as Partial<T>) : {};
   } catch {
     return null;
   }
@@ -766,6 +781,40 @@ function checkNetwork(input: Partial<NetworkSettingsInput>): CheckResult {
   });
   if (!sameHops(hops, network.hops)) impacts.push({ level: 'info', code: 'hops_changed' });
   return { ok: errors.length === 0, errors, impacts };
+}
+
+// ------------------------------------------------------------------ 受信機のモニター (output settings, rx)
+
+const DISPLAYS: OutputDisplay[] = ['off', 'fullscreen', 'window'];
+const DISPLAY_FAILS = process.env.MOCK_DISPLAY === 'failed';
+const displayOf = (v: unknown): OutputDisplay | null =>
+  typeof v === 'string' && (DISPLAYS as string[]).includes(v) ? (v as OutputDisplay) : null;
+
+/** What the receiver reports about its monitor: nothing while stopped (no player runs). */
+function displayReport(): Stats['display'] {
+  if (role !== 'rx' || stoppedAt !== null) return null;
+  if (output.display === 'off') return 'off';
+  return DISPLAY_FAILS ? 'failed' : 'on';
+}
+
+/** The device's rules: one field; impacts only when the value changes. */
+function checkOutput(input: Partial<OutputSettingsInput>): CheckResult {
+  const to = displayOf(input.display);
+  if (to === null) return { ok: false, errors: [{ field: 'display', code: 'invalid' }], impacts: [] };
+  const impacts: Impact[] = [];
+  if (to !== output.display) {
+    impacts.push({ level: 'info', code: to === 'off' ? 'display_off' : 'display_on' });
+    if (to === 'fullscreen') impacts.push({ level: 'info', code: 'display_fullscreen_covers' });
+  }
+  return { ok: true, errors: [], impacts };
+}
+
+/** Store a new monitor output as the device does (the version goes up also for the same value). */
+function setOutputDisplay(d: OutputDisplay): OutputSettings {
+  output = { version: output.version + 1, display: d };
+  addEvent('info', 'output_settings_applied', { display: d });
+  broadcast({ type: 'settings', section: 'output', version: output.version });
+  return output;
 }
 
 // ------------------------------------------------------------------ network test
@@ -1175,6 +1224,34 @@ const server = http.createServer(async (req, res) => {
       addEvent('info', 'network_settings_applied');
       broadcast({ type: 'settings', section: 'network', version: network.version });
       return send(res, 200, network);
+    }
+
+    // 受信機のモニター (the receiver's; allowed in every state: the picture follows at once)
+    if ((path === '/settings/output' || path.startsWith('/settings/output/') || path === '/display') && role !== 'rx')
+      return send(res, 409, { error: { code: 'unsupported_role' } });
+    if (m === 'GET' && path === '/settings/output') return send(res, 200, output);
+    if (m === 'POST' && path === '/settings/output/check') {
+      const input = await readObject<OutputSettingsInput>(req);
+      if (!input) return send(res, 400, { error: { code: 'invalid', errors: [] } });
+      return send(res, 200, checkOutput(input));
+    }
+    if (m === 'PUT' && path === '/settings/output') {
+      const input = await readObject<OutputSettingsInput>(req);
+      if (!input) return send(res, 400, { error: { code: 'invalid', errors: [] } });
+      if (input.version !== output.version) return send(res, 409, { error: { code: 'version_conflict' } });
+      const c = checkOutput(input);
+      if (!c.ok) return send(res, 400, { error: { code: 'invalid', errors: c.errors } });
+      await sleep(200); // the receiver is given the new value
+      return send(res, 200, setOutputDisplay(displayOf(input.display)!));
+    }
+    // the operation screen's 低遅延表示: no version, no draft
+    if (m === 'POST' && path === '/display') {
+      const input = await readObject<DisplayRequest>(req);
+      if (!input) return send(res, 400, { error: { code: 'invalid', errors: [] } });
+      const mode = displayOf(input.mode);
+      if (mode === null) return send(res, 400, { error: { code: 'invalid', errors: [{ field: 'mode', code: 'invalid' }] } });
+      await sleep(200);
+      return send(res, 200, setOutputDisplay(mode));
     }
 
     // network test

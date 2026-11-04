@@ -5,12 +5,16 @@ import type {
   CompareResult,
   Device,
   DeviceEvent,
+  DisplayRequest,
   NetworkSettings,
   NetworkSettingsInput,
   NetworkTest,
   NetworkTestList,
   NetworkTestOptions,
   NetworkTestRequest,
+  OutputDisplay,
+  OutputSettings,
+  OutputSettingsInput,
   PreviewOffer,
   PreviewSession,
   Stats,
@@ -90,6 +94,14 @@ export const api = {
     check: (input: NetworkSettingsInput) => req<CheckResult>('POST', '/settings/network/check', input),
     apply: (input: NetworkSettingsInput) => req<NetworkSettings>('PUT', '/settings/network', input),
   },
+  /** 受信機のモニター (rx). Applying answers the new settings; the receiver follows at once. */
+  output: {
+    get: () => req<OutputSettings>('GET', '/settings/output'),
+    check: (input: OutputSettingsInput) => req<CheckResult>('POST', '/settings/output/check', input),
+    apply: (input: OutputSettingsInput) => req<OutputSettings>('PUT', '/settings/output', input),
+  },
+  /** rx: show the picture on the receiver's monitor (低遅延表示), switch how, or stop. No draft, no version. */
+  display: (mode: OutputDisplay) => req<OutputSettings>('POST', '/display', { mode } satisfies DisplayRequest),
   networkTest: {
     start: (body: NetworkTestRequest) => req<NetworkTest>('POST', '/network-tests', body),
     list: () => req<NetworkTestList>('GET', '/network-tests'),

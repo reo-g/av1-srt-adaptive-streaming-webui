@@ -12,10 +12,13 @@
 //!     holds while a new pair starts listening. The player always starts with the standard
 //!     profile; the receiver prints the transmitter's stream id right before it accepts, and a
 //!     low-delay transmitter is followed by writing the low profile's player_ctl to the player.
+//!     The monitor output (受信機のモニター) goes to every player right after its start, and to
+//!     the current one whenever it is applied; while the player says it could not open it, it is
+//!     written again every DISPLAY_RETRY.
 
 use crate::config::Role;
 use crate::events::Ev;
-use crate::model::{params, DelayProfile, LinkState, Params, SIGNAL_FORMAT};
+use crate::model::{params, DelayProfile, DisplayMode, LinkState, Params, SIGNAL_FORMAT};
 use crate::profile::{Input, Plan};
 use crate::stats::{Obs, STALL_WINDOW_S};
 use serde_json::{json, Value};
@@ -43,7 +46,15 @@ const RX_RESPAWN: Duration = Duration::from_millis(500);
 const RX_RESPAWN_FAILED: Duration = Duration::from_secs(5);
 /// An old player may play out what it holds (about the delay) before it is stopped.
 const RX_PLAYOUT_MAX: Duration = Duration::from_secs(30);
+/// rx: while the player says it could not open the monitor output (the desktop may not be up yet,
+/// or nobody is logged in), its line is written again at most this often.
+pub const DISPLAY_RETRY: Duration = Duration::from_secs(30);
 pub const STOP_LINE: &str = r#"{"cmd":"stop"}"#;
+
+/// The player's control line for the monitor output (answered `[player] ctl display <mode> ok`).
+pub fn display_line(d: DisplayMode) -> String {
+    format!("display {}", d.name())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -138,6 +149,8 @@ pub struct Session {
     input_ok_at: Option<Instant>,
     /// rx: the profile the transmitter's stream id names (None until the receiver printed one)
     peer_delay: Option<DelayProfile>,
+    /// rx: when the monitor output was last written to the player
+    display_sent: Option<Instant>,
     term_at: Option<Instant>,
     kill_at: Option<Instant>,
 }
@@ -178,6 +191,8 @@ pub struct Machine<B: MediaBackend> {
     next_id: u64,
     backoff: usize,
     last_ack: Option<Instant>,
+    /// rx: the monitor output in effect (OutputSettings.display; set_display).
+    display: DisplayMode,
     /// Events to log and push (drained by the caller).
     pub out: Vec<Ev>,
     /// Directories of sessions whose children have all exited (drained by the caller).
@@ -208,8 +223,25 @@ impl<B: MediaBackend> Machine<B> {
             next_id: 1,
             backoff: 0,
             last_ack: None,
+            display: DisplayMode::Off,
             out: Vec::new(),
             finished: Vec::new(),
+        }
+    }
+
+    /// rx: the monitor output (OutputSettings.display), applied at once: written to the current
+    /// player if one runs (also when it is the same value: applying again is a retry by hand) and
+    /// to every player started from now on. Players playing out an earlier connection have no
+    /// control input any more and keep what they had until they exit.
+    pub fn set_display(&mut self, d: DisplayMode, now: Instant) {
+        if self.role != Role::Rx {
+            return;
+        }
+        self.display = d;
+        if let Some(s) = self.cur.as_mut().filter(|s| s.has(Kind::Player)) {
+            s.display_sent = Some(now);
+            let id = s.id;
+            self.backend.player_control(id, &display_line(d));
         }
     }
 
@@ -274,6 +306,7 @@ impl<B: MediaBackend> Machine<B> {
             evt_seen: false,
             input_ok_at: None,
             peer_delay: None,
+            display_sent: None,
             term_at: None,
             kill_at: None,
         }
@@ -532,6 +565,9 @@ impl<B: MediaBackend> Machine<B> {
             return;
         }
         s.alive.push(Kind::Player);
+        // The monitor output first (also off), before anything the transmitter's stream id brings.
+        self.backend.player_control(s.id, &display_line(self.display));
+        s.display_sent = Some(now);
         if let Err(e) = self.backend.spawn(&s, Kind::Receiver, &self.plan) {
             dlog!("session {}: receiver: {e}", s.id);
             self.backend.signal(s.id, Kind::Player, false);
@@ -693,8 +729,25 @@ impl<B: MediaBackend> Machine<B> {
             if obs.first_frames && live {
                 self.out.push(Ev::info("transport_started").with(json!({ "format": SIGNAL_FORMAT })));
             }
+            self.retry_display(obs.player_display.as_deref(), now);
         }
         self.out.append(&mut obs.events);
+    }
+
+    /// rx: the current player said it could not open the monitor output while it is on: write the
+    /// line again, at most every DISPLAY_RETRY after the last time it was written.
+    fn retry_display(&mut self, reported: Option<&str>, now: Instant) {
+        if !self.display.is_on() || reported != Some("failed") {
+            return;
+        }
+        let Some(s) = self.cur.as_mut().filter(|s| s.has(Kind::Player)) else { return };
+        if s.display_sent.is_some_and(|t| now < t + DISPLAY_RETRY) {
+            return;
+        }
+        s.display_sent = Some(now);
+        let id = s.id;
+        dlog!("session {id}: the player could not open the monitor output; asking again");
+        self.backend.player_control(id, &display_line(self.display));
     }
 }
 
@@ -1035,7 +1088,7 @@ mod tests {
         let (mut m, t0) = machine(Role::Rx);
         m.start(t0);
         assert_eq!(m.link.state, LinkState::Listening);
-        assert_eq!(calls(&mut m), ["spawn 1 player", "spawn 1 receiver"]);
+        assert_eq!(calls(&mut m), ["spawn 1 player", "player 1 display off", "spawn 1 receiver"]);
         line(&mut m, 1, Kind::Receiver, "[srt-recv] listening on :60021 (latency=8000 ms)", at(t0, 50));
         line(&mut m, 1, Kind::Receiver, "[srt-recv] accepted from 192.168.0.42:51234", at(t0, 2000));
         assert_eq!(m.link.state, LinkState::Live);
@@ -1053,7 +1106,7 @@ mod tests {
         assert_eq!(events(&mut m), ["peer_disconnected"]);
         assert_eq!(calls(&mut m), ["release 1"], "the old player is not stopped");
         m.tick(at(t0, 60_500));
-        assert_eq!(calls(&mut m), ["spawn 2 player", "spawn 2 receiver"]);
+        assert_eq!(calls(&mut m), ["spawn 2 player", "player 2 display off", "spawn 2 receiver"]);
         exit(&mut m, 1, Kind::Player, at(t0, 69_000));
         assert_eq!(m.finished.len(), 1);
         // stop: the new pair is terminated
@@ -1071,7 +1124,7 @@ mod tests {
         assert_eq!(m.link.next_try, Some(at(t0, 5100)));
         exit(&mut m, 1, Kind::Player, at(t0, 200));
         m.tick(at(t0, 5100));
-        assert_eq!(calls(&mut m), ["release 1", "spawn 2 player", "spawn 2 receiver"]);
+        assert_eq!(calls(&mut m), ["release 1", "spawn 2 player", "player 2 display off", "spawn 2 receiver"]);
         exit(&mut m, 2, Kind::Player, at(t0, 9000));
         assert_eq!(calls(&mut m), ["term 2 receiver"]);
     }
@@ -1128,13 +1181,95 @@ mod tests {
         line(&mut m, 3, Kind::Receiver, "[srt-recv] stream id delay=fast;x=1", at(t0, 71_000));
         line(&mut m, 3, Kind::Receiver, "[srt-recv] accepted from 192.168.0.42:51241", at(t0, 71_001));
         assert_eq!(m.link.delay, DelayProfile::Standard);
-        assert!(!calls(&mut m).iter().any(|c| c.starts_with("player")), "nothing for the player");
+        let to_player: Vec<String> = calls(&mut m).into_iter().filter(|c| c.starts_with("player")).collect();
+        assert_eq!(to_player, ["player 3 display off"], "nothing for the player but its monitor output");
         // a line of an old session is not followed
         line(&mut m, 2, Kind::Receiver, "[srt-recv] stream id delay=low", at(t0, 71_002));
         assert_eq!(m.link.delay, DelayProfile::Standard);
         // the stop keeps it (memory only)
         m.stop(at(t0, 80_000));
         assert_eq!(m.link.delay, DelayProfile::Standard);
+    }
+
+    #[test]
+    fn rx_players_get_the_monitor_output_first() {
+        let (mut m, t0) = machine(Role::Rx);
+        m.set_display(DisplayMode::Window, t0);
+        assert!(calls(&mut m).is_empty(), "no player yet: kept for the next one");
+        m.start(t0);
+        assert_eq!(calls(&mut m), ["spawn 1 player", "player 1 display window", "spawn 1 receiver"]);
+        // the transmitter's stream id comes later: the low-delay lines follow the monitor output
+        line(&mut m, 1, Kind::Receiver, "[srt-recv] stream id delay=low", at(t0, 2000));
+        line(&mut m, 1, Kind::Receiver, "[srt-recv] accepted from 192.168.0.42:51234", at(t0, 2001));
+        assert_eq!(calls(&mut m), ["player 1 ts-offset-ms 400", "player 1 adapt on"]);
+        // applied while live: at once, to the running player (the same value again too: a retry by hand)
+        m.set_display(DisplayMode::Fullscreen, at(t0, 5000));
+        m.set_display(DisplayMode::Fullscreen, at(t0, 6000));
+        assert_eq!(calls(&mut m), ["player 1 display fullscreen", "player 1 display fullscreen"]);
+        assert_eq!(m.link.state, LinkState::Live, "the link is not touched");
+        // the transmitter goes away: the old player plays out without control, the next one gets the value first
+        exit(&mut m, 1, Kind::Receiver, at(t0, 60_000));
+        m.set_display(DisplayMode::Off, at(t0, 60_100));
+        assert_eq!(calls(&mut m), ["release 1"], "no current player between two pairs");
+        m.tick(at(t0, 60_500));
+        assert_eq!(calls(&mut m), ["spawn 2 player", "player 2 display off", "spawn 2 receiver"]);
+        // stopped: no player, the value is kept for the next start
+        m.stop(at(t0, 70_000));
+        calls(&mut m);
+        m.set_display(DisplayMode::Window, at(t0, 70_100));
+        assert!(calls(&mut m).is_empty());
+        for (sid, k) in [(1, Kind::Player), (2, Kind::Receiver), (2, Kind::Player)] {
+            exit(&mut m, sid, k, at(t0, 70_200));
+        }
+        m.start(at(t0, 71_000));
+        assert_eq!(calls(&mut m), ["spawn 3 player", "player 3 display window", "spawn 3 receiver"]);
+
+        // the transmitter has no monitor output
+        let (mut m, t0) = machine(Role::Tx);
+        go_live(&mut m, t0);
+        calls(&mut m);
+        m.set_display(DisplayMode::Fullscreen, at(t0, 1000));
+        m.observe(Obs { player_display: Some("failed".into()), ..Obs::default() }, at(t0, 40_000));
+        assert!(calls(&mut m).is_empty());
+    }
+
+    #[test]
+    fn rx_monitor_output_is_asked_again_every_30s_while_it_fails() {
+        let (mut m, t0) = machine(Role::Rx);
+        m.set_display(DisplayMode::Fullscreen, t0);
+        m.start(t0);
+        calls(&mut m);
+        let report = |m: &mut Machine<Fake>, d: Option<&str>, ms: u64| {
+            m.observe(Obs { player_display: d.map(str::to_string), ..Obs::default() }, at(t0, ms));
+            calls(m)
+        };
+        let failed = Some("failed");
+        assert!(report(&mut m, failed, 1000).is_empty());
+        assert!(report(&mut m, failed, 29_999).is_empty(), "not before 30 s after the line at the start");
+        assert_eq!(report(&mut m, failed, 30_000), ["player 1 display fullscreen"]);
+        assert!(report(&mut m, failed, 31_000).is_empty());
+        // applied meanwhile: written at once, and the next try is 30 s after that
+        m.set_display(DisplayMode::Window, at(t0, 40_000));
+        assert_eq!(calls(&mut m), ["player 1 display window"]);
+        assert!(report(&mut m, failed, 60_000).is_empty());
+        assert_eq!(report(&mut m, failed, 70_000), ["player 1 display window"]);
+        // it opened, or the player does not say: nothing
+        assert!(report(&mut m, Some("window"), 100_000).is_empty());
+        assert!(report(&mut m, None, 101_000).is_empty());
+        assert_eq!(report(&mut m, failed, 102_000), ["player 1 display window"], "failed again later");
+        // turned off: never asked again
+        m.set_display(DisplayMode::Off, at(t0, 110_000));
+        assert_eq!(calls(&mut m), ["player 1 display off"]);
+        assert!(report(&mut m, failed, 150_000).is_empty());
+        // on again, and no current player (between two pairs): nothing until the next one starts
+        m.set_display(DisplayMode::Fullscreen, at(t0, 151_000));
+        exit(&mut m, 1, Kind::Receiver, at(t0, 152_000));
+        calls(&mut m);
+        assert!(report(&mut m, failed, 152_100).is_empty());
+        m.tick(at(t0, 152_500));
+        assert_eq!(calls(&mut m), ["spawn 2 player", "player 2 display fullscreen", "spawn 2 receiver"]);
+        assert!(report(&mut m, failed, 182_499).is_empty(), "30 s after the line at its start");
+        assert_eq!(report(&mut m, failed, 182_500), ["player 2 display fullscreen"]);
     }
 
     #[test]

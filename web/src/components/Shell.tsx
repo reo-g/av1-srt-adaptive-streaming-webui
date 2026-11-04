@@ -84,7 +84,8 @@ function Nav({ current }: { current: Route }) {
         運用
       </NavLink>
       <div className="nav-group">設定</div>
-      <NavLink route="video" current={current} count={counts.video}>
+      {/* tx: the video settings; rx: 受信機のモニター (the same page, by role) */}
+      <NavLink route="video" current={current} count={counts.video + counts.output}>
         映像
       </NavLink>
       <NavLink route="transport" current={current} count={counts.transport}>
@@ -109,8 +110,8 @@ function Nav({ current }: { current: Route }) {
 
 /**
  * Where the operator can do something about an alert, or null when there is nothing to change
- * here. The receiver's settings screens are not designed yet, and picture stops on the receiver
- * are dealt with on the transmitter, so the receiver shows no link.
+ * here. Picture stops on the receiver are dealt with on the transmitter, and the receiver's
+ * settings (受信機のモニター) fix none of its alerts, so the receiver shows no link.
  */
 function alertLink(role: Role, a: Alert): { route: Route; text: string } | null {
   if (role !== 'tx') return null;

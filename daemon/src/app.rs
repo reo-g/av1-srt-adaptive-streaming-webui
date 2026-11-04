@@ -7,8 +7,8 @@ use crate::history::History;
 use crate::link_filter::{self, LinkFilter};
 use crate::media::{self, Real};
 use crate::model::{
-    Alert, DelayProfile, Device, InputKind, LinkState, Media, Mode, NetworkStored, Peer, Settings, Stats, Status,
-    SIGNAL_FORMAT, TIMEZONE,
+    Alert, DelayProfile, Device, InputKind, LinkState, Media, Mode, NetworkStored, OutputStored, Peer, Settings, Stats,
+    Status, SIGNAL_FORMAT, TIMEZONE,
 };
 use crate::nettest::{NetTests, Server, ServerLaunch};
 use crate::preview::{self, Preview};
@@ -33,6 +33,8 @@ pub enum CmdKind {
     Start,
     Stop,
     Retry,
+    /// rx: the monitor output was applied; the state machine writes it to the player.
+    Display,
 }
 
 pub struct Cmd {
@@ -247,6 +249,11 @@ impl App {
         i.settings.network.clone().unwrap_or_else(|| store::network_defaults(&self.cfg))
     }
 
+    /// rx: 受信機のモニター as applied (off, version 1, until something is applied).
+    pub fn output(&self, i: &Inner) -> OutputStored {
+        i.settings.output.clone().unwrap_or_default()
+    }
+
     /// The peer as the radio line's filter and the network check rules see it: tx the transport
     /// settings' peer host, rx the configured transmitter, else the last one that connected.
     fn peer_source(&self, i: &Inner) -> Option<String> {
@@ -401,7 +408,13 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let nettest = NetTests::new(&cfg, Server::start(ServerLaunch::from_config(&cfg)));
     let link_filter =
         Arc::new(LinkFilter::new(Some(state_dir.join(link_filter::FILE_NAME)), cfg.role, link_filter::system_resolver));
-    let machine = Machine::new(cfg.role, backend, placeholder_plan(&cfg), sessions, now);
+    let mut machine = Machine::new(cfg.role, backend, placeholder_plan(&cfg), sessions, now);
+    if cfg.role == Role::Rx {
+        // every player started from now on gets it (and the current one whenever it is applied)
+        let display = settings.output.clone().unwrap_or_default().display;
+        dlog!("monitor output: {}", display.name());
+        machine.set_display(display, now);
+    }
     let inner = Inner {
         link: machine.link.clone(),
         stats: sampler.blank(),
@@ -498,6 +511,11 @@ async fn supervise<B: MediaBackend>(
                     }
                     CmdKind::Stop => m.stop(now),
                     CmdKind::Retry => m.retry(now),
+                    // the value just stored (a later one wins: each command reads the latest)
+                    CmdKind::Display => {
+                        let d = app.output(&app.lock()).display;
+                        m.set_display(d, now);
+                    }
                 }
                 app.sync_sampler(&m, &mut sampler);
                 publish(&app, &mut m, &mut published, &mut kept);
@@ -621,6 +639,20 @@ pub fn test_app(cfg: Config, preview: Preview, state: LinkState) -> Arc<App> {
 /// are read from the configured state_dir as at a start (the defaults when there is no file yet).
 #[cfg(test)]
 pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: NetTests) -> Arc<App> {
+    // nobody takes the commands: a handler that sends one carries on at once
+    test_app_built(cfg, preview, state, nettest, mpsc::channel(1).0)
+}
+
+/// test_app, and the commands the handlers send to the supervisor loop (the test takes them).
+#[cfg(test)]
+pub fn test_app_cmds(cfg: Config, state: LinkState) -> (Arc<App>, mpsc::Receiver<Cmd>) {
+    let (cmd, cmds) = mpsc::channel(16);
+    let nettest = NetTests::new(&cfg, Server::start(None));
+    (test_app_built(cfg, Preview::start(None), state, nettest, cmd), cmds)
+}
+
+#[cfg(test)]
+fn test_app_built(cfg: Config, preview: Preview, state: LinkState, nettest: NetTests, cmd: mpsc::Sender<Cmd>) -> Arc<App> {
     use crate::supervisor::Link;
     let now = Instant::now();
     let link = Link {
@@ -639,7 +671,6 @@ pub fn test_app_with(cfg: Config, preview: Preview, state: LinkState, nettest: N
     let stored = cfg.state_dir.as_ref().and_then(|d| store::load(&d.join("settings.json")));
     let settings = stored.unwrap_or_else(|| store::defaults(&cfg));
     let inner = Inner { link, stats: Stats::default(), history: History::default(), events: EventRing::new(0), settings };
-    let (cmd, _) = mpsc::channel(1);
     let (live, _) = broadcast::channel(16);
     // written as at a start, only into a state_dir the test chose
     let filter_path = cfg.state_dir.as_ref().map(|d| d.join(link_filter::FILE_NAME));

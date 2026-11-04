@@ -118,6 +118,13 @@ export interface Stats {
   stall_s_5m: number | null; // total seconds the picture stood still, last 5 min
   video_latency_ms: number | null; // measured capture-to-display delay; null until it is really measured
   unrecovered_5m: number | null; // packets that could not be recovered, last 5 min
+  /**
+   * 受信機のモニター as the receiver reports it (OutputSettings.display): on (full screen or a window),
+   * off, or failed (it could not show the picture there, e.g. nobody is logged in on the receiver's
+   * screen; it tries again every 30 s while the setting is on). null on tx, while the receiver is
+   * stopped and until it has said.
+   */
+  display: 'off' | 'on' | 'failed' | null;
 }
 
 export type Metric =
@@ -158,7 +165,8 @@ export type EventCode =
   | 'passphrase_changed'
   | 'network_test_done' // params: mbps (throughput_mbps, two decimals), direction (NetworkTestDirection). Only after a throughput test that finished
   | 'send_limit_changed' // tx; params: mbps, from_mbps, source (SendLimitSource: measured or manual)
-  | 'network_settings_applied'; // PUT /settings/network (途中の無線機); no params
+  | 'network_settings_applied' // PUT /settings/network (途中の無線機); no params
+  | 'output_settings_applied'; // rx; params: display (OutputDisplay). PUT /settings/output or POST /display
 
 /**
  * Why the video bitrate changed (bitrate_changed.reason).
@@ -185,12 +193,12 @@ export type LiveMessage =
   | { type: 'status'; status: Status }
   | { type: 'stats'; stats: Stats }
   | { type: 'event'; event: DeviceEvent }
-  | { type: 'settings'; section: 'video' | 'transport' | 'network'; version: number };
+  | { type: 'settings'; section: 'video' | 'transport' | 'network' | 'output'; version: number };
 
 // ---------------------------------------------------------------- shared settings types
 
 export interface FieldError {
-  /** Dotted path of the input field, list items by index from 0: "encode.manual.bitrate_mbps", "hops[1].address". */
+  /** Dotted path of the input field, list items by index from 0: "encode.manual.bitrate_mbps", "hops[1].address", "display". */
   field: string;
   code: FieldErrorCode;
   params?: Params; // min, max
@@ -232,7 +240,14 @@ export type ImpactCode =
   | 'low_delay_effects'
   // network settings: the list of devices on the way differs from the applied one. つながりの確認 and
   // what the radio line may carry follow the new list; the transmission is not touched
-  | 'hops_changed';
+  | 'hops_changed'
+  // output settings (受信機のモニター), only when the value changes. display_on: to fullscreen or window
+  // (the receiver shows the picture on its monitor at once, or from the next start while stopped);
+  // display_off: to off; display_fullscreen_covers: the new value is fullscreen (the monitor shows only
+  // the picture: this screen cannot be used there)
+  | 'display_on'
+  | 'display_off'
+  | 'display_fullscreen_covers';
 
 export interface Impact {
   level: 'warn' | 'ok' | 'info';
@@ -461,6 +476,42 @@ export interface NetworkSettings {
 export interface NetworkSettingsInput {
   version: number;
   hops: Hop[];
+}
+
+// ---------------------------------------------------------------- output settings (rx)
+
+/**
+ * 受信機のモニター: the receiver shows the picture it receives directly on the monitor attached to it,
+ * about 0.5 s sooner and smoother than the browser preview. off: not shown there; fullscreen: the
+ * monitor shows only the picture; window: in a window on the receiver's screen.
+ */
+export type OutputDisplay = 'off' | 'fullscreen' | 'window';
+
+/**
+ * GET /settings/output (rx; a transmitter answers 409 unsupported_role for everything here).
+ * Applied at once in every link state, also while live; kept across restarts.
+ */
+export interface OutputSettings {
+  version: number;
+  display: OutputDisplay; // off until something is applied
+}
+
+/**
+ * POST /settings/output/check, PUT /settings/output (answers the new OutputSettings). Field error:
+ * `display` invalid (not one of the modes). PUT: 409 version_conflict first.
+ */
+export interface OutputSettingsInput {
+  version: number;
+  display: OutputDisplay;
+}
+
+/**
+ * POST /display (rx): the operation screen's 低遅延表示 button and the buttons that go with it. An
+ * operation, not a draft: no version, no check. Sets OutputSettings.display (its version goes up, the
+ * same event as a PUT) and answers the new OutputSettings. 400 invalid (`mode`) for any other value.
+ */
+export interface DisplayRequest {
+  mode: OutputDisplay;
 }
 
 // ---------------------------------------------------------------- network test
