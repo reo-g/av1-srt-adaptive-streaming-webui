@@ -291,6 +291,7 @@ pub fn preview(cfg: &Config) -> Spec {
         ("--h264-kbps", p.h264_kbps.to_string()),
         ("--keyint", p.keyint.to_string()),
         ("--delay-ms", p.delay_ms(cfg.role).to_string()),
+        ("--max-delay-ms", p.max_delay_ms.to_string()),
         ("--max-viewers", p.max_viewers.to_string()),
         ("--idle-exit-s", p.idle_exit_s.to_string()),
     ];
@@ -412,9 +413,11 @@ mod tests {
             "--h264-kbps",
             "24000",
             "--keyint",
-            "30",
+            "120",
             "--delay-ms",
-            "800",
+            "1500",
+            "--max-delay-ms",
+            "5000",
             "--max-viewers",
             "3",
             "--idle-exit-s",
@@ -423,7 +426,9 @@ mod tests {
         assert_eq!(s.args, want);
         let mut rx = c.clone();
         rx.role = crate::config::Role::Rx;
-        assert!(preview(&rx).args.windows(2).any(|w| w == ["--delay-ms", "300"]));
+        let rx_args = preview(&rx).args;
+        assert!(rx_args.windows(2).any(|w| w == ["--delay-ms", "300"]));
+        assert!(rx_args.windows(2).any(|w| w == ["--max-delay-ms", "5000"]));
     }
 
     #[test]

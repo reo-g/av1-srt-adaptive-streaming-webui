@@ -74,8 +74,8 @@ None of these logs is shown in the UI.
   `PREVIEW_SOCK=<run_dir>/preview.sock` and the player `--preview-sock <run_dir>/preview.sock`;
   they copy the stream they send / show to that socket only while something reads it, and
   never wait for it. The preview program (`python3 -u <repo>/preview/preview_webrtc.py --sock …
-  --width --height --h265-kbps --h264-kbps --keyint --delay-ms --max-viewers --idle-exit-s`,
-  cwd `run_dir`) is started on the first preview request, not with the link, and is not part
+  --width --height --h265-kbps --h264-kbps --keyint --delay-ms --max-delay-ms --max-viewers
+  --idle-exit-s`, cwd `run_dir`) is started on the first preview request, not with the link, and is not part
   of the link's state machine: whether it runs, fails or is missing never changes the
   transmission. The daemon talks to it in JSON lines (stdin: `offer` / `close` / `quit`;
   stdout: `ready` / `answer` / `error` / `closed` / `stats`; `src/preview.rs`), waits 10 s for
@@ -89,6 +89,16 @@ None of these logs is shown in the UI.
   after 4 s, at the same time as the media programs are stopped (a second signal exits at once). The preview needs media programs that
   know the socket (an older copy of the player refuses the unknown argument): set
   `[preview] enabled = false` for one.
+  The preview favours smooth playback over delay (user decision 2026-11-04): `delay_ms` is
+  1500 on tx (the bridge's output comes in bursts and the encoder's latency varies) and 300 on
+  rx (the player already releases frames as they are shown), the program lengthens it, up to
+  `max_delay_ms` (5000), when a frame comes too late for it and does not shorten it again until
+  it is started anew, `keyint` is 120 (a new viewer and the browser's requests still get a
+  keyframe at once), and the browser is asked to hold about 1 s before showing a frame.
+  `preview.log` has every stats line; the developer log repeats one at once when the viewers or
+  the writer change, and at most once a minute when only the pacing changed (a longer
+  `delay_ms`, or `late_frames`, which the program counts per line and the daemon adds up since
+  its previous logged line).
 - Every child has its own process group and `PR_SET_PDEATHSIG=SIGTERM`; the runtime is
   single-threaded so the forking thread lives as long as the daemon. During the daemon's own
   shutdown start and retry requests are ignored.

@@ -146,11 +146,18 @@ pub struct Preview {
     /// Bitrates of the two forms the preview is offered in (the browser picks one).
     pub h265_kbps: u32,
     pub h264_kbps: u32,
-    /// Frames between keyframes of the preview.
+    /// Frames between keyframes of the preview. Long, so that a slow path (Wi-Fi, a relay) is
+    /// not hit by a keyframe burst every second; a new viewer and the browser's requests still
+    /// get a keyframe at once.
     pub keyint: u32,
     pub max_viewers: u32,
-    /// Smoothing delay before frames are shown (default 800 ms tx, 300 ms rx).
+    /// Smoothing delay before frames are shown (default 1500 ms tx, 300 ms rx). The preview
+    /// favours smooth playback over delay (user decision 2026-11-04): the bridge's output comes
+    /// in bursts and the encoder's latency varies; the player already releases frames as shown.
     pub delay_ms: Option<u32>,
+    /// The program lengthens its delay, up to this, when a frame arrives too late for it (and
+    /// does not shorten it again until it is started anew).
+    pub max_delay_ms: u32,
     /// The program exits this long after the last viewer left.
     pub idle_exit_s: u32,
     /// How long an offer may wait for the program's answer.
@@ -166,9 +173,10 @@ impl Default for Preview {
             height: 0,
             h265_kbps: 16000,
             h264_kbps: 24000,
-            keyint: 30,
+            keyint: 120,
             max_viewers: 3,
             delay_ms: None,
+            max_delay_ms: 5000,
             idle_exit_s: 30,
             answer_timeout_s: 10,
         }
@@ -178,7 +186,7 @@ impl Default for Preview {
 impl Preview {
     pub fn delay_ms(&self, role: Role) -> u32 {
         self.delay_ms.unwrap_or(match role {
-            Role::Tx => 800,
+            Role::Tx => 1500,
             Role::Rx => 300,
         })
     }
@@ -219,6 +227,9 @@ impl Config {
         }
         if c.preview.enabled && (c.preview.max_viewers == 0 || c.preview.answer_timeout_s == 0) {
             return Err("preview.max_viewers and preview.answer_timeout_s must be at least 1".into());
+        }
+        if c.preview.enabled && c.preview.max_delay_ms < c.preview.delay_ms(c.role) {
+            return Err("preview.max_delay_ms must not be less than preview.delay_ms".into());
         }
         c.media.repo = expand(&c.media.repo);
         c.media.bridge_cwd = c.media.bridge_cwd.as_deref().map(expand);
@@ -288,7 +299,7 @@ mod tests {
         assert!(c.preview.enabled);
         assert_eq!(c.preview.program, PathBuf::from("preview/preview_webrtc.py"));
         assert_eq!((c.preview.h265_kbps, c.preview.h264_kbps, c.preview.max_viewers), (16000, 24000, 3));
-        assert_eq!(c.preview.delay_ms(c.role), 800);
+        assert_eq!((c.preview.delay_ms(c.role), c.preview.max_delay_ms, c.preview.keyint), (1500, 5000, 120));
     }
 
     #[test]
@@ -297,13 +308,16 @@ mod tests {
         let c = Config::parse(base).unwrap();
         assert!(c.preview.enabled, "on by default");
         assert_eq!(c.preview.delay_ms(Role::Rx), 300);
-        assert_eq!(c.preview.delay_ms(Role::Tx), 800);
+        assert_eq!(c.preview.delay_ms(Role::Tx), 1500);
+        assert_eq!((c.preview.max_delay_ms, c.preview.keyint), (5000, 120));
         assert_eq!(c.preview_sock(), PathBuf::from("/run/c/preview.sock"));
         let c = Config::parse(&format!("{base}[preview]\ndelay_ms = 500\nmax_viewers = 1\nwidth = 1920\nheight = 1080\n")).unwrap();
         assert_eq!((c.preview.delay_ms(Role::Rx), c.preview.max_viewers, c.preview.width), (500, 1, 1920));
         assert!(Config::parse(&format!("{base}[preview]\nmax_viewers = 0\n")).is_err());
         assert!(Config::parse(&format!("{base}[preview]\nenabled = false\nmax_viewers = 0\n")).is_ok());
         assert!(Config::parse(&format!("{base}[preview]\nfps = 5\n")).is_err());
+        assert!(Config::parse(&format!("{base}[preview]\ndelay_ms = 6000\n")).unwrap_err().contains("max_delay_ms"));
+        assert!(Config::parse(&format!("{base}[preview]\ndelay_ms = 6000\nmax_delay_ms = 6000\n")).is_ok());
     }
 
     #[test]

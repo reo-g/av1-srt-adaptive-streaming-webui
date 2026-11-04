@@ -11,7 +11,9 @@
 //! The program's stdin and stdout carry JSON lines (stdout nothing else; its stderr is the log):
 //!   in:  {"cmd":"offer","id","sdp"}  {"cmd":"close","id"}  {"cmd":"quit"} (or the end of stdin)
 //!   out: {"evt":"ready"}  {"evt":"answer","id","sdp","codec"}  {"evt":"error","id","code","msg"}
-//!        {"evt":"closed","id","why"}  {"evt":"stats","viewers","in_fps","out_fps","connected"}
+//!        {"evt":"closed","id","why"}
+//!        {"evt":"stats","viewers","in_fps","out_fps","connected","late_frames","delay_ms"}
+//!        (late_frames and delay_ms, the pacing, are newer: a line without them is fine too)
 //! Ids are made here; an answer or error is matched to its offer by id. The program exits by
 //! itself a while after the last viewer left; the next offer starts it again. An offer that
 //! reached it just as it left (exit 0, not asked to) gets one more try on a new program. A
@@ -42,6 +44,9 @@ const QUIT_TERM_AFTER: Duration = Duration::from_secs(2);
 const QUIT_KILL_AFTER: Duration = Duration::from_secs(4);
 /// A ready program that writes nothing for this long (stats come every 5 s) is hung.
 const STALL_AFTER: Duration = Duration::from_secs(20);
+/// The developer log repeats a stats line whose pacing alone changed at most this often
+/// (preview.log has every line).
+const PACING_LOG_EVERY: Duration = Duration::from_secs(60);
 
 /// Why an offer got no answer (the API's error codes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,8 +226,8 @@ struct Manager {
     waiters: Vec<oneshot::Sender<()>>,
     out_tx: UnboundedSender<(u64, Out)>,
     out_rx: UnboundedReceiver<(u64, Out)>,
-    /// (viewers, writer attached) from the last stats line, for the developer log.
-    last_stats: Option<(String, bool)>,
+    /// What the developer log repeats of the stats lines.
+    stats_log: StatsLog,
 }
 
 async fn run(mut m: Manager, mut reqs: UnboundedReceiver<Req>) {
@@ -267,7 +272,7 @@ impl Manager {
             waiters: Vec::new(),
             out_tx,
             out_rx,
-            last_stats: None,
+            stats_log: StatsLog::default(),
         }
     }
 
@@ -420,7 +425,7 @@ impl Manager {
                 dlog!("preview: the program exited ({})", code.map_or("signal".into(), |c| c.to_string()));
                 let asked = self.prog.take().is_some_and(|p| p.quitting);
                 self.viewers.clear();
-                self.last_stats = None;
+                self.stats_log = StatsLog::default();
                 // It left by itself without an error (its idle time ran out) while these offers
                 // were on their way to it: they never reached it, a new program gets them once.
                 let again = !self.stopping && !asked && code == Some(0);
@@ -514,12 +519,8 @@ impl Manager {
                 }
             }
             Some("stats") => {
-                let viewers = v.get("viewers").map(Value::to_string).unwrap_or_default();
-                let connected = v.get("connected").and_then(Value::as_bool).unwrap_or(false);
-                let now_stats = Some((viewers, connected));
-                if self.last_stats != now_stats {
-                    dlog!("preview: viewers {} video {}", v["viewers"], if connected { "attached" } else { "not attached" });
-                    self.last_stats = now_stats;
+                if let Some(text) = self.stats_log.line(StatsNote::parse(&v), now) {
+                    dlog!("preview: {text}");
                 }
             }
             _ => {}
@@ -565,6 +566,71 @@ fn signal(pid: i32, sig: i32) {
         // SAFETY: signals the program's own process group (process_group(0) → pgid = pid).
         unsafe { libc::kill(-pid, sig) };
         dlog!("preview: {} sent", if sig == libc::SIGKILL { "SIGKILL" } else { "SIGTERM" });
+    }
+}
+
+/// What the developer log needs of a stats line. Fields the program does not send (an older
+/// one) are None and left out of the log.
+#[derive(Debug, Clone, PartialEq)]
+struct StatsNote {
+    viewers: String,
+    connected: bool,
+    /// The delay in use.
+    delay_ms: Option<i64>,
+    /// Frames that came too late for it since the program's previous stats line.
+    late_frames: Option<i64>,
+}
+
+impl StatsNote {
+    fn parse(v: &Value) -> StatsNote {
+        let num = |k: &str| v.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map(|x| x.round() as i64);
+        StatsNote {
+            viewers: v.get("viewers").map(Value::to_string).unwrap_or_default(),
+            connected: v.get("connected").and_then(Value::as_bool).unwrap_or(false),
+            delay_ms: num("delay_ms"),
+            late_frames: num("late_frames").map(|n| n.max(0)),
+        }
+    }
+}
+
+/// Which stats lines the developer log repeats (preview.log has them all). A change of the
+/// viewers or of the writer is logged at once. The pacing (a longer delay, frames that came
+/// late) can change at every line over a slow path, so it is logged at most every
+/// PACING_LOG_EVERY, with the late frames added up since the previous logged line: a burst
+/// between two logged lines is still counted.
+#[derive(Debug, Default)]
+struct StatsLog {
+    /// The last line written to the developer log, and when.
+    last: Option<(StatsNote, Instant)>,
+    /// Late frames reported since `last` was written, the current line included.
+    late: i64,
+}
+
+impl StatsLog {
+    /// The developer log text for this stats line, when one is due.
+    fn line(&mut self, note: StatsNote, now: Instant) -> Option<String> {
+        self.late = self.late.saturating_add(note.late_frames.unwrap_or(0));
+        let due = match &self.last {
+            None => true,
+            Some((l, at)) => {
+                (&l.viewers, l.connected) != (&note.viewers, note.connected)
+                    || ((l.delay_ms != note.delay_ms || self.late > 0)
+                        && now.saturating_duration_since(*at) >= PACING_LOG_EVERY)
+            }
+        };
+        if !due {
+            return None;
+        }
+        let mut t = format!("viewers {} video {}", note.viewers, if note.connected { "attached" } else { "not attached" });
+        if let Some(d) = note.delay_ms {
+            t += &format!(", delay {d} ms");
+        }
+        if note.late_frames.is_some() {
+            t += &format!(", late frames {} since the previous line", self.late);
+        }
+        self.late = 0;
+        self.last = Some((note, now));
+        Some(t)
     }
 }
 
@@ -801,7 +867,7 @@ mod tests {
         assert!(offered.contains(&a.id) && offered.contains(&b.id));
         // the command line the daemon builds is the one the program takes
         let args = seen(&dir)[0]["args"].clone();
-        assert!(args.to_string().contains(r#""--delay-ms","800""#), "{args}");
+        assert!(args.to_string().contains(r#""--delay-ms","1500","--max-delay-ms","5000""#), "{args}");
 
         p.close(&a.id);
         p.close("not-a-viewer");
@@ -1001,5 +1067,45 @@ mod tests {
         assert_ne!(random_id(), random_id());
         let l = log_line(r#"{"evt":"answer","id":"ab","sdp":"v=0\r\n...","codec":"h264"}"#);
         assert_eq!(l, r#"@out {"codec":"h264","evt":"answer","id":"ab"}"#);
+    }
+
+    #[test]
+    fn stats_log_lines() {
+        let parse = |s: &str| StatsNote::parse(&serde_json::from_str(s).unwrap());
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let fresh = |note: StatsNote| StatsLog::default().line(note, t0).unwrap();
+        // an older program: no pacing fields
+        let old = parse(r#"{"evt":"stats","viewers":{"h265":1,"h264":0},"in_fps":30.0,"connected":true}"#);
+        assert_eq!(fresh(old), r#"viewers {"h264":0,"h265":1} video attached"#);
+        let base = r#"{"evt":"stats","viewers":{"h265":1,"h264":0},"in_fps":30.0,"out_fps":{"h265":30.0,"h264":0.0},"connected":true"#;
+        let line = |late: &str, delay: &str| parse(&format!(r#"{base},"late_frames":{late},"delay_ms":{delay}}}"#));
+        let a = line("0", "1500");
+        assert_eq!(fresh(a.clone()), r#"viewers {"h264":0,"h265":1} video attached, delay 1500 ms, late frames 0 since the previous line"#);
+        // floats are rounded; other types and missing fields are left out
+        let f = line("3.0", "1749.6");
+        assert_eq!((f.delay_ms, f.late_frames), (Some(1750), Some(3)));
+        let odd = parse(r#"{"evt":"stats","viewers":{},"connected":false,"late_frames":"x","delay_ms":null}"#);
+        assert_eq!(fresh(odd), "viewers {} video not attached");
+
+        let mut log = StatsLog::default();
+        assert!(log.line(a.clone(), t0).is_some(), "the first line is logged");
+        assert_eq!(log.line(a.clone(), at(30)), None, "nothing changed");
+        // late frames reported between two logged lines (a burst, then calm again) are added up
+        assert_eq!(log.line(line("4", "1500"), at(35)), None, "pacing alone: not yet");
+        assert_eq!(log.line(line("2", "1500"), at(40)), None);
+        let t = log.line(a.clone(), at(60)).expect("pacing alone: once a minute, though this line has none");
+        assert!(t.ends_with("delay 1500 ms, late frames 6 since the previous line"), "{t}");
+        assert_eq!(log.line(a.clone(), at(300)), None, "counted once; nothing changed since");
+        // a longer delay alone: at most once a minute
+        assert!(log.line(line("0", "2000"), at(305)).unwrap().contains("delay 2000 ms, late frames 0"));
+        assert_eq!(log.line(line("0", "2500"), at(310)), None);
+        assert!(log.line(line("0", "2500"), at(365)).unwrap().contains("delay 2500 ms"));
+        // the viewers or the writer at once, with what was counted so far
+        assert_eq!(log.line(line("1", "2500"), at(370)), None);
+        let left = parse(r#"{"evt":"stats","viewers":{"h265":0,"h264":0},"connected":true,"late_frames":2,"delay_ms":2500}"#);
+        assert!(log.line(left, at(375)).unwrap().ends_with("late frames 3 since the previous line"), "a viewer change at once");
+        let detached = parse(r#"{"evt":"stats","viewers":{"h265":0,"h264":0},"connected":false,"late_frames":0,"delay_ms":2500}"#);
+        assert!(log.line(detached, at(380)).is_some(), "the writer at once");
     }
 }

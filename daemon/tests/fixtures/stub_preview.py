@@ -40,6 +40,7 @@ ap.add_argument("--h265-kbps", type=int, default=16000)
 ap.add_argument("--h264-kbps", type=int, default=24000)
 ap.add_argument("--keyint", type=int, default=30)
 ap.add_argument("--delay-ms", type=int, default=800)
+ap.add_argument("--max-delay-ms", type=int, default=5000)
 ap.add_argument("--max-viewers", type=int, default=3)
 ap.add_argument("--idle-exit-s", type=float, default=30)
 a = ap.parse_args()
@@ -99,7 +100,8 @@ def stats():
     n = {"h265": 0, "h264": 0}
     for c in viewers.values():
         n[c] += 1
-    emit(evt="stats", viewers=n, in_fps=30.0, out_fps={k: (30.0 if v else 0.0) for k, v in n.items()}, connected=True)
+    emit(evt="stats", viewers=n, in_fps=30.0, out_fps={k: (30.0 if v else 0.0) for k, v in n.items()}, connected=True,
+         late_frames=0, delay_ms=a.delay_ms)
 
 
 def offer(oid, sdp):

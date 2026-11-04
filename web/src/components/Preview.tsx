@@ -55,6 +55,13 @@ const ICE_WAIT_MS = 2000;
 const DISCONNECTED_MS = 5000;
 /** From the answer to the first picture. The device drops a viewer that is not connected after 15 s. */
 const FIRST_PICTURE_MS = 15000;
+/**
+ * How long the browser holds the picture before showing it, so that frames arriving unevenly
+ * (Wi-Fi, a relayed path) still play at an even pace. The browser's default is as short as
+ * possible, which stutters there. User decision 2026-11-04: the preview plays smoothly rather
+ * than early.
+ */
+const PLAYOUT_HOLD_MS = 1000;
 
 /** Resolves when candidate gathering is complete, or after `ms` with what was gathered by then. */
 function gathered(pc: RTCPeerConnection, ms: number): Promise<void> {
@@ -94,6 +101,19 @@ function preferFormats(tr: RTCRtpTransceiver) {
     tr.setCodecPreferences(codecs);
   } catch {
     /* keep the browser's order */
+  }
+}
+
+/** Ask the browser to hold the picture for PLAYOUT_HOLD_MS (where it lets us; else its default). */
+function holdPlayout(receiver: RTCRtpReceiver | undefined) {
+  if (!receiver) return;
+  // playoutDelayHint (seconds) is the older, non-standard form of jitterBufferTarget (ms).
+  const r: { jitterBufferTarget?: number | null; playoutDelayHint?: number | null } = receiver;
+  try {
+    if ('jitterBufferTarget' in r) r.jitterBufferTarget = PLAYOUT_HOLD_MS;
+    else if ('playoutDelayHint' in r) r.playoutDelayHint = PLAYOUT_HOLD_MS / 1000;
+  } catch {
+    /* the browser's default */
   }
 }
 
@@ -185,6 +205,7 @@ function usePreviewSession(video: RefObject<HTMLVideoElement | null>) {
 
     pc.ontrack = (e) => {
       if (!v || over) return;
+      holdPlayout(e.receiver); // again now that the track exists (no change if it was kept)
       v.srcObject = e.streams[0] ?? new MediaStream([e.track]);
       v.play().catch(() => undefined);
     };
@@ -201,7 +222,9 @@ function usePreviewSession(video: RefObject<HTMLVideoElement | null>) {
 
     (async () => {
       try {
-        preferFormats(pc.addTransceiver('video', { direction: 'recvonly' }));
+        const tr = pc.addTransceiver('video', { direction: 'recvonly' });
+        holdPlayout(tr.receiver);
+        preferFormats(tr);
         await pc.setLocalDescription(await pc.createOffer());
         await gathered(pc, ICE_WAIT_MS);
         const offer = pc.localDescription?.sdp;

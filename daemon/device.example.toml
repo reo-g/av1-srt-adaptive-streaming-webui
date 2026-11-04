@@ -46,9 +46,10 @@ enabled = true
 # height = 0
 # h265_kbps = 16000            # bitrates of the two forms the browser can pick from
 # h264_kbps = 24000
-# keyint = 30                  # frames between keyframes
+# keyint = 120                 # frames between keyframes (a new viewer still gets one at once)
 # max_viewers = 3
-# delay_ms = 800               # smoothing delay; default 800 (tx), 300 (rx)
+# delay_ms = 1500              # smoothing delay; default 1500 (tx), 300 (rx): smooth over early
+# max_delay_ms = 5000          # the program lengthens the delay up to this when frames come late (>= delay_ms)
 # idle_exit_s = 30             # the program exits this long after the last viewer left
 # answer_timeout_s = 10
 
